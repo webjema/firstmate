@@ -230,6 +230,7 @@ $HERDR_SECTION
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
+Before starting any work, read the project's \`CLAUDE.md\` and \`AGENTS.md\` at the repo root, and follow any imports or parent-guide pointers they reference (for example a nested example project whose \`AGENTS.md\` points to a parent \`../../AGENTS.md\`), so you understand the project's rules, conventions, and architecture first.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
 
@@ -299,7 +300,7 @@ EOF
     ;;
   *)  # no-mistakes (default)
     SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+3. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
@@ -337,7 +338,8 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b fm/$ID\`
+2. Read the project's \`CLAUDE.md\` and \`AGENTS.md\` at the repo root before starting any work, and follow any imports or parent-guide pointers they reference (for example a nested example project whose \`AGENTS.md\` points to a parent \`../../AGENTS.md\`), so you understand the project's rules, conventions, and architecture first.$SETUP2
 
 # Rules
 $RULE1

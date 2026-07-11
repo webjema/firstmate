@@ -100,6 +100,32 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# Every ship and scout brief must instruct the crewmate to read the target
+# project's CLAUDE.md and AGENTS.md before starting work, so it absorbs the
+# project's rules and architecture first.
+test_read_project_docs_instruction() {
+  local home id brief
+  home="$TMP_ROOT/read-docs-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-read-docs-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'the project'\''s `CLAUDE.md` and `AGENTS.md`' "$brief" \
+      "$kind brief missing the read-project-docs instruction"
+    assert_grep "follow any imports or parent-guide pointers they reference" "$brief" \
+      "$kind brief missing the imports/parent-guide follow instruction"
+  done
+  pass "fm-brief.sh: ship and scout briefs instruct reading project CLAUDE.md/AGENTS.md"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -265,6 +291,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_read_project_docs_instruction
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
