@@ -56,12 +56,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
+# Present for exactly as long as THIS arm process is alive; the turn-end guard
+# reads it to tell a normal watcher handoff apart from a genuinely blind turn.
+ARMING="$STATE/.watch.arming"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
+
+# Mark a re-arm as in flight for the whole life of this arm process (launch
+# until it confirms a healthy watcher and exits, or gives up and exits). The
+# turn-end guard (bin/fm-turnend-guard.sh) tolerates a FRESH marker so a normal
+# handoff - a watcher exiting to deliver a wake, its replacement not yet holding
+# the lock - does not render as a blind-turn error. The EXIT trap clears it on
+# every exit path, so a completed or killed arm never masks a real supervision
+# gap; the guard also bounds the marker's freshness against a SIGKILL orphan.
+: > "$ARMING" 2>/dev/null || true
+trap 'rm -f "$ARMING" 2>/dev/null || true' EXIT
 
 clear_stale_recorded_watcher_lock() {
   local lock_home lock_path lock_identity

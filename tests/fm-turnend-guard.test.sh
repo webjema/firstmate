@@ -228,6 +228,39 @@ test_hook_blocks_when_dead_lock_has_fresh_beacon() {
   pass "fm-turnend-guard: blocks on a dead watcher lock even when the beacon is fresh"
 }
 
+test_hook_silent_when_arming_marker_is_fresh() {
+  local dir dead out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-arming-fresh")
+  dead=$(nonexistent_pid)
+  : > "$dir/state/task1.meta"
+  record_watcher_lock "$dir" "$dead" "dead watcher identity"
+  touch "$dir/state/.last-watcher-beat"
+  # A re-arm actively in flight touches state/.watch.arming; a fresh marker is a
+  # normal handoff, not a blind turn.
+  : > "$dir/state/.watch.arming"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "hook must exit 0 while a re-arm is in flight (fresh .watch.arming)"
+  [ -z "$out" ] || fail "hook produced output despite a fresh arming marker: $out"
+  pass "fm-turnend-guard: silent no-op while a re-arm is in flight (fresh .watch.arming)"
+}
+
+test_hook_blocks_when_arming_marker_is_stale() {
+  local dir dead out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-arming-stale")
+  dead=$(nonexistent_pid)
+  : > "$dir/state/task1.meta"
+  record_watcher_lock "$dir" "$dead" "dead watcher identity"
+  touch "$dir/state/.last-watcher-beat"
+  # A stale marker means no arm is really in flight (e.g. a SIGKILL orphan); the
+  # guard must still fire so a genuinely blind turn is not masked.
+  : > "$dir/state/.watch.arming"
+  touch -t 202001010000 "$dir/state/.watch.arming"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must still block when the arming marker is stale (no real re-arm in flight)"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: blocks when the arming marker is stale"
+}
+
 test_hook_silent_with_live_lock_and_fresh_beacon() {
   local dir pid identity out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-live-lock-fresh")
@@ -892,6 +925,8 @@ test_predicate_queue_pending_flag
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
+test_hook_silent_when_arming_marker_is_fresh
+test_hook_blocks_when_arming_marker_is_stale
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary

@@ -35,6 +35,12 @@ A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 because it cannot safely read loop-guard fields.
 
+A re-arm actively in flight is not a blind turn, and the guard tolerates it explicitly.
+`bin/fm-watch-arm.sh` holds `state/.watch.arming` for as long as an arm process is alive - the startup handoff between a watcher exiting to deliver a wake and its replacement claiming the lock - and clears it on every exit path via an `EXIT` trap.
+When the health check fails but that marker is present and fresh within `FM_ARMING_GRACE` (default 30 seconds), the guard exits 0 instead of blocking, so a normal watcher handoff does not render as a turn-end error.
+The bound means a `SIGKILL`-orphaned marker cannot mask a genuinely dead watcher beyond that window, and a stale or absent marker still blocks, so a turn that ends with no re-arm in flight - the real blind-turn case - still fires.
+This tolerance lives only in the turn-end guard: `bin/fm-guard.sh`'s pull-based banner keys on beacon age alone, so it is already silent during a handoff, and `fm_watcher_healthy` itself stays a pure liveness predicate that the arm wrapper relies on to confirm its own watcher.
+
 ## Harness Integrations
 
 All verified primary harnesses have a tracked integration:
