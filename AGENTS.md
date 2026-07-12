@@ -561,6 +561,7 @@ If the active protocol's arm wrapper reports or attaches to an existing healthy 
 If it reports failure, drain queued wakes first and then repair supervision according to the emitted block.
 **No turn ends blind, holds included.**
 Never end a turn while any task is in flight without the active harness supervision protocol live: a text-only "holding" or "waiting" reply with crewmates live and no live cycle is a bug, and because such a turn runs no supervision script it is exactly the blind gap the script-only guard (`fm-guard.sh`, below) cannot catch, so this discipline must.
+This includes a turn that ends by messaging the captain or asking a decision: re-arm before that message or prompt, not after, because the turn-end guard tolerates only a re-arm already in flight, never one you still intend to start (`docs/turnend-guard.md`).
 If a forced restart is ever genuinely needed, use `bin/fm-watch-arm.sh --restart`, which signals only this home's recorded watcher and then owns a fresh cycle or reports restart-only `healthy` without attaching if a healthy peer still holds the lock.
 Never `pkill -f bin/fm-watch.sh`: that pattern matches every firstmate home's watcher, including secondmate homes that run the same script, so a broad pkill from one home kills sibling homes' watchers.
 Away-mode supervision is provided by the `/afk` skill and its daemon; while `state/.afk` exists, the daemon owns the watcher.
