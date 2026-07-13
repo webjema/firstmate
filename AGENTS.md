@@ -173,58 +173,13 @@ The captain may override the static default at any time, typically at bootstrap:
 Resolve `default` with `bin/fm-harness.sh`; resolve the active static crewmate harness with `bin/fm-harness.sh crew`.
 Verified adapter names are `claude`, `codex`, `opencode`, `pi`, and `grok`.
 
-### Crew dispatch profiles
+Crewmates may also be dispatched per task through optional profiles in `config/crew-dispatch.json`: firstmate codifies a captain's standing preference (such as "use grok for news-dependent work") into that file, and the captain may hand-edit it.
+The full dispatch-selection procedure (not-first-match judgment, `quota-balanced` via `bin/fm-dispatch-select.sh`, precedence, per-harness model/effort flags, and the `fm-spawn` no-harness refusal backstop when the file is present) lives in the `harness-adapters` skill, loaded before every spawn; the schema lives in `docs/configuration.md` ("Crew dispatch profiles").
 
-`config/crew-dispatch.json` is an optional local dispatch profile file.
-It is firstmate-maintained but human-editable.
-When the captain expresses a standing preference such as "use grok for news-dependent work", firstmate codifies it into this file; the captain may also hand-edit it.
-The file is JSON so firstmate can read the natural-language rules and bootstrap can validate it with `jq`.
-When the file is valid, bootstrap prints a concise `CREW_DISPATCH: active config/crew-dispatch.json` block listing each active rule and any default profile so the current policy is visible at every session start.
-See `docs/examples/crew-dispatch.json` for a documented starting point to copy into local `config/crew-dispatch.json`.
+Secondmates run through their own knob, `config/secondmate-harness` (local, gitignored), and can use a different adapter than crewmates.
+Its fallback chain (`config/secondmate-harness` -> `config/crew-harness` -> your own), its optional one-line model/effort pin, and which config files are inherited into secondmate homes are owned by the `harness-adapters` skill; `secondmate-provisioning` owns config propagation and `bin/fm-config-push.sh`.
 
-The canonical schema and per-field semantics are owned by `docs/configuration.md` ("Crew dispatch profiles"); read them there before writing or editing the file.
-
-When `config/crew-dispatch.json` is present, read it during intake before every crewmate or scout dispatch.
-Pick the single best-fit rule using your own judgment.
-This is explicitly not first-match: weigh all rules, their `when` text, and their `why` rationales against the actual task.
-For a chosen rule with a single-object `use`, or an array `use` with no `select`, resolve the first profile directly.
-For a chosen rule with `select: "quota-balanced"`, pipe the full rule JSON to `bin/fm-dispatch-select.sh` and use the compact JSON profile it prints.
-Extract that chosen concrete profile `(harness, model, effort)` and pass it to `bin/fm-spawn.sh` with explicit `--harness`, `--model`, and `--effort` flags for the axes that are set.
-If no rule fits, use `default`.
-If `default` is absent, fall back to `config/crew-harness` through `bin/fm-harness.sh crew`, exactly as the static path did before dispatch profiles, but still pass that resolved harness explicitly.
-This is enforced: when `config/crew-dispatch.json` exists, `bin/fm-spawn.sh` refuses crewmate and scout launches that do not include an explicit harness (`--harness <name>`, a positional adapter name, or a raw launch command).
-That refusal is the consultation backstop, so the rules are never silently skipped.
-The requirement is gated only on the file's presence; when the file is absent, `fm-spawn.sh` keeps resolving the crewmate harness from `config/crew-harness` as before.
-Secondmate launches are exempt because they resolve through `fm-harness.sh secondmate`, not the crewmate dispatch-profile rules.
-
-`quota-balanced` selection is deterministic and owned by `bin/fm-dispatch-select.sh`; its header documents the general-window rules, freshness margin, and every fallback, and it degrades to the first array element whenever quota data is unusable.
-Quota trouble must never block dispatch.
-
-Precedence, highest first:
-
-1. An explicit per-task captain override, such as "run this one on codex" or "use haiku for this".
-2. firstmate's best-fit rule from `config/crew-dispatch.json`.
-3. The dispatch file's `default` profile.
-4. `config/crew-harness`.
-
-Never select an unverified harness.
-Validate every selected harness name against the verified adapter list above.
-If a dispatch rule or default names an unverified harness, ignore that profile, fall back to the next valid source, and note the problem when it affects the dispatch.
-The shell scripts never parse or match the natural-language rules; firstmate does the matching and passes only concrete flags to `fm-spawn`.
-
-Per-harness model/effort flags: `harness-adapters` (loaded before every spawn per section 4's closing trigger).
-
-Secondmates can run on a different harness than crewmates.
-`config/secondmate-harness` (local, gitignored) is the harness the primary uses to launch SECONDMATE agents; resolve it with `bin/fm-harness.sh secondmate`, which follows the fallback chain `config/secondmate-harness` -> `config/crew-harness` -> your own harness.
-An explicit per-spawn harness still overrides either kind, and every secondmate respawn re-resolves from the file, so the split is durable across restarts without being recorded per-task.
-
-`config/secondmate-harness` can also pin a model/effort for the secondmate agent in one line (`<harness> [<model>] [<effort>]`); format, accessors, and inheritance exceptions live in `secondmate-provisioning` (load before creating/seeding/launching/recovering a secondmate).
-
-`config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` are inherited into every secondmate home; `config/secondmate-harness` is not, because secondmates never spawn secondmates.
-`secondmate-provisioning` owns the propagation timing, mechanism, the literal-file inheritance nuance, and `bin/fm-config-push.sh`.
-
-Each adapter splits into mechanics and knowledge.
-The per-task mechanics (launch command, autonomy flag, crewmate turn-end hook) live in `bin/fm-spawn.sh`; the primary-session turn-end guard lives in `docs/turnend-guard.md`; the knowledge you need while supervising (busy signature, exit, interrupt, dialogs, quirks, skill invocation, resume) lives in the agent-only `harness-adapters` skill.
+Each adapter's per-task mechanics live in `bin/fm-spawn.sh` (and the primary turn-end guard in `docs/turnend-guard.md`); the supervising knowledge (busy signature, exit, interrupt, dialogs, quirks, skill invocation, resume) lives in the agent-only `harness-adapters` skill.
 **Never dispatch a crewmate or secondmate on an unverified adapter.**
 If `config/crew-harness` or `config/secondmate-harness` names an unverified one, tell the captain and fall back to your own harness until it is verified.
 If the captain asks for a new harness, load `harness-adapters`, verify it empirically with a trivial supervised task, then commit the script and knowledge changes.
@@ -769,20 +724,10 @@ These skills are not captain-invocable; they are conditional operating reference
 ## 14. X mode
 
 X mode lets a firstmate instance answer public mentions routed through the shared `@myfirstmate` relay, and act on actionable mention requests, in firstmate's own voice, from its live fleet state.
-It ships inside this repo for every user but is **inert until opted in**, so a user who never enables it sees zero behavior change.
+It ships for every user but is **inert until opted in**, so a user who never enables it sees zero behavior change.
 
-**Activation is `.env` presence, not a command.**
-Put one value, `FMX_PAIRING_TOKEN`, into a `.env` file at this home's root (`.env` is gitignored).
-That token is the whole consent, including standing authorization for normal reversible lifecycle actions from mention requests, and the only required config; the relay derives the tenant from it.
-It is not consent for destructive, irreversible, or security-sensitive actions; those still require trusted-channel confirmation first.
-`FMX_RELAY_URL` is optional and defaults to `https://myfirstmate.io`; only a developer pointing at a local relay sets it.
-
-**Mechanism and cadence.**
-Bootstrap wires the relay poll automatically and purely additively from `.env` presence; `docs/configuration.md` "X mode (.env)" owns the generated-artifact mechanism, the wire protocol, the poll cadence and its transition handling, and the watcher-backbone non-interference guarantee.
-X mode is a reason to keep the watcher armed even with no fleet work, so an X-only user is still served.
-
-**Answering.**
-On an `x-mention <request_id>` or `x-mode-error ...` `check:` wake, load `fmx-respond` (section 13).
-It owns mention classification, acting on the request, reply composition, voice, thread-splitting, image attachments, dry-run preview, and the completion-follow-up procedure in full, including what an `x-mode-error` wake means instead.
-`docs/configuration.md` "X mode (.env)" has the wire-protocol reference.
+Activation is `.env` presence, not a command: put `FMX_PAIRING_TOKEN` into a gitignored `.env` at this home's root.
+That token is the whole consent, including standing authorization for normal reversible lifecycle actions from mention requests; it is not consent for destructive, irreversible, or security-sensitive actions, which still require trusted-channel confirmation first.
+Bootstrap then wires the relay poll automatically and additively, and X mode is a reason to keep the watcher armed even with no fleet work.
+The full mechanism, wire protocol, poll cadence, and the optional `FMX_RELAY_URL` override are owned by `docs/configuration.md` ("X mode (.env)"); mention classification, acting on the request, reply composition, and follow-ups are owned by the `fmx-respond` skill, loaded on an `x-mention <request_id>` or `x-mode-error ...` `check:` wake (section 13).
 The one fact that must survive here because it fires on a generic terminal wake, not the mention wake itself: when an X-mode-linked task reaches a terminal state, post its final completion follow-up per section 8's wake-handling step before tearing down.

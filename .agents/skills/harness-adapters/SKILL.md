@@ -24,6 +24,28 @@ Inheritance copies the literal `config/crew-harness` file, so for a secondmate's
 If `config/crew-harness` is unset or `default`, there is no concrete value to inherit, so the secondmate's own crewmates fall back to the secondmate's own/detected harness rather than the primary's effective crewmate harness.
 Inheritance also copies the literal `config/crew-dispatch.json` file, so secondmates apply the same best-fit profile rules for their own crewmates.
 
+## Crew dispatch profiles
+
+`config/crew-dispatch.json` is optional, firstmate-maintained but human-editable: natural-language rules that choose a per-task harness/model/effort profile.
+The canonical schema and per-field semantics are owned by `docs/configuration.md` ("Crew dispatch profiles"); read them there before writing or editing the file, and see `docs/examples/crew-dispatch.json` for a starting point.
+When the file is valid, bootstrap prints a `CREW_DISPATCH: active config/crew-dispatch.json` block listing each active rule and any default profile.
+
+When the file is present, read it during intake before every crewmate or scout dispatch and pick the single best-fit rule by judgment.
+This is explicitly not first-match: weigh all rules, their `when` text, and their `why` rationales against the actual task.
+- For a chosen rule with a single-object `use`, or an array `use` with no `select`, resolve the first profile directly.
+- For a chosen rule with `select: "quota-balanced"`, pipe the full rule JSON to `bin/fm-dispatch-select.sh` and use the compact JSON profile it prints; that selection is deterministic and owned by the script header, degrades to the first array element whenever quota data is unusable, and quota trouble must never block dispatch.
+Extract the chosen concrete `(harness, model, effort)` and pass it to `bin/fm-spawn.sh` with explicit `--harness`, `--model`, and `--effort` flags for the axes that are set.
+If no rule fits, use the file's `default`; if `default` is absent, fall back to `config/crew-harness` through `bin/fm-harness.sh crew`, still passing that resolved harness explicitly.
+
+Enforcement backstop: when `config/crew-dispatch.json` exists, `bin/fm-spawn.sh` refuses crewmate and scout launches that do not include an explicit harness, so the rules are never silently skipped; when the file is absent, `fm-spawn` keeps resolving the crew harness from `config/crew-harness` as before.
+Secondmate launches are exempt because they resolve through `fm-harness.sh secondmate`.
+
+Precedence, highest first: (1) an explicit per-task captain override ("run this one on codex", "use haiku for this"); (2) firstmate's best-fit rule from `config/crew-dispatch.json`; (3) the file's `default` profile; (4) `config/crew-harness`.
+Validate every selected harness name against the verified adapter list; if a rule or default names an unverified harness, ignore that profile, fall back to the next valid source, and note the problem when it affects the dispatch.
+The shell scripts never parse the natural-language rules; firstmate does the matching and passes only concrete flags to `fm-spawn`.
+
+`config/secondmate-harness` can also pin a model/effort for the secondmate agent in one line (`<harness> [<model>] [<effort>]`); format, accessors, and inheritance exceptions live in `secondmate-provisioning`.
+
 Each adapter splits into mechanics and knowledge.
 The per-task mechanics, including launch command, autonomy flag, and crewmate turn-end hook, live in `bin/fm-spawn.sh`.
 The primary-session "no turn ends blind" guard contract and harness hook installation paths live in `docs/turnend-guard.md`.
