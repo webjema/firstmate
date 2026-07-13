@@ -15,10 +15,6 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 make_fakebin() {  # <dir>
   local fb
   fb=$(fm_fakebin "$1")
-  cat > "$fb/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -49,7 +45,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux"
+  chmod +x "$fb/tmux"
   printf '%s\n' "$fb"
 }
 
@@ -106,10 +102,9 @@ EOF
     "home=$home/secondmate-home" \
     "projects=alpha, beta, gamma, "
   printf 'working: watching delegated scope\n' > "$home/state/secondmate-task.status"
-  fm_write_meta "$home/state/cmux-task.meta" \
-    "backend=cmux" \
+  fm_write_meta "$home/state/missing-files-task.meta" \
     "window=workspace:surface" \
-    "worktree=$home/projects/missing-cmux" \
+    "worktree=$home/projects/missing-worktree" \
     "project=alpha" \
     "harness=codex" \
     "kind=ship" \
@@ -135,7 +130,7 @@ test_fixture_snapshot_json() {
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e . >/dev/null || fail "snapshot must be valid JSON"
   ids=$(printf '%s' "$out" | jq -r '.tasks | map(.id) | join(",")')
-  [ "$ids" = "cmux-task,scout-task,secondmate-task,ship-task" ] \
+  [ "$ids" = "missing-files-task,scout-task,secondmate-task,ship-task" ] \
     || fail "task ordering must be stable by id, got $ids"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "ship-task")
@@ -158,8 +153,8 @@ test_fixture_snapshot_json() {
       and (.actions.watch | contains("do not routinely fm-peek"))
   ' >/dev/null || fail "secondmate return-channel guidance missing"
   printf '%s' "$out" | jq -e '
-    .tasks[] | select(.id == "cmux-task")
-    | .backend == "cmux"
+    .tasks[] | select(.id == "missing-files-task")
+    | .backend == "tmux"
       and .paths.worktree.present == false
       and .current_state.state == "unknown"
   ' >/dev/null || fail "cmux missing-file row missing"
@@ -217,7 +212,7 @@ test_event_hints_follow_reconciled_current_state() {
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     def task($id): (.tasks[] | select(.id == $id));
-    task("active-decision").current_state.state == "parked"
+    task("active-decision").current_state.state == "needs-decision"
       and task("active-decision").hints.pending_decision == true
       and task("active-blocked").current_state.state == "blocked"
       and task("active-blocked").hints.blocked_event == true

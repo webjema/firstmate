@@ -6,15 +6,15 @@
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest
 #   - the lock-refusal read-only path: banner leads, every mutating step is
-#     skipped (including bootstrap's four mutating sweeps, verified by their
+#     skipped (including bootstrap's three mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
 #   - output section ordering: diagnostics/banners lead, bulk file dumps follow
-#   - context-aware next-step guidance for read-only, AFK, X mode, and normal
-#     watcher ownership
+#   - context-aware next-step guidance for read-only, AFK, and normal watcher
+#     ownership
+#   - per-project direction files in the context digest, present and ABSENT
 #   - status-tail bounding, default and FM_SESSION_START_STATUS_TAIL override
 #   - orphan status logs whose task meta has already disappeared
-#   - per-task endpoint-liveness lines for a live and a dead recorded target,
-#     tmux and herdr both
+#   - per-task endpoint-liveness lines for a live and a dead recorded target
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -68,15 +68,6 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.31.2 (fake) 2026-06-27T00:02:18Z'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/no-mistakes"
   printf '%s\n' manual > "${fakebin%/*}/home-placeholder" 2>/dev/null || true
 }
 
@@ -164,24 +155,6 @@ esac
 exit 1
 SH
   chmod +x "$fakebin/tmux"
-}
-
-# make_fake_herdr <fakebin> <live-pane>: `herdr pane get <pane>` succeeds only
-# for the given pane id - the exact primitive fm_backend_target_exists uses
-# for a herdr endpoint liveness read. No version/server-start calls: a
-# liveness check must never auto-start a server (fm-backend.sh's contract).
-make_fake_herdr() {
-  local fakebin=$1 live=$2
-  cat > "$fakebin/herdr" <<SH
-#!/usr/bin/env bash
-set -u
-if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
-  [ "\${3:-}" = "$live" ] && exit 0
-  exit 1
-fi
-exit 1
-SH
-  chmod +x "$fakebin/herdr"
 }
 
 # run_session_start <home> <root> <path>
@@ -380,48 +353,6 @@ EOF
   pass "digest sections are ordered diagnostics-first, bulk-context-last"
 }
 
-test_herdr_backend_diagnostics_follow_real_session_start() {
-  local mode rec root home fakebin mask out
-  for mode in configured autodetected; do
-    rec=$(new_world "herdr-$mode")
-    IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-    make_fake_toolchain "$fakebin"
-    make_fake_ps_claude "$fakebin"
-    rm -f "$fakebin/tmux"
-    fm_fake_exit0 "$fakebin" herdr jq
-    printf '%s\n' manual > "$home/config/backlog-backend"
-    mask="$home/mask-tmux.bash"
-    cat > "$mask" <<'SH'
-command() {
-  if [ "${1:-}" = -v ] && [ "${2:-}" = tmux ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-SH
-    if [ "$mode" = configured ]; then
-      printf '%s\n' herdr > "$home/config/backend"
-      out=$(TMUX='' HERDR_ENV='' BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-      assert_not_contains "$out" "NOTICE: auto-detected herdr runtime" \
-        "an explicit Herdr home should not be reported as auto-detected"
-    else
-      out=$(TMUX='' HERDR_ENV=1 BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-      assert_contains "$out" "NOTICE: auto-detected herdr runtime (HERDR_ENV=1)" \
-        "session start did not preserve the Herdr runtime auto-detection fallback"
-    fi
-    assert_contains "$out" "SESSION START - $home" "the real session-start path did not run in the throwaway home"
-    assert_not_contains "$out" "MISSING: tmux" "Herdr session start falsely required masked tmux"
-    assert_not_contains "$out" "MISSING: herdr" "Herdr session start missed its available session CLI"
-    assert_not_contains "$out" "MISSING: jq" "Herdr session start missed its available JSON dependency"
-    assert_not_contains "$out" "MISSING: treehouse" "Herdr session start missed its available worktree provider"
-  done
-  pass "session start: configured and auto-detected Herdr homes never require tmux"
-}
-
-# --- status tail bounding -----------------------------------------------------
-
 test_status_tail_bounding() {
   local rec root home fakebin out
   rec=$(new_world status-tail)
@@ -481,7 +412,7 @@ EOF
   pass "orphan status logs are printed once with bounded tails"
 }
 
-# --- endpoint liveness: tmux and herdr, live and dead ------------------------
+# --- endpoint liveness: live and dead ----------------------------------------
 
 test_endpoint_liveness_tmux() {
   local rec root home fakebin out
@@ -502,28 +433,6 @@ EOF
 
   pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
 }
-
-test_endpoint_liveness_herdr() {
-  local rec root home fakebin out
-  rec=$(new_world liveness-herdr)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_claude "$fakebin"
-  make_fake_herdr "$fakebin" "p-live"
-
-  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-live.meta"
-  printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
-
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
-
-  pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
-}
-
-# --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
   local rec root home fakebin out
@@ -565,27 +474,6 @@ EOF
   assert_contains "$out" "absent" "empty fleet's AFK section did not report absent"
 
   pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
-}
-
-test_next_step_sources_x_mode_cadence() {
-  local rec root home fakebin out
-  rec=$(new_world next-step-x)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_claude "$fakebin"
-  fm_fake_exit0 "$fakebin" curl jq
-  printf 'FMX_PAIRING_TOKEN=tok-next-step\n' > "$home/.env"
-
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-
-  assert_contains "$out" "FMX: X mode on" "bootstrap did not activate X mode"
-  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: claude" "supervision block missing"
-  assert_contains "$out" "- X mode: active" "supervision block did not mention X cadence"
-  assert_contains "$out" "Follow the supervision operating instructions block above" "next step did not point back to the emitted supervision block"
-
-  pass "session start emits X-mode cadence guidance in the harness supervision block"
 }
 
 test_next_step_afk_delegates_to_daemon() {
@@ -740,17 +628,45 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+# --- per-project direction in the CONTEXT digest -----------------------------
+# Direction is applied at intake on EVERY task, so each project's direction file
+# (data/directions/<project>.md, owned by bin/fm-direction.sh) is printed in full
+# in the context digest, right after data/projects.md. A project with no
+# direction prints ABSENT - the same meaningful-absence convention the other
+# context files use.
+test_context_digest_prints_project_directions() {
+  local rec root home fakebin out
+  rec=$(new_world directions)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  mkdir -p "$home/projects/alpha" "$home/projects/beta" "$home/data/directions"
+  printf '# alpha direction\n\nSHIP FAST AND BREAK NOTHING.\n' > "$home/data/directions/alpha.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "direction: alpha" "the digest did not label alpha's direction section"
+  assert_contains "$out" "SHIP FAST AND BREAK NOTHING." "the digest did not print alpha's direction in full"
+  assert_contains "$out" "direction: beta" "the digest did not label beta's missing-direction section"
+
+  # beta's section must be the ABSENT marker, not silence.
+  printf '%s\n' "$out" | awk '/^direction: beta/{found=1} found && /^ABSENT$/{ok=1} END{exit !ok}' \
+    || fail "a project with no direction file must print ABSENT"
+
+  pass "context digest prints each project's direction in full, ABSENT when the project has none"
+}
+
 test_context_digest_absent_empty_present
+test_context_digest_prints_project_directions
 test_lock_refusal_read_only_path
 test_output_ordering_diagnostics_lead
-test_herdr_backend_diagnostics_follow_real_session_start
 test_status_tail_bounding
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
-test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
 test_fleet_digest_empty_fleet
-test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_diagnostic_rejects_stale_loaded_marker

@@ -21,10 +21,12 @@ The goal is a session that is safe to reset or destroy because everything durabl
    - Captain preferences expressed in passing: a working-style or approval preference the captain stated conversationally rather than through `data/captain.md` directly.
    - Project-intrinsic facts discovered: build, test, release, or architecture facts about a project that belong in that project's own `AGENTS.md`.
    - Decisions made: a standing choice the captain made this session that should outlive it.
+   - **Direction established or changed:** an answer the captain gave about where a project is going, what its architecture or infrastructure posture is, or what "good" means there.
+     This is the highest-value thing to catch, because an unrecorded direction answer gets re-asked by the next crewmate and the captain answers it twice.
    - Undone next steps: anything left open that has not yet been filed as backlog work.
 
 2. **Route each finding using AGENTS.md's knowledge-routing table.**
-   AGENTS.md (section 6, "Knowledge routing") is the single source of truth for where each kind of knowledge belongs.
+   AGENTS.md (section 5, "Knowledge routing") is the single source of truth for where each kind of knowledge belongs.
    Read that table and route each finding there instead of re-deriving the mapping here.
 
 3. **Write within firstmate's existing write boundaries.**
@@ -32,10 +34,14 @@ The goal is a session that is safe to reset or destroy because everything durabl
    - Captain preferences and fleet-local operational facts: hand-write directly, to `data/captain.md` and `data/learnings.md` respectively, using inspect-then-update every time.
      Before writing, inspect the destination, find the existing bullet or section the finding duplicates or supersedes, and rewrite it in place rather than adding a new trailing entry.
      `data/learnings.md` may not exist yet; create it on first learning, in the same dated, evidence-backed, curated style as `data/captain.md`.
+   - Project direction: hand-write directly to `data/directions/<project>.md`, using inspect-then-update.
+     A recurring decision the captain settled belongs in that file's `## Standing decisions` ledger, dated.
+     When a standing decision is overruled, rewrite it; never append a contradiction.
+     Load the `direction` skill if the change is more than a one-line ledger entry, and validate with `bin/fm-direction.sh check` afterward - the file is injected into every brief, so it has a hard word cap.
    - Project-intrinsic knowledge: never hand-write a project's `AGENTS.md`.
-     Route it through a normal ship task so a crewmate records it via `bin/fm-ensure-agents-md.sh` and commits it through that project's delivery pipeline, exactly as section 6 describes.
+     Route it through a normal ship task so a crewmate records it via `bin/fm-ensure-agents-md.sh` and commits it through that project's delivery pipeline, exactly as section 5 describes.
      If the fleet is live, delegate this to a crewmate rather than doing it inline.
-   - Knowledge generalizable to every firstmate user: this repo's own `AGENTS.md` (or other shared, tracked material), shipped through the normal branch -> no-mistakes -> PR -> captain-merge pipeline for this repo (section 1), never hand-committed straight to `main`.
+   - Knowledge generalizable to every firstmate user: this repo's own `AGENTS.md` (or other shared, tracked material), shipped through the normal branch -> PR -> captain-merge pipeline for this repo (section 1), never hand-committed straight to `main`.
    - Task-scoped notes: inspect the relevant backlog item with `tasks-axi show <id> --full`, judge whether the new note is new, duplicate, superseding, or obsolete, then write a considered replacement body with `tasks-axi update <id> --body-file <path>`.
      When the replacement intentionally supersedes prior state that should remain recoverable, add `--archive-body` to that update command so the prior body stays recoverable without copying it into the replacement.
      Never append.

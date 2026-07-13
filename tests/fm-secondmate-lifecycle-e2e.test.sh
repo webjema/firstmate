@@ -13,9 +13,9 @@
 # Coverage anchored here (must not regress):
 #   - registry line records scope (from a filled charter brief) and project list
 #   - charter is copied into the subhome
-#   - remote-backed projects are cloned with their origin URL preserved
-#   - a no-mistakes project is initialized (init + doctor) in the NEW subhome clone
-#     and the parent project clone is never mutated (no write through a project)
+#   - remote-backed projects are cloned with their origin URL preserved, and the
+#     parent project clone is never mutated (no write through a project)
+#   - legacy registry mode tokens still resolve, and modes survive into the subhome
 #   - spawn meta records kind=secondmate, home=, and the project list; launch runs
 #     in the subhome with the persistent charter and cleared operational overrides
 #   - a bare `fm-<id>` send targets the window recorded in THIS home's meta
@@ -49,17 +49,15 @@ setup_world() {
   fm_git_add_origin "$HOME_DIR/projects/beta" "$TMP_ROOT/remotes/beta.git"
   fm_git_add_origin "$HOME_DIR/projects/gamma" "$TMP_ROOT/remotes/gamma.git"
   cat > "$HOME_DIR/data/projects.md" <<EOF
-- alpha [direct-PR +yolo] - alpha project (added 2026-06-22)
-- beta [direct-PR] - beta project (added 2026-06-22)
+- alpha [direct-PR +yolo] - alpha project, legacy mode token (added 2026-06-22)
+- beta [PR] - beta project (added 2026-06-22)
 - gamma - gamma project (added 2026-06-22)
 EOF
   ALPHA_ORIGIN=$(git -C "$HOME_DIR/projects/alpha" remote get-url origin)
   BETA_ORIGIN=$(git -C "$HOME_DIR/projects/beta" remote get-url origin)
 
-  # One combined fakebin: tmux + treehouse (spawn/send/teardown) and no-mistakes
-  # (gamma initialization during seed).
+  # One combined fakebin: tmux + treehouse (spawn/send/teardown).
   FAKEBIN=$(make_fake_tmux "$TMP_ROOT/fake")
-  make_fake_no_mistakes "$TMP_ROOT/fake" >/dev/null
 
   # A filled charter brief whose routing scope differs from the charter summary,
   # so the registry must read the scope from the brief, not invent a generic one.
@@ -87,12 +85,11 @@ phase_seed() {
   [ "$(git -C "$SUB/projects/alpha" remote get-url origin)" = "$ALPHA_ORIGIN" ] \
     || fail "alpha clone did not preserve its origin URL"
   [ "$(git -C "$SUB/projects/beta" remote get-url origin)" = "$BETA_ORIGIN" ] \
-    || fail "direct-PR beta clone did not preserve its origin URL"
+    || fail "beta clone did not preserve its origin URL"
 
-  # no-mistakes init runs in the NEW clone, never the parent project.
-  assert_present "$SUB/projects/gamma/.no-mistakes-init" "no-mistakes project was not initialized in the subhome"
-  assert_present "$SUB/projects/gamma/.no-mistakes-doctor" "no-mistakes project was not doctored in the subhome"
-  assert_absent "$HOME_DIR/projects/gamma/.no-mistakes-init" "seed wrote no-mistakes state through the parent project"
+  # Seeding clones; it never writes anything back through the parent project.
+  [ -z "$(git -C "$HOME_DIR/projects/gamma" status --porcelain)" ] \
+    || fail "seed dirtied the parent project clone"
 
   # Registry line: scope from the filled brief, project list, no legacy owns field.
   assert_grep '- design - customer onboarding charter' "$HOME_DIR/data/secondmates.md" "registry summary not from the charter"
@@ -100,14 +97,15 @@ phase_seed() {
   assert_grep 'projects: alpha, beta, gamma' "$HOME_DIR/data/secondmates.md" "registry did not record the project list"
   assert_no_grep 'owns:' "$HOME_DIR/data/secondmates.md" "registry used the legacy owns field"
 
-  # Delivery modes preserved in the subhome registry; validation passes.
-  [ "$(FM_HOME="$SUB" "$ROOT/bin/fm-project-mode.sh" alpha)" = "direct-PR on" ] \
+  # Delivery modes preserved in the subhome registry, with the legacy direct-PR
+  # token still resolving to PR; validation passes.
+  [ "$(FM_HOME="$SUB" "$ROOT/bin/fm-project-mode.sh" alpha)" = "PR on" ] \
     || fail "alpha delivery mode not preserved in the subhome"
-  [ "$(FM_HOME="$SUB" "$ROOT/bin/fm-project-mode.sh" beta)" = "direct-PR off" ] \
+  [ "$(FM_HOME="$SUB" "$ROOT/bin/fm-project-mode.sh" beta)" = "PR off" ] \
     || fail "beta delivery mode not preserved in the subhome"
   FM_HOME="$HOME_DIR" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed after seed"
 
-  pass "seed: registry scope+projects, charter copied, clones+origins, no-mistakes init in subhome only"
+  pass "seed: registry scope+projects, charter copied, clones+origins, parent project untouched"
 }
 
 phase_spawn() {

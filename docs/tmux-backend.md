@@ -1,25 +1,18 @@
-# tmux runtime backend (reference)
+# tmux runtime backend
 
-tmux is firstmate's verified reference runtime backend: the session provider every other backend is compared against, and the fully verified baseline for secondmate support.
-This is the setup guide; for the shared runtime-backend abstraction and selection order, see [`docs/architecture.md`](architecture.md) ("Runtime session backends") and [`docs/configuration.md`](configuration.md) ("Runtime backend").
+tmux is firstmate's runtime backend: the session provider every crewmate, scout, and secondmate runs in.
+It is the only one, so there is nothing to select and no fallback to describe.
+This is the setup guide; `bin/fm-backend.sh` owns the seam every caller dispatches through.
 
-## What it is and when to pick it
+## What it is
 
 tmux is a terminal multiplexer.
 Firstmate gives each crewmate its own tmux window inside a session, so you can attach and watch a task work, or type into its window to intervene directly.
-Pick tmux unless you have a specific reason to try an experimental backend (herdr, zellij, Orca, or cmux) - it is the fully verified reference path for secondmate homes, while Orca and cmux are the backends that do not support secondmate spawns.
 
 ## Prerequisites
 
 - tmux itself: `brew install tmux` (or your platform's package manager).
 - The universal firstmate prerequisites: a verified crew harness plus the required toolchain, detected at session start and installed only after you approve; [`docs/configuration.md`](configuration.md) owns both lists ("Harness support", "Toolchain").
-
-## Selecting it
-
-tmux is the hard default: it needs no explicit selection.
-It is also what firstmate falls back to when nothing else is set - no local `config/backend` file, no `FM_BACKEND`, no explicit `--backend` flag firstmate passes internally when it spawns a task - and runtime auto-detection (see below) does not pick anything either.
-You can still select it explicitly by putting `tmux` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=tmux` when you launch your harness for a one-off session; telling the first mate in chat to use tmux also works.
-This mainly matters as an opt-out of herdr or cmux runtime auto-detection (see [`docs/herdr-backend.md`](herdr-backend.md) and [`docs/cmux-backend.md`](cmux-backend.md)).
 
 ## First run
 
@@ -75,7 +68,7 @@ A secondmate agent that exits leaves its pane alive as a bare idle shell, which 
 It reads tmux's own `#{pane_current_command}`, which reports the pane's live foreground process name - already resolved by tmux from the pty's controlling process group, not something this adapter derives itself.
 
 Agent liveness and composer safety are separate checks.
-During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shell glyph on an unbordered row to the shared composer classifier as `unknown`, and the daemon injects only into an affirmatively `empty` composer; see [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends).
+During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shell glyph on an unbordered row to the shared composer classifier as `unknown`, and the daemon injects only into an affirmatively `empty` composer.
 
 Verified empirically with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-07:
 
@@ -113,5 +106,4 @@ Resolving this would need either a `pi`-specific env marker inspectable from out
 
 ## Limitations
 
-None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.
 The agent-liveness probe above has one known gap (`pi`'s generic `node` process name, see above).

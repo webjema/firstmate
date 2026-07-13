@@ -15,11 +15,11 @@
 #
 # The one exception is the absorb classification (crew_absorb_class and its
 # working/paused wrappers). It is NOT a pure status-file read: it reuses
-# bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
-# whether a crew that just stopped its turn or went stale is working, deliberately
-# paused, or neither. Callers run it ONLY on no-verb signal handling and first
-# sighting of a stale hash, never on every wake, so the per-wake triage stays
-# cheap.
+# bin/fm-crew-state.sh, which probes the crew's recorded backend endpoint, to
+# decide whether a crew that just stopped its turn or went stale is working,
+# deliberately paused, or neither. Callers run it ONLY on no-verb signal handling
+# and first sighting of a stale hash, never on every wake, so the per-wake triage
+# stays cheap.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -27,8 +27,8 @@
 _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
 
 # The crew current-state reader used for the "provably working" decision.
-# Overridable so tests can stub the run-step/pane verdict without a real worktree
-# or no-mistakes install; absent, it points at the real sibling script.
+# Overridable so tests can stub the pane/log verdict without a real worktree or a
+# live backend endpoint; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
 # Captain-relevant status verbs. A status line carrying any of these is work
@@ -227,17 +227,21 @@ signal_reason_is_actionable() {  # <file> ...
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
-#   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
-#             pane; the crew is legitimately mid-work on a static-looking pane
-#             (e.g. waiting on CI);
+#   working - a busy endpoint signature: the crew is legitimately mid-turn or
+#             mid-tool-call on a static-looking pane (a long test run, a review
+#             pass), so its stopped-looking wake is benign;
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
-# authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
-# NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
+#   none    - neither, so the wake must surface (a stopped/finished/needs-decision/
+#             failed/torn-down/unknown crew, or an unreadable verdict).
+# One fm-crew-state.sh read serves BOTH absorb reasons at once. The source check is
+# what keeps this POSITIVE evidence: only a live endpoint read (`pane`) proves the
+# crew is working, never a `working:` line left behind in the status log. A crew
+# that appended paused: but is now busy reports working, never paused.
+# (`run-step` is the retired token of the removed external-pipeline source; it is
+# still accepted so stubbed verdicts in existing watcher tests keep classifying,
+# and can be dropped once those stubs move to `pane`.)
+# NOT a pure read: fm-crew-state.sh probes the recorded backend endpoint, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
@@ -249,18 +253,19 @@ crew_absorb_class() {  # <id>
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
+    case "$src" in pane|run-step) printf 'working'; return ;; esac
   fi
   printf 'none'
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
-# reports `working`). This is the "provably working" predicate at the heart of
-# absorb-only-when-provably-working: a no-verb turn-end or stale wake is absorbed
-# ONLY when this returns 0, and SURFACED otherwise (the crew may be done, waiting
-# on a decision, or wedged). For stale panes it is checked before trusting the
-# status log so a pre-validation captain-relevant line does not override an active
-# run. See crew_absorb_class for the exact working/paused/none decision.
+# reports `working`, i.e. a busy endpoint signature). This is the "provably
+# working" predicate at the heart of absorb-only-when-provably-working: a no-verb
+# turn-end or stale wake is absorbed ONLY when this returns 0, and SURFACED
+# otherwise (the crew may be done, waiting on a decision, or wedged). For stale
+# panes it is checked before trusting the status log so an old captain-relevant
+# line does not override a crew that has since resumed work.
+# See crew_absorb_class for the exact working/paused/none decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }

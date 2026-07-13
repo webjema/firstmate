@@ -1,3 +1,8 @@
+# The merge gate for this repo. Every PR to main runs the same two jobs a
+# contributor runs locally: "Lint shell scripts" (bin/fm-lint.sh, the one owner of
+# the lint definition) and "Behavior tests" (the whole tests/*.test.sh suite).
+# Branch protection on main requires those two job names, so the gate is enforced by
+# GitHub rather than by anything a PR author can self-attest to.
 name: CI
 
 on:
@@ -52,11 +57,17 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      # Deterministic and exhaustive: iterate every tests/*.test.sh, run each, and
+      # fail the job if any one exits non-zero. Every test is run even after a
+      # failure, so one broken script never hides the rest of the suite.
       - run: |
-          set -eu
+          set -u
+          rc=0
           for test_script in tests/*.test.sh; do
-            "$test_script"
+            echo "== $test_script =="
+            bash "$test_script" || rc=1
           done
+          exit "$rc"
 
   invariants:
     name: Repo invariants
@@ -71,7 +82,7 @@ jobs:
       - name: Personal fleet paths must not be tracked
         run: |
           set -eu
-          tracked=$(git ls-files -- data state config projects .no-mistakes)
+          tracked=$(git ls-files -- data state config projects)
           if [ -n "$tracked" ]; then
             echo "::error::Personal fleet paths are tracked in git:"
             printf '%s\n' "$tracked"

@@ -4,8 +4,9 @@
 # Collapses AGENTS.md sections 3 (bootstrap) and 5 (recovery) into ONE script
 # producing ONE ordered digest, so a session starts in one or two turns
 # instead of the six-plus separate reads the old docs required: run
-# fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
-# data/captain.md, data/learnings.md, then run fm-lock.sh, fm-wake-drain.sh,
+# fm-bootstrap.sh, then separately read data/projects.md, every project's
+# direction file, data/secondmates.md, data/captain.md, data/learnings.md,
+# then run fm-lock.sh, fm-wake-drain.sh,
 # then read data/backlog.md, every state/*.meta, and every state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
 # belong in a script, not in N agent turns.
@@ -17,7 +18,7 @@
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing
 # tests) still call them directly. The one seam this script needed -
-# bootstrap running its detect-only diagnostics without its four mutating
+# bootstrap running its detect-only diagnostics without its three mutating
 # sweeps - is an opt-in FM_BOOTSTRAP_DETECT_ONLY=1 flag on fm-bootstrap.sh
 # itself (default unset/0 = unchanged behavior), not a fork.
 #
@@ -26,13 +27,14 @@
 #
 #   1. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
-#   2. bootstrap      - detect-only diagnostics always run. The four
+#   2. bootstrap      - detect-only diagnostics always run. The three
 #                       MUTATING sweeps (secondmate fast-forward, secondmate
-#                       liveness, X-mode artifact writes, fleet sync) run only
-#                       when this session actually holds the lock.
+#                       liveness, fleet sync) run only when this session
+#                       actually holds the lock.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
-#   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   4. context digest - data/projects.md, every project's direction file under
+#                       data/directions/, data/secondmates.md, data/captain.md,
 #                       data/learnings.md: read-only, always safe, always runs.
 #   5. fleet digest   - data/backlog.md, every state/*.meta, a bounded
 #                       state/*.status tail, state/.afk, and a cheap
@@ -47,8 +49,8 @@
 #
 # Why lock first: the old documented order (bootstrap, THEN lock) let a
 # SECOND concurrent session run bootstrap's mutating sweeps - fast-forwarding
-# secondmate homes, writing X-mode artifacts, fetching/fast-forwarding every
-# project clone - before ever discovering another session already holds the
+# secondmate homes, fetching/fast-forwarding every project
+# clone - before ever discovering another session already holds the
 # lock. Two sessions racing those sweeps is exactly the hazard the lock
 # exists to prevent, so locking first closes the hole outright: only the
 # session that actually wins the lock ever touches shared mutable state.
@@ -56,11 +58,10 @@
 # The tradeoff this ordering accepts: a refused (read-only) session must not
 # go dark. So on refusal, bootstrap still runs (in FM_BOOTSTRAP_DETECT_ONLY=1
 # mode) for its read-only detect lines - missing tools, gh auth, the
-# worktree-tangle check, the harness override, crew-dispatch validation,
-# tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
-# which mutate shared state and all of which are safe to compute from a second
-# session.
-# Only the four mutating sweeps and the wake-queue drain are skipped.
+# worktree-tangle check, the harness override, the tasks-axi tool check, and
+# tasks-axi availability - none of which mutate shared state and all of which
+# are safe to compute from a second session.
+# Only the three mutating sweeps and the wake-queue drain are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
 #
@@ -76,7 +77,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # shellcheck source=bin/fm-backend.sh
@@ -108,6 +109,29 @@ print_file_or_absent() {
     fi
   else
     printf 'ABSENT\n'
+  fi
+}
+
+# print_directions: every project's direction file (data/directions/<project>.md,
+# owned by bin/fm-direction.sh), in full, one labeled subsection per project.
+# Direction is applied at intake on EVERY task, so it belongs in session-start
+# context rather than behind a separate read; the word cap enforced by
+# fm-direction.sh is what keeps that affordable. A project with no direction file
+# prints ABSENT under the same convention as the other context files: absence is
+# meaningful - it means firstmate should draft one with the captain.
+print_directions() {
+  local proj name path found=0
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj" ] || continue
+    found=1
+    name=$(basename "$proj")
+    path=$("$SCRIPT_DIR/fm-direction.sh" path "$name" 2>/dev/null) \
+      || path="$DATA/directions/$name.md"
+    print_file_or_absent "$path" "direction: $name (${path#"$FM_HOME"/})"
+  done
+  if [ "$found" -eq 0 ]; then
+    subsection "directions"
+    printf '(no projects under %s)\n' "$PROJECTS"
   fi
 }
 
@@ -154,9 +178,9 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
     printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
     printf '●  %s\n' "$LOCK_OUT"
-    printf '●  Skipping every mutating step: secondmate sync, X-mode artifacts,\n'
-    printf '●  fleet sync, and wake-queue drain. Detect-only bootstrap diagnostics and\n'
-    printf '●  the rest of this read-only-safe digest still ran below.\n'
+    printf '●  Skipping every mutating step: secondmate sync, fleet sync, and\n'
+    printf '●  wake-queue drain. Detect-only bootstrap diagnostics and the rest of\n'
+    printf '●  this read-only-safe digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
     printf '●  otherwise mutate fleet state from this session.\n'
     printf '%s\n' "$BAR"
@@ -170,8 +194,14 @@ if [ "$READ_ONLY" -eq 1 ]; then
 else
   BOOT_OUT=$("$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 fi
-if [ -n "$BOOT_OUT" ]; then
-  printf '%s\n' "$BOOT_OUT"
+# Direction diagnostics ride along with the bootstrap section: DIRECTION_MISSING,
+# DIRECTION_STUB, DIRECTION_INVALID, DIRECTION_TOO_LONG (and the DIRECTION_LONG
+# soft warning). A non-zero exit from `check` is a DIAGNOSTIC, never fatal - the
+# digest must print it and keep going, exactly like a MISSING: tool line.
+DIRECTION_OUT=$("$SCRIPT_DIR/fm-direction.sh" check 2>&1 || true)
+if [ -n "$BOOT_OUT" ] || [ -n "$DIRECTION_OUT" ]; then
+  [ -n "$BOOT_OUT" ] && printf '%s\n' "$BOOT_OUT"
+  [ -n "$DIRECTION_OUT" ] && printf '%s\n' "$DIRECTION_OUT"
 else
   printf '(silent - all good)\n'
 fi
@@ -203,8 +233,6 @@ fi
 # --- 4. supervision operating instructions ----------------------------------
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
-X_MODE_PRESENT=0
-[ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
 
 if [ "$PRIMARY_HARNESS" = pi ]; then
   PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
@@ -222,12 +250,12 @@ fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \
-  --afk "$AFK_PRESENT" \
-  --x-mode "$X_MODE_PRESENT"
+  --afk "$AFK_PRESENT"
 
 # --- 4. context digest -----------------------------------------------------
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
+print_directions
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
@@ -302,13 +330,6 @@ load /afk and ensure the daemon is running, because the daemon owns watcher
 supervision.
 
 EOF
-elif [ -f "$CONFIG/x-mode.env" ]; then
-  cat <<EOF
-Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
-X mode is active, so the emitted block's cadence instruction applies.
-This script never starts supervision itself.
-
-EOF
 else
 cat <<EOF
 Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
@@ -318,8 +339,9 @@ EOF
 fi
 cat <<'EOF'
 The digest above is complete for this session start. Do NOT re-read
-data/projects.md, data/secondmates.md, data/captain.md, data/learnings.md,
-data/backlog.md, or state/*.meta now - they were just printed in full.
+data/projects.md, data/directions/*.md, data/secondmates.md, data/captain.md,
+data/learnings.md, data/backlog.md, or state/*.meta now - they were just
+printed in full.
 Do NOT bulk-read state/*.status now either: their bounded tails were just
 printed with full log paths for targeted follow-up when older wake-event
 history is actually needed. Re-reading everything defeats the entire point

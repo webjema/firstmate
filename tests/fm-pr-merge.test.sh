@@ -2,7 +2,7 @@
 # Tests for bin/fm-pr-merge.sh: the one path firstmate uses to merge a task's
 # PR, which must always record pr= and any available pr_head= into the task's
 # meta before merging so fm-teardown.sh's landed-check has a PR reference to
-# verify against, even on repos with no PR CI where the usual "checks green"
+# verify against, even on repos with no PR CI where the usual PR-ready
 # fm-pr-check.sh trigger never fires.
 #
 # Matrix:
@@ -35,7 +35,7 @@ make_case() {
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=PR"
   # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
   # stat and simply skips the pr_head lookup via `gh` in that case, so give it
   # one that resolves for cases that want pr_head recorded.
