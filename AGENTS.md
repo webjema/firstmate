@@ -350,6 +350,11 @@ Update it on every dispatch, completion, and decision.
 Keep Done to the 10 most recent; pruning loses nothing, because finished work lives on as PRs, local `main`, or report files.
 Re-evaluate Queued on every teardown and heartbeat.
 
+**Task notes are inspected, then replaced - never appended to.**
+Inspect first with `tasks-axi show <id> --full`, judge whether the new note is new, duplicate, superseding, or obsolete, then write a considered replacement with `tasks-axi update <id> --body-file <path>`.
+Add `--archive-body` when the prior state it supersedes should stay recoverable.
+Append-first notes rot into a log nobody reads, which is the failure this rule exists to prevent.
+
 Keep free-form notes free of volatile specifics that rot - temp paths, in-flight versions, ephemeral IDs.
 Reference the authoritative source instead of copying it into prose, and correct or delete a stale note the moment you catch it.
 

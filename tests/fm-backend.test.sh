@@ -79,7 +79,17 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
   done
   ln -s "$ROOT/bin/backends" "$bin/backends"
   for f in $OLD_BIN_REFACTORED; do
-    git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
+    # Strip the gate-refuse source+call from the extracted baseline. That guard
+    # existed only to keep a no-mistakes GATE agent from driving the fleet; the
+    # pipeline is gone, so bin/fm-gate-refuse-lib.sh no longer exists and the old
+    # script's `. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"` would abort under set -eu.
+    # Removing it does not weaken the conformance check: this test compares the
+    # emitted tmux command shape, which the guard never touched.
+    git -C "$ROOT" show "$BASE_REF:bin/$f" \
+      | grep -v '^# shellcheck source=bin/fm-gate-refuse-lib\.sh$' \
+      | grep -v '^\. "\$SCRIPT_DIR/fm-gate-refuse-lib\.sh"$' \
+      | grep -v '^fm_refuse_if_gate_agent$' \
+      > "$bin/$f"
     chmod +x "$bin/$f"
   done
   printf '%s\n' "$root"
