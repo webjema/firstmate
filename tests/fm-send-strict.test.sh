@@ -4,7 +4,7 @@
 # A send that cannot be tied to a recorded task/lane or to an explicit
 # well-formed backend target must fail loudly. These tests pin the historical
 # silent-fallback failures: missing FM_HOME, unresolved selectors, prefixless
-# herdr pane ids, dead explicit endpoints, and the healthy exact/fm-id paths.
+# dead explicit endpoints, and the healthy exact/fm-id paths.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -113,23 +113,6 @@ test_unresolvable_target_does_not_tmux_fallback() {
   pass "fm-send strict: unresolvable selectors do not fall back to tmux"
 }
 
-test_prefixless_herdr_pane_id_fails() {
-  local dir fb home err log rc
-  dir="$TMP_ROOT/herdr-pane"; mkdir -p "$dir"
-  fb=$(make_stubs "$dir"); home=$(setup_home herdr); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
-  fm_write_meta "$home/state/nudge.meta" \
-    "window=default:wB:p2" "backend=herdr" "herdr_session=default" "herdr_pane_id=wB:p2" "kind=ship"
-
-  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
-    "$SEND" wB:p2 "nudge" >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -ne 0 ] || fail "prefixless herdr pane id should fail"
-  assert_contains "$(cat "$err")" "matches herdr_pane_id" "herdr pane diagnostic should name the meta match"
-  assert_contains "$(cat "$err")" "expected <herdr-session>:<pane-id>" "herdr pane diagnostic should show expected shape"
-  assert_contains "$(cat "$err")" "default:wB:p2" "herdr pane diagnostic should show the canonical target"
-  [ ! -s "$log" ] || fail "prefixless herdr pane id fell through to tmux send"$'\n'"$(cat "$log")"
-  pass "fm-send strict: prefixless herdr pane ids are rejected before tmux fallback"
-}
-
 test_unmatched_single_colon_target_must_exist() {
   local dir fb home err log rc
   dir="$TMP_ROOT/dead-explicit"; mkdir -p "$dir"
@@ -163,6 +146,5 @@ test_healthy_fm_id_send_still_works() {
 test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
-test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_healthy_fm_id_send_still_works

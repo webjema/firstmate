@@ -28,8 +28,8 @@
 # surfaced (fm-peek and every human/LLM-facing path stay plain), and only the
 # single composer row is captured, so no escape-laden pane bulk is produced. This
 # is harness-generic: any harness that de-emphasises placeholder/ghost text
-# benefits, and the herdr adapter routes through the same owner (task
-# afk-herdr-false-pending), so the two backends cannot drift.
+# benefits, and every reader routes through the same owner, so they cannot
+# drift.
 #
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
 # ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
@@ -57,7 +57,7 @@ FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 # dark/muted truecolor foreground (grok's placeholder) - from one captured,
 # styled composer line and prints the plain, real-typed text. Kept as a named
 # tmux entry point (and for existing callers/tests) but owns no logic of its own,
-# so the tmux and herdr adapters cannot drift apart on what counts as ghost text.
+# so every composer reader agrees on what counts as ghost text.
 fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 
 # fm_tmux_composer_state: classify the cursor/composer line of <target> as

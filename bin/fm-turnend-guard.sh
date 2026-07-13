@@ -41,7 +41,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 
@@ -53,7 +52,7 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
 
-# jq is the repo's established JSON dependency (bin/fm-x-poll.sh uses the same
+# jq is the repo's established JSON dependency (the bootstrap toolchain lists the same
 # "missing jq -> silent no-op" degrade). Without it we cannot safely read the
 # loop-guard field, so we must never block - fail open, not noisy.
 command -v jq >/dev/null 2>&1 || exit 0
@@ -131,9 +130,7 @@ fi
 
 afk=0
 [ -e "$STATE/.afk" ] && afk=1
-x_mode=0
-[ -f "$CONFIG/x-mode.env" ] && x_mode=1
-REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --repair-line 2>/dev/null \
   || printf '%s\n' 'tasks in flight, no live watcher - resume supervision according to the session-start operating block before ending the turn')
 rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 {

@@ -24,7 +24,7 @@ fi
 # real OS-level desktop notification by default. Point its FM_WEDGE_ALARM_EXEC
 # seam at a recorder for every
 # daemon/wake suite, so no test - present or future - can post a real macOS,
-# herdr, or command: notification: it is impossible to forget, because sourcing this harness
+# or command: notification: it is impossible to forget, because sourcing this harness
 # installs it. The recorder is an on-disk script (a real daemon a test spawns
 # inherits the path and records too). It logs "<channel>\t<summary>" to
 # $FM_WEDGE_ALARM_LOG, which a test sets to its own file to assert on; unset means
@@ -91,7 +91,7 @@ SH
 # FM_CREW_STATE_BIN) to read a crew's current state on no-verb signal and stale
 # paths; the fake returns a canned "state: <s> · source: <src> · <detail>"
 # verdict line so a test can fix the provably-working decision without a real
-# worktree or no-mistakes.
+# worktree or a live backend endpoint.
 # A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
 # FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
 # safe default so a test that forgets to set one surfaces rather than absorbs.

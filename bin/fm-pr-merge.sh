@@ -4,12 +4,11 @@
 # landed-check has a PR reference to verify a squash merge against.
 #
 # Why this exists: the normal trigger for running fm-pr-check.sh is the crew's
-# `done: PR <url> checks green` line, which no-mistakes only emits once its CI
-# step turns green. Repos that intentionally run no CI on PRs (CI only on
-# pushes to the default branch) never emit that line, so a merge performed by
-# hand-running `gh-axi pr merge` - the common shape of a yolo-authorized merge -
-# can skip the recording step entirely. Teardown then has nothing to look up for
-# a squash-merge-then-delete-branch flow and false-refuses provably landed work.
+# `done: PR <url>` line at PR-ready. A merge performed by hand-running
+# `gh-axi pr merge` - the common shape of a yolo-authorized merge, especially on a
+# repo with no PR CI at all - can skip the recording step entirely. Teardown then
+# has nothing to look up for a squash-merge-then-delete-branch flow and
+# false-refuses provably landed work.
 # This script makes recording part of the merge itself, so it cannot be skipped
 # by omission. Use it for every PR merge (captain-requested or yolo-authorized),
 # in place of calling `gh-axi pr merge` directly.

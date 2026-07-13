@@ -3,14 +3,12 @@
 #
 # Bootstrap prints one block or line per problem or capability fact and is silent when all
 # is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
-# 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)', and
-# 'TASKS_AXI: available' lines, so those contracts are pinned verbatim. The cases
-# are table-driven over the inputs that vary: whether `treehouse get --help`
-# advertises --lease, which (if any) tasks-axi version is on PATH, whether
-# tasks-axi update advertises --archive-body, whether its mv help advertises
-# multi-ID moves, whether quota-axi is on PATH,
-# whether the local backend config opts out of tasks-axi backlog mutations, and
-# which no-mistakes version is on PATH.
+# 'MISSING: tasks-axi (install: ...)', and 'TASKS_AXI: available' lines, so those
+# contracts are pinned verbatim. The cases are table-driven over the inputs that
+# vary: whether `treehouse get --help` advertises --lease, which (if any)
+# tasks-axi version is on PATH, whether tasks-axi update advertises
+# --archive-body, whether its mv help advertises multi-ID moves, and whether the
+# local backlog-backend config opts out of tasks-axi backlog mutations.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
@@ -21,16 +19,6 @@ set -u
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
-export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
-
-# Hermetic runtime-backend detection. These cases pin the backend per-home via
-# config/backend; the dev shell's ambient runtime markers ($TMUX inside tmux,
-# HERDR_ENV inside herdr, CMUX_* inside a cmux terminal) must not leak into
-# fm_backend_name and flip a default-backend case onto a non-tmux backend. Unset
-# them once so the suite resolves the tmux reference backend unless a case says
-# otherwise - the same hermeticity discipline as pinning PATH via BASE_PATH.
-unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
-  CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
 
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
@@ -59,27 +47,8 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.31.2 (fake) 2026-06-27T00:02:18Z}"
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/no-mistakes"
   add_tasks_axi "$fakebin" "0.1.1"
-  add_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
-}
-
-add_quota_axi() {
-  local fakebin=$1
-  cat > "$fakebin/quota-axi" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/quota-axi"
 }
 
 add_tasks_axi() {
@@ -107,16 +76,6 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/tasks-axi"
-}
-
-add_real_jq() {
-  local fakebin=$1 real_jq
-  real_jq=$(command -v jq 2>/dev/null) || fail "jq is required for dispatch profile validation tests"
-  cat > "$fakebin/jq" <<SH
-#!/usr/bin/env bash
-exec '$real_jq' "\$@"
-SH
-  chmod +x "$fakebin/jq"
 }
 
 make_fake_fleet_sync_root() {
@@ -209,14 +168,14 @@ run_bootstrap_timeout_case() {
 }
 
 # Each row (fields are '^'-separated; the install URL contains a literal '|'):
-#   <label>^<lease 1/0>^<tasks-axi version or ->^<quota 1/0>^<backend or ->^<mode>^<expect>^<notcontains>
+#   <label>^<lease 1/0>^<tasks-axi version or ->^<backlog-backend or ->^<mode>^<expect>^<notcontains>
 #   mode=empty -> output must be empty (expect/notcontains ignored)
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
 test_bootstrap_reporting() {
-  local label lease tasks quota backend mode expect notcontains case_dir fakebin out n archive_body multi_id
+  local label lease tasks backend mode expect notcontains case_dir fakebin out n archive_body multi_id
   n=0
-  while IFS='^' read -r label lease tasks quota backend mode expect notcontains; do
+  while IFS='^' read -r label lease tasks backend mode expect notcontains; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/case-$n"
@@ -245,9 +204,6 @@ test_bootstrap_reporting() {
       esac
       add_tasks_axi "$fakebin" "$tasks" "$archive_body" "$multi_id"
     fi
-    if [ "$quota" = "0" ]; then
-      rm -f "$fakebin/quota-axi"
-    fi
     # FM_ROOT_OVERRIDE points the worktree-tangle check at the non-git home dir so
     # it stays inert: this suite pins tool detection, not the tangle guard, and the
     # ambient checkout (CI runs on a feature branch) must not leak a TANGLE line in.
@@ -266,49 +222,17 @@ test_bootstrap_reporting() {
         ;;
     esac
   done <<'ROWS'
-treehouse --lease support is accepted silently^1^0.1.1^1^manual^empty^^
-treehouse without --lease reports an upgrade, gh auth is fine^0^0.1.1^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-compatible tasks-axi is reported available by default^1^0.1.1^1^-^exact^TASKS_AXI: available^
-missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without archive-body is required by default^1^0.1.2:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without multi-id mv is required by default^1^0.2.2:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
-manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-manual backlog backend suppresses tasks-axi availability^1^0.1.1^1^manual^empty^^
+treehouse --lease support is accepted silently^1^0.1.1^manual^empty^^
+treehouse without --lease reports an upgrade, gh auth is fine^0^0.1.1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
+compatible tasks-axi is reported available by default^1^0.1.1^-^exact^TASKS_AXI: available^
+missing tasks-axi is required by default^1^-^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+incompatible tasks-axi is required by default^1^0.1.0^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+tasks-axi without archive-body is required by default^1^0.1.2:noarchive^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+tasks-axi without multi-id mv is required by default^1^0.2.2:nomulti^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+manual backlog backend still requires missing tasks-axi^1^-^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+manual backlog backend suppresses tasks-axi availability^1^0.1.1^manual^empty^^
 ROWS
-  pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
-}
-
-test_no_mistakes_min_version() {
-  local label version mode case_dir fakebin out missing n
-  missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
-  n=0
-  while IFS='^' read -r label version mode; do
-    [ -n "$label" ] || continue
-    n=$((n + 1))
-    case_dir="$TMP_ROOT/no-mistakes-$n"
-    mkdir -p "$case_dir/home"
-    mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-    fakebin=$(make_fake_toolchain "$case_dir")
-    add_tasks_axi "$fakebin" "0.1.1"
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
-    case "$mode" in
-      empty)
-        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
-      missing)
-        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
-    esac
-  done <<'ROWS'
-minimum no-mistakes version is accepted^no-mistakes version v1.31.2 (fake)^empty
-newer no-mistakes minor is accepted^no-mistakes version v1.32.0 (fake)^empty
-newer no-mistakes major is accepted^no-mistakes version v2.0.0 (fake)^empty
-older no-mistakes patch reports an upgrade^no-mistakes version v1.31.1 (fake)^missing
-unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
-ROWS
-  pass "bootstrap enforces no-mistakes minimum version"
+  pass "bootstrap reports the treehouse lease and tasks-axi bootstrap contracts"
 }
 
 test_git_is_required_with_supported_install_instruction() {
@@ -337,208 +261,33 @@ SH
   pass "bootstrap requires git with an install instruction"
 }
 
-test_orca_backend_gates_orca_tool_only_when_selected() {
-  local case_dir fakebin out missing_orca
-  missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
-
-  case_dir="$TMP_ROOT/orca-backend-selected"
-  mkdir -p "$case_dir/home/config"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' orca > "$case_dir/home/config/backend"
-  fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
-
-  case_dir="$TMP_ROOT/orca-backend-not-selected"
+test_default_backend_requires_tmux_and_treehouse() {
+  local case_dir fakebin bash_env out
+  # The backend delta (fm_backend_required_tools) is tmux + treehouse. tmux often
+  # lives in a system BASE_PATH dir, so force it missing with a command()/tmux()
+  # override (the same technique the git-required case uses) to keep the assertion
+  # host-independent.
+  case_dir="$TMP_ROOT/tmux-missing"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_not_contains "$out" "MISSING: orca" "bootstrap should not require orca unless backend=orca is selected"
-  pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
-}
-
-# Build a fake toolchain with tmux REMOVED and the named backend session CLI(s)
-# plus jq added, so a backend that must NOT require tmux can be proven silent
-# with tmux absent. Echoes the fakebin dir. The removed tmux is what makes these
-# cases catch the old "everything but orca demands tmux" bug: with the buggy
-# TOOLS list a herdr/zellij/cmux home would report MISSING: tmux here.
-make_fake_toolchain_no_tmux() {  # <case-dir> <extra-cli...>
-  local dir=$1 fakebin
-  shift
-  fakebin=$(make_fake_toolchain "$dir")
   rm -f "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" jq "$@"
-  printf '%s\n' "$fakebin"
-}
-
-test_session_provider_backends_do_not_require_tmux() {
-  local backend cli case_dir fakebin out
-  # herdr/zellij/cmux are session providers only: they require their own CLI, jq,
-  # and treehouse, never tmux. With all genuine deps present and tmux absent,
-  # bootstrap must be silent.
-  while IFS='^' read -r backend cli; do
-    [ -n "$backend" ] || continue
-    case_dir="$TMP_ROOT/$backend-no-tmux"
-    mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-    printf '%s\n' "$backend" > "$case_dir/home/config/backend"
-    fakebin=$(make_fake_toolchain_no_tmux "$case_dir" "$cli")
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    [ -z "$out" ] || fail "backend=$backend with tmux absent but its own deps present should be silent, got: $out"
-  done <<'ROWS'
-herdr^herdr
-zellij^zellij
-cmux^cmux
-ROWS
-  pass "bootstrap: session-provider backends require their own CLI + jq + treehouse, never tmux"
-}
-
-test_session_provider_backends_gate_own_cli_not_tmux() {
-  local backend cli case_dir fakebin out missing
-  # With the backend's OWN session CLI absent (and tmux also absent), bootstrap
-  # must fail closed on the genuine dep and never substitute a false tmux demand.
-  while IFS='^' read -r backend cli; do
-    [ -n "$backend" ] || continue
-    case_dir="$TMP_ROOT/$backend-missing-cli"
-    mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-    printf '%s\n' "$backend" > "$case_dir/home/config/backend"
-    # Toolchain has jq + treehouse but NOT the session CLI and NOT tmux.
-    fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    if [ "$backend" = herdr ]; then
-      missing="MISSING_MANUAL: herdr (instructions: https://herdr.dev)"
-    else
-      missing="MISSING: $cli"
-    fi
-    assert_contains "$out" "$missing" "backend=$backend must fail closed on its own missing session CLI"
-    if [ "$backend" = herdr ]; then
-      assert_not_contains "$out" "MISSING: herdr (install:" \
-        "backend=herdr must not advertise manual guidance as an executable install command"
-    fi
-    assert_not_contains "$out" "MISSING: tmux" "backend=$backend must not demand tmux when its own CLI is missing"
-  done <<'ROWS'
-herdr^herdr
-zellij^zellij
-cmux^cmux
-ROWS
-  pass "bootstrap: a session-provider backend gates its own CLI, never a false tmux requirement"
-}
-
-test_herdr_install_requires_manual_action() {
-  local out status
-  out=$("$ROOT/bin/fm-bootstrap.sh" install herdr 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "install herdr should fail instead of evaluating its manual-install hint"
-  [ "$out" = "error: herdr requires manual installation (instructions: https://herdr.dev)" ] \
-    || fail "install herdr should return actionable manual-install guidance, got: $out"
-  pass "bootstrap: Herdr manual-install guidance is never executed as a shell command"
-}
-
-test_cmux_bundled_cli_satisfies_dependency() {
-  local case_dir fakebin bundle out
-  case_dir="$TMP_ROOT/cmux-bundled-cli"
-  mkdir -p "$case_dir/home/config" "$case_dir/bundle"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' cmux > "$case_dir/home/config/backend"
-  fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
-  fm_fake_exit0 "$case_dir/bundle" cmux
-  bundle="$case_dir/bundle/cmux"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_BACKEND_CMUX_BUNDLE_BIN="$bundle" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "a usable bundled cmux CLI should satisfy bootstrap without a PATH shim, got: $out"
-  pass "bootstrap: the bundled cmux CLI satisfies the active backend dependency"
-}
-
-test_unknown_backend_reports_invalid_configuration() {
-  local case_dir fakebin out
-  case_dir="$TMP_ROOT/unknown-backend"
-  mkdir -p "$case_dir/home/config"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' bogus > "$case_dir/home/config/backend"
-  fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "BACKEND_INVALID: bogus (known: tmux herdr zellij orca cmux)" \
-    "bootstrap should report an unknown resolved backend"
-  assert_not_contains "$out" "MISSING: tmux" "an unknown backend should not silently fall back to tmux dependencies"
-  pass "bootstrap: unknown resolved backends fail closed with an actionable diagnostic"
-}
-
-test_json_backends_require_jq_not_tmux() {
-  local backend case_dir fakebin bash_env out
-  # herdr/zellij/cmux parse their backend's JSON output, so jq is a genuine dep.
-  # jq lives in a system BASE_PATH dir on many hosts, so force it missing with a
-  # command()/jq() override (the same technique the git-required case uses) to keep
-  # the assertion host-independent.
-  while IFS='^' read -r backend; do
-    [ -n "$backend" ] || continue
-    case_dir="$TMP_ROOT/$backend-missing-jq"
-    mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-    printf '%s\n' "$backend" > "$case_dir/home/config/backend"
-    # Session CLI present, tmux absent, jq deliberately NOT stubbed and masked below.
-    fakebin=$(make_fake_toolchain "$case_dir")
-    rm -f "$fakebin/tmux"
-    fm_fake_exit0 "$fakebin" "$backend"
-    bash_env="$case_dir/no-jq.bash"
-    cat > "$bash_env" <<'SH'
+  bash_env="$case_dir/no-tmux.bash"
+  cat > "$bash_env" <<'SH'
 command() {
-  if [ "${1:-}" = -v ] && [ "${2:-}" = jq ]; then
+  if [ "${1:-}" = -v ] && [ "${2:-}" = tmux ]; then
     return 1
   fi
   builtin command "$@"
 }
-jq() {
+tmux() {
   return 127
 }
 SH
-    out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    assert_contains "$out" "MISSING: jq" "backend=$backend must fail closed on missing jq"
-    assert_not_contains "$out" "MISSING: tmux" "backend=$backend must not demand tmux when jq is missing"
-  done <<'ROWS'
-herdr
-zellij
-cmux
-ROWS
-  pass "bootstrap: JSON-emitting backends require jq (their genuine dep), never tmux"
-}
-
-test_treehouse_lease_check_follows_resolved_backend() {
-  local case_dir fakebin out
-  # A treehouse that lacks durable --lease support is only a problem for a backend
-  # that actually uses treehouse. Orca owns its own worktrees, so an old treehouse
-  # must NOT trip MISSING: treehouse under backend=orca...
-  case_dir="$TMP_ROOT/orca-old-treehouse"
-  mkdir -p "$case_dir/home/config"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' orca > "$case_dir/home/config/backend"
-  fakebin=$(make_fake_toolchain "$case_dir")
-  rm -f "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" orca
-  # FM_FAKE_TREEHOUSE_LEASE_HELP unset: the fake treehouse advertises NO --lease.
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "backend=orca must not require treehouse (even lease-less) or tmux, got: $out"
-
-  # ...but the same lease-less treehouse IS a problem for a session-provider
-  # backend that relies on treehouse for worktrees.
-  case_dir="$TMP_ROOT/herdr-old-treehouse"
-  mkdir -p "$case_dir/home/config"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' herdr > "$case_dir/home/config/backend"
-  fakebin=$(make_fake_toolchain_no_tmux "$case_dir" herdr)
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "MISSING: treehouse" "backend=herdr must still require treehouse with durable lease support"
-  assert_not_contains "$out" "MISSING: tmux" "backend=herdr must not demand tmux even when treehouse is too old"
-  pass "bootstrap: the treehouse lease check follows the resolved backend's worktree provider"
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: tmux (install: brew install tmux" "bootstrap must require tmux, the only backend"
+  pass "bootstrap: the tmux backend delta requires tmux and treehouse"
 }
 
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
@@ -628,76 +377,11 @@ test_fleet_sync_timeout_is_computed_before_launch() {
   pass "bootstrap computes the timeout before launching fleet sync"
 }
 
-test_crew_dispatch_active_rules_are_surfaced() {
-  local case_dir fakebin out expect
-  case_dir="$TMP_ROOT/dispatch-active"
-  mkdir -p "$case_dir/home/config"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}],"default":{"harness":"claude","model":"haiku","effort":"low"}}' > "$case_dir/home/config/crew-dispatch.json"
-  fakebin=$(make_fake_toolchain "$case_dir")
-  add_real_jq "$fakebin"
-
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-
-  expect=$'CREW_DISPATCH: active config/crew-dispatch.json\n  rule: fresh news -> grok\n  rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\n  default: claude/haiku/low'
-  [ "$out" = "$expect" ] || fail "active dispatch profile block mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
-  pass "bootstrap surfaces active crew-dispatch rules and default"
-}
-
-test_crew_dispatch_validation() {
-  local label body expect mode case_dir fakebin out n
-  n=0
-  while IFS='^' read -r label body mode expect; do
-    [ -n "$label" ] || continue
-    n=$((n + 1))
-    case_dir="$TMP_ROOT/dispatch-$n"
-    mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-    printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
-    fakebin=$(make_fake_toolchain "$case_dir")
-    add_real_jq "$fakebin"
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    case "$mode" in
-      empty)
-        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
-      exact)
-        [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
-      grep)
-        printf '%s\n' "$out" | grep -Fx "$expect" >/dev/null || fail "$label: missing '$expect' (got: $out)" ;;
-    esac
-  done <<'ROWS'
-malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
-unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
-unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
-unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
-unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
-array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json
-array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json
-empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each rule needs at least one use profile
-array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
-unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"mystery"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown select: mystery
-array profile unsupported effort is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
-ROWS
-  pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
-}
-
 test_bootstrap_reporting
-test_no_mistakes_min_version
 test_git_is_required_with_supported_install_instruction
-test_orca_backend_gates_orca_tool_only_when_selected
-test_session_provider_backends_do_not_require_tmux
-test_session_provider_backends_gate_own_cli_not_tmux
-test_herdr_install_requires_manual_action
-test_cmux_bundled_cli_satisfies_dependency
-test_unknown_backend_reports_invalid_configuration
-test_json_backends_require_jq_not_tmux
-test_treehouse_lease_check_follows_resolved_backend
+test_default_backend_requires_tmux_and_treehouse
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
 test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
-test_crew_dispatch_active_rules_are_surfaced
-test_crew_dispatch_validation

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-secondmate-liveness.test.sh - the session-start secondmate LIVENESS
 # guarantee: bin/fm-backend.sh's fm_backend_agent_alive probe (dispatching to
-# fm_backend_tmux_agent_alive / fm_backend_herdr_agent_alive) and
+# fm_backend_tmux_agent_alive) and
 # bin/fm-bootstrap.sh's secondmate_liveness_sweep() that acts on it.
 #
 # The gap under test (AGENTS.md "Session start"; evidence 2026-07-07): a
@@ -16,9 +16,6 @@
 #   - fm_backend_tmux_agent_alive classifies a verified-harness foreground
 #     process as alive, a bare shell as dead, and anything ambiguous
 #     (including a bare interpreter name) as unknown - never dead.
-#   - fm_backend_herdr_agent_alive is a thin wrapper over the already-verified
-#     fm_backend_herdr_pane_agent_state husk classifier: dead/no-agent -> dead,
-#     live -> alive, unknown -> unknown.
 #   - fm_backend_agent_alive routes to the right per-backend classifier and
 #     reports unknown for a backend with no verified classifier (never errors).
 #   - bin/fm-bootstrap.sh's secondmate_liveness_sweep respawns a confidently
@@ -114,35 +111,6 @@ test_tmux_agent_alive_classifies() {
   pass "fm_backend_tmux_agent_alive: alive/dead/unknown classification"
 }
 
-# --- unit level: fm_backend_herdr_agent_alive -------------------------------
-# Reuses the already-verified fm_backend_herdr_pane_agent_state husk
-# classifier (docs/herdr-backend.md "Respawn idempotency" /
-# "Agent liveness probe reuses the husk classifier"); this wrapper's own
-# mapping logic is tested in isolation by overriding that classifier, exactly
-# as tests/fm-backend-herdr.test.sh already overrides `sleep` in a bash -c
-# string for the same kind of isolated-unit assertion.
-
-test_herdr_agent_alive_maps_pane_agent_state() {
-  local out
-
-  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "dead"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
-  [ "$out" = dead ] || fail "herdr pane_agent_state=dead should map to dead, got '$out'"
-
-  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "no-agent"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
-  [ "$out" = dead ] || fail "herdr pane_agent_state=no-agent (restored bare shell) should map to dead, got '$out'"
-
-  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "live"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
-  [ "$out" = alive ] || fail "herdr pane_agent_state=live should map to alive, got '$out'"
-
-  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "unknown"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
-  [ "$out" = unknown ] || fail "herdr pane_agent_state=unknown should stay unknown, got '$out'"
-
-  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_alive "no-colon-target"' "$ROOT")
-  [ "$out" = unknown ] || fail "an unparseable target should classify as unknown, got '$out'"
-
-  pass "fm_backend_herdr_agent_alive: dead/no-agent->dead, live->alive, unknown->unknown"
-}
-
 # --- unit level: the generic fm_backend_agent_alive dispatcher --------------
 
 test_agent_alive_dispatcher_routes_and_falls_back() {
@@ -152,13 +120,10 @@ test_agent_alive_dispatcher_routes_and_falls_back() {
   out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive tmux sess:win' "$ROOT")
   [ "$out" = alive ] || fail "dispatcher should route tmux to fm_backend_tmux_agent_alive, got '$out'"
 
-  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_pane_agent_state() { printf "live"; }; fm_backend_agent_alive herdr sess:p1' "$ROOT")
-  [ "$out" = alive ] || fail "dispatcher should route herdr to fm_backend_herdr_agent_alive, got '$out'"
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive bogus sess:win' "$ROOT")
+  [ "$out" = unknown ] || fail "dispatcher should report unknown for an unknown backend, got '$out'"
 
-  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive zellij sess:win' "$ROOT")
-  [ "$out" = unknown ] || fail "dispatcher should report unknown for a backend with no verified classifier, got '$out'"
-
-  pass "fm_backend_agent_alive: routes tmux/herdr correctly, unknown for an unverified backend"
+  pass "fm_backend_agent_alive: routes tmux correctly, unknown for an unverified backend"
 }
 
 # --- sweep level: bin/fm-bootstrap.sh's secondmate_liveness_sweep -----------
@@ -183,15 +148,6 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.31.2 (fake)'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/no-mistakes"
   printf '%s\n' "$fakebin"
 }
 
@@ -387,7 +343,6 @@ test_sweep_noop_with_no_secondmate_meta() {
 }
 
 test_tmux_agent_alive_classifies
-test_herdr_agent_alive_maps_pane_agent_state
 test_agent_alive_dispatcher_routes_and_falls_back
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
