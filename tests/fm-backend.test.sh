@@ -85,6 +85,7 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
     # script's `. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"` would abort under set -eu.
     # Removing it does not weaken the conformance check: this test compares the
     # emitted tmux command shape, which the guard never touched.
+    # shellcheck disable=SC2016  # single quotes are deliberate: these are grep patterns matching the literal text "$SCRIPT_DIR" in the extracted script, not an expansion.
     git -C "$ROOT" show "$BASE_REF:bin/$f" \
       | grep -v '^# shellcheck source=bin/fm-gate-refuse-lib\.sh$' \
       | grep -v '^\. "\$SCRIPT_DIR/fm-gate-refuse-lib\.sh"$' \
