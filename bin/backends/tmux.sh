@@ -101,6 +101,17 @@ fm_backend_tmux_current_path() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null
 }
 
+# fm_backend_tmux_pane_pid: the pid of the pane's own shell, or empty on any tmux
+# error. The root for walking what is RUNNING inside a pane
+# (fm_provision_probe_descendants): an idle shell has no descendants, a shell
+# running `treehouse get` has its whole fetch/reset/post_create tree beneath it.
+# This is deliberately the pane's shell, not #{pane_current_command}, which
+# reports only the foreground name and so cannot tell a bare idle shell from the
+# hook's own `bash`.
+fm_backend_tmux_pane_pid() {  # <target>
+  tmux display-message -p -t "$1" '#{pane_pid}' 2>/dev/null
+}
+
 # fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
 # composer verification - used for the fixed spawn-time commands
 # (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence

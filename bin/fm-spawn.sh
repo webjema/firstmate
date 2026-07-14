@@ -88,6 +88,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-provision-lib.sh
+. "$SCRIPT_DIR/fm-provision-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -547,15 +549,6 @@ fi
 # the same physical form.
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
-real_path_or_raw() {  # <path>
-  local path=$1 real
-  if real=$(cd "$path" 2>/dev/null && pwd -P); then
-    printf '%s\n' "$real"
-  else
-    printf '%s\n' "$path"
-  fi
-}
-
 # Session-provider container-ensure + task creation (the session-name /
 # new-window sequence in bin/backends/tmux.sh). It yields the $T ("target")
 # string every downstream operation (send/capture/kill) treats as opaque routing
@@ -604,7 +597,12 @@ spawn_send_key() {  # <target> <key>
 if [ "$KIND" != secondmate ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the treehouse subshell: the pane's cwd moves from the project to the
+  # worktree. fm-provision-lib.sh owns this wait - it distinguishes a cold
+  # workspace still WARMING (a measured 137s dependency install for optiroq, which
+  # the old fixed 60s poll killed outright) from a pane that has genuinely FAILED,
+  # and names which failure it was. Do not reintroduce a bare timeout here.
+  #
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -612,16 +610,8 @@ if [ "$KIND" != secondmate ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
-    fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+  if ! WT=$(fm_provision_wait "$WT_TARGET" "$PROJ_ABS_REAL"); then
+    echo "error: could not acquire a worktree for $ID; inspect window $T" >&2
     exit 1
   fi
 
