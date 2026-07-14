@@ -140,7 +140,7 @@ Load `direction` when authoring or evolving one.
 
 `<mode>` is how a finished change reaches `main`, chosen per project at add time and recorded in the registry line:
 
-- `PR` (default; `[...]` may be omitted) - the crewmate self-reviews, pushes, and opens a PR; firstmate reviews the diff against the direction and watches CI; the captain merges.
+- `PR` (default; `[...]` may be omitted) - the crewmate pushes its branch, firstmate reviews it BEFORE any PR exists, the crewmate then opens the PR, and the captain merges.
 - `local-only` - local branch, no remote, no PR; firstmate reviews the diff, the captain approves, firstmate merges to local `main` with `bin/fm-merge-local.sh`.
 
 Orthogonal to mode is an optional `+yolo` flag (`[PR +yolo]`), default off and **not recommended**.
@@ -156,7 +156,7 @@ Quality has two layers, and they are deliberately different in kind.
 Crewmates run it inside their worktree and commit the result; firstmate never installs hooks into a clone itself.
 A blocked commit or push means the floor did its job - never steer a crewmate around a hook.
 
-**The judgment layer** is review: the crewmate's own `/code-review` and `/verify` pass, then firstmate's independent, direction-aware review of the diff before it reaches the captain.
+**The judgment layer** is review: the crewmate's own `/code-review` and `/verify`, then firstmate's independent, direction-aware review of the pushed branch (section 6).
 The crew does not mark its own homework.
 
 ### Project memory
@@ -239,16 +239,15 @@ Add ship and scout tasks to `data/backlog.md` under In flight; a secondmate spaw
 
 ### Review and ship
 
-A ship crewmate reports `done: PR <url>` (mode `PR`) or `done: ready in branch fm/<id>` (`local-only`).
-It has already run `/code-review` and `/verify` and satisfied the project's hooks. **Your review is independent of that, not a rubber stamp for it.**
+A ship crewmate pushes its branch and reports `review-ready:` (mode `PR`) or `done: ready in branch fm/<id>` (`local-only`).
+**Your review is independent of the crew's own `/code-review`, `/verify`, and hook run, not a rubber stamp for them.**
 
-1. Read the diff with `bin/fm-review-diff.sh <id>` - a summary first, then `--full` or `--files <path>` for the code - never a raw `git diff` against the local default branch, which can be stale.
+1. Read the diff with `bin/fm-review-diff.sh <id>` (summary first, then `--full` or `--files <path>`) - never a raw `git diff`, which can be stale.
 2. Review it against the project's direction (section 5, gate 4). Mechanical quality is the hooks' and CI's job; you are looking for drift, wrong-shaped solutions, and scope creep.
-3. For mode `PR`, run `bin/fm-pr-check.sh <id> <PR url>`. It records the PR in the task's meta and arms a poll that wakes you when CI fails or the PR merges.
-4. Tell the captain: the PR's full `https://...` URL, a one-paragraph summary, and your direction verdict. If the change drifts, say so plainly.
-5. On the captain's "merge it", run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>`. For `local-only`, run `bin/fm-merge-local.sh <id>` after approval. Never merge a red PR.
-
-Do not call `gh pr merge` directly for a task's PR; the helper records what teardown later needs to verify the merge.
+3. Reply with `bin/fm-send.sh <id>`: findings (the crew fixes them in place and re-signals) or approval (the crew opens the PR and reports `done: PR <url>`).
+4. Run `bin/fm-pr-check.sh <id> <PR url>` to arm the CI poll. It wakes you when CI fails or the PR merges.
+5. Tell the captain: the PR's full `https://...` URL, a one-paragraph summary, and your direction verdict. If the change drifts, say so plainly.
+6. On the captain's "merge it", run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>`, never `gh pr merge` directly. For `local-only`, run `bin/fm-merge-local.sh <id>` after approval. Never merge a red PR.
 
 ### Teardown
 

@@ -47,14 +47,19 @@ FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 # `merged` appearing anywhere was enough - and burned a full firstmate turn on a
 # routine progress note. The verb is the crew's actual claim; everything after the
 # colon is commentary.
-FM_CLASSIFY_CAPTAIN_VERBS='done needs-decision blocked failed'
+#
+# `review-ready` is the pre-push review gate (AGENTS.md section 6): the crew has
+# pushed its branch and opened NO PR, and is now blocked on firstmate's review. It is
+# captain-relevant for the same reason `blocked` is - the crew cannot proceed until
+# firstmate acts - and absorbing it would strand a finished crew forever.
+FM_CLASSIFY_CAPTAIN_VERBS='done review-ready needs-decision blocked failed'
 
 # The whole-line regex is now ONLY the explicit escape hatch: a home that sets
 # FM_CAPTAIN_RE is deliberately asking for its own vocabulary, matched against the
 # whole line, and gets exactly that. This default is what such a home starts from,
 # and is never applied on its own - with FM_CAPTAIN_RE unset, the verb set above is
 # the entire test.
-FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|review-ready:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
 #   paused: <reason>
@@ -213,6 +218,24 @@ $set
 EOF
   printf '%s' "$out"
 }
+# Drop only the record for <key> that was opened by <verb>, leaving records opened by a
+# different verb under the same key intact. `done:` closes a review-ready and NOTHING
+# else: a crew that reports done while a needs-decision is still open must not have that
+# decision silently cleared - masking an open captain decision behind a later terminal
+# line is the exact failure this whole section exists to prevent.
+_fm_decision_drop_verb() {  # <open-set> <key> <verb>
+  local set=$1 key=$2 verb=$3 line out=''
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "$key"$'\t'"$verb"$'\t'*) : ;;
+      *) out="${out}${line}"$'\n' ;;
+    esac
+  done <<EOF
+$set
+EOF
+  printf '%s' "$out"
+}
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Pure read of
@@ -234,6 +257,28 @@ status_open_decisions() {  # <status-file>
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+        ;;
+      review-ready)
+        # A review-ready crew has pushed, opened no PR, and STOPPED by contract, so it
+        # will never append another line. Every per-wake backstop is one-shot (signal
+        # needs a status change, stale needs a changing pane hash, the CI poll needs a PR
+        # that does not exist yet), so if the single wake is drained and firstmate then
+        # restarts or moves on, NOTHING raises it again: the crew idles forever and its
+        # branch sits on the remote with no PR - strictly worse than a lost `done:`, which
+        # at least left a visible PR behind. Opening a durable decision here is what makes
+        # the heartbeat re-raise it until it is actually reviewed.
+        # It supersedes only a previous review-ready (a re-signal after fixing findings),
+        # never an open needs-decision.
+        note=$(status_line_note "$line")
+        open=$(_fm_decision_drop_verb "$open" "$key" review-ready)
+        [ -n "$open" ] && open="${open}"$'\n'
+        open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+        ;;
+      done)
+        # The crew's own `done: PR <url>` is what closes its review-ready: the review is
+        # over precisely when the approved PR exists. Closes nothing else (see
+        # _fm_decision_drop_verb).
+        open=$(_fm_decision_drop_verb "$open" "$key" review-ready)
         ;;
       "$resolve")
         open=$(_fm_decision_drop "$open" "$key")
