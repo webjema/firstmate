@@ -173,7 +173,7 @@ window_is_busy() {  # <window> <tail40>
 # that is actually going out. Under afk the daemon owns triage and probes for
 # itself, so the watcher records `untriaged` rather than probing twice.
 signal_payload() {  # <state> <file>...
-  local state=$1 f base task class seen="" ev=""
+  local state=$1 f base task class seen="" ev="" dkey
   shift
   for f in "$@"; do
     base=${f##*/}
@@ -187,7 +187,14 @@ signal_payload() {  # <state> <file>...
     seen="$seen $task"
     if afk_present; then class=untriaged; else class=$(crew_absorb_class "$task"); fi
     [ -n "$ev" ] && ev="$ev ; "
-    ev="$ev$(wake_evidence "$state" "$task" "$class")"
+    # A still-open decision rides the payload, because last= alone can hide one: the
+    # crew's later working: note is the last line, but the question is still unanswered.
+    dkey=$(status_open_decision_key "$state/$task.status" || true)
+    if [ -n "$dkey" ]; then
+      ev="$ev$(wake_evidence "$state" "$task" "$class" "open-decision=$dkey")"
+    else
+      ev="$ev$(wake_evidence "$state" "$task" "$class")"
+    fi
   done
   if [ -n "$ev" ]; then
     printf 'signal: %s | %s' "$*" "$ev"
@@ -650,7 +657,9 @@ EOF
     # probe), so the || ordering evaluates it ONLY for a non-afk, no-captain-verb
     # signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_absorbable "$STATE" $files; then
+    if afk_present || signal_reason_is_actionable $files \
+       || signal_has_new_open_decision "$STATE" $files \
+       || ! signal_crew_absorbable "$STATE" $files; then
       # The wake is going out, so pay for its evidence ONCE here, in bash: each
       # referenced task's absorb verdict and last status line ride the payload,
       # and the orchestrator re-reads nothing for the common case. The verdict is
@@ -672,6 +681,8 @@ $pending
 EOF
       # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
       turnend_record_seen "$STATE" $files
+      # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+      decision_record_seen "$STATE" $files
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
@@ -682,6 +693,8 @@ $pending
 EOF
       # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
       turnend_record_seen "$STATE" $files
+      # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+      decision_record_seen "$STATE" $files
       triage_log "absorbed benign signal:$files"
     fi
   fi
@@ -700,7 +713,13 @@ EOF
     if ! status_is_paused "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
-    if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
+    # An idle secondmate is healthy BY CHARTER, so its idle pane is never a wedge and
+    # is skipped exactly as before. A secondmate with LIVE WORK is a different animal:
+    # it took a routed request, or has crew of its own in flight, and a frozen pane
+    # then means the same thing it means for a crewmate. The blanket skip made that
+    # wedge silent forever (fm-classify-lib.sh owns the live-work test).
+    if [ "$kind" = secondmate ] && ! status_is_paused "$last" \
+       && ! secondmate_has_live_work "$STATE" "$task"; then
       continue
     fi
     tail40=$(fm_backend_capture tmux "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
@@ -729,8 +748,23 @@ EOF
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
-            paused) handle_paused_stale "$w" "$task" "$h" ;;
-            *)      clear_pause_tracking "$w" ;;
+            paused)  handle_paused_stale "$w" "$task" "$h" ;;
+            working) clear_pause_tracking "$w" ;;
+            *)
+              clear_pause_tracking "$w"
+              # Not paused, not working, and its pane has been frozen across two
+              # polls while work is outstanding: this is the wedged secondmate the
+              # blanket skip used to hide. Once per distinct stale hash, like any
+              # other crew - an idle secondmate never reaches here at all.
+              if secondmate_has_live_work "$STATE" "$task" \
+                 && [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
+                reason=$(wake_payload stale "$w" "$STATE" "$task" none "kind=secondmate")
+                fm_wake_append stale "$w" "$reason" || exit 1
+                printf '%s' "$h" > "$sf"
+                mark_surfaced "$STATE/$task.status"
+                wake "$reason"
+              fi
+              ;;
           esac
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before. The

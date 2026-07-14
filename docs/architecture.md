@@ -27,6 +27,14 @@ The converse is the wedge the pane hash structurally cannot see: a pane that kee
 When such a pane's worktree has not moved for `FM_WT_STILL_SECS` (default 1800, `0` disables), the watcher surfaces one `stale:` wake per stillness episode carrying `class=spinning wt=still`, and clears the episode the moment the worktree moves.
 That wake is deliberately narrow: ship tasks only (a scout's deliverable is a report outside the worktree), never while the pane shows a busy signature (a long build or test run is legitimately motionless and its harness says so), never for a declared pause, and never under away mode.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
+
+Secondmates are idle by charter, so their idle panes are never surfaced - but a secondmate with LIVE WORK, meaning at least one task meta in its own home, must be alive to supervise that crew, and a pane frozen across two polls while its children run surfaces once per stale hash with `kind=secondmate`.
+A secondmate's own `working:` line is not live-work evidence (it writes one while merely standing by), and `bin/fm-crew-state.sh` still exempts secondmates from the busy check, because that exemption is what keeps a secondmate's open decision visible through a busy pane.
+A secondmate that wedges before spawning any crew leaves no live-work evidence anywhere and remains invisible to the stale path; its routed request still reaches firstmate through the signal path.
+
+An open decision can no longer be masked by a later line.
+`status_open_decisions` folds the whole log into the decisions still open, and the wake path now consumes that fold rather than trusting `last_status_line`, so a still-open `needs-decision` followed by a routine `working:` note surfaces instead of waiting for a backstop.
+The wake carries the open decision's key as `open-decision=<key>`, and fires only when the open SET CHANGES, so a decision firstmate already holds does not re-wake it on the crew's every later line.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so a busy pane outranks an old captain-relevant status-log line the crew has since moved past.
 No-change heartbeats are also benign.

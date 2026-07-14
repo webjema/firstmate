@@ -77,12 +77,18 @@ test_signal_wake_carries_evidence() {
   printf 'needs-decision: pick A or B\n' > "$status_file"
   wait_for_exit "$pid" 80
 
-  assert_grep "signal: $status_file | task=sig-p1 class=none last=needs-decision: pick A or B" "$out" \
-    "surfaced signal wake did not carry task/class/last evidence"
+  assert_grep "signal: $status_file | task=sig-p1 class=none" "$out" \
+    "surfaced signal wake did not carry task and absorb verdict"
+  assert_grep "last=needs-decision: pick A or B" "$out" \
+    "surfaced signal wake did not carry the last status line"
+  # The open-decision fold rides along: last= alone cannot say whether the question
+  # is still unanswered (tests/fm-silent-holes.test.sh owns that contract).
+  assert_grep "open-decision=default" "$out" "surfaced signal wake did not carry the open decision"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain failed"
-  assert_grep "task=sig-p1 class=none last=needs-decision: pick A or B" "$drain_out" \
-    "the queued record lost the payload evidence"
+  assert_grep "task=sig-p1 class=none" "$drain_out" "the queued record lost task/class"
+  assert_grep "last=needs-decision: pick A or B" "$drain_out" \
+    "the queued record lost the last status line"
   pass "signal wake carries task, absorb verdict, and last status line (queue included)"
 }
 

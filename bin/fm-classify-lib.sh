@@ -236,6 +236,9 @@ status_open_decisions() {  # <status-file>
 #   demand-deep-inspection=1  at FM_WEDGE_DEMAND_INSPECT_COUNT escalations
 #   recheck=pause  the bounded re-surface of a declared external wait
 #   wt=still  the worktree has not moved for FM_WT_STILL_SECS (pairs with class=spinning)
+#   open-decision=<key>  a decision the crew opened is STILL OPEN in the durable fold,
+#          even if a later line masks it as `last=` (status_open_decisions owns the fold)
+#   kind=secondmate  a wedged secondmate with live work (an idle one is healthy, and silent)
 #   last=  the last non-blank status line, verbatim, or `(none)`
 #
 # A payload is a token diet, not a new verbosity: one line, no prose.
@@ -459,6 +462,100 @@ signal_crew_absorbable() {  # <state> <file> ...
     crew_is_provably_working "$task" || return 1
   done
   [ -n "$seen" ] || return 1
+  return 0
+}
+
+# --- secondmates: idle is healthy, wedged is not ----------------------------
+#
+# A secondmate is idle BY CHARTER when nothing is routed to it, so its idle pane is
+# not a wedge and must never be surfaced - which is why the watcher skipped stale
+# detection for secondmates entirely. The cost of that blanket skip was a silent
+# hole: a secondmate that wedged mid-task produced no stale wake at all, ever.
+#
+# The discriminator is LIVE WORK: does its own home hold at least one task meta -
+# crew of its own, in flight? A secondmate supervising crew MUST be alive to
+# supervise it, so a pane frozen across two polls while its children run means its
+# whole fleet is unwatched, which is the wedge worth waking firstmate for. A
+# secondmate with no crew in flight is idle, and stays as silent as it is today.
+#
+# Deliberately NOT part of the test: the secondmate's own `working:` status line. A
+# secondmate writes one while merely standing by ("working: the parent supervises
+# this secondmate"), so it says nothing about whether work is outstanding - using it
+# would surface every healthy idle secondmate, which is exactly what must not happen.
+# The honest limit of this test: a secondmate that wedges BEFORE spawning any crew
+# has produced no live-work evidence anywhere, and stays invisible to the stale path.
+# Its routed request is not lost - an open needs-decision or blocked still reaches
+# firstmate through the signal path and the open-decision fold.
+secondmate_has_live_work() {  # <state> <task>
+  local state=$1 task=$2 home meta
+  [ -n "$task" ] || return 1
+  home=$(grep '^home=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$home" ] || return 1
+  for meta in "$home"/state/*.meta; do
+    [ -e "$meta" ] && return 0
+  done
+  return 1
+}
+
+# --- open decisions must not be masked --------------------------------------
+#
+# status_open_decisions folds the WHOLE log into the decisions still open, but the
+# watcher's triage only ever read the LAST line. So a still-open needs-decision
+# followed by any later `working:` line was invisible to the wake path: the crew's
+# question sat unasked until a slow backstop happened to notice. The signature below
+# lets the wake path consume the fold.
+#
+# It is a signature, not a boolean, so the wake stays NARROW: firstmate is woken when
+# the open SET CHANGES (a new or different decision is open), not on every later line
+# while a known decision stays open. An already-surfaced decision that firstmate is
+# still thinking about must not re-wake it on the crew's next progress note.
+status_open_decision_sig() {  # <status-file>
+  local open
+  open=$(status_open_decisions "$1")
+  [ -n "$open" ] || return 0
+  printf '%s' "$open" | tr '\n\t' '; '
+}
+
+# The key of the most recently opened still-open decision, for the wake payload.
+status_open_decision_key() {  # <status-file>
+  local open
+  open=$(status_open_decisions "$1")
+  [ -n "$open" ] || return 1
+  printf '%s' "$open" | tail -1 | cut -f1
+}
+
+# 0 (actionable) if any status file in a signal wake has a still-open decision whose
+# open-set signature this watcher has not surfaced yet.
+signal_has_new_open_decision() {  # <state> <file> ...
+  local state=$1 f base task sig
+  shift
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in *.status) task=${base%.status} ;; *) continue ;; esac
+    sig=$(status_open_decision_sig "$f")
+    [ -n "$sig" ] || continue
+    [ "$sig" = "$(cat "$state/.decision-seen-$task" 2>/dev/null || true)" ] && continue
+    return 0
+  done
+  return 1
+}
+
+# Record the open-decision signatures just handled, so an open decision that stays
+# open does not re-wake firstmate on the crew's next line. Same discipline as the
+# .seen-* signatures: written whether the wake surfaced or was absorbed.
+decision_record_seen() {  # <state> <file> ...
+  local state=$1 f base task sig
+  shift
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in *.status) task=${base%.status} ;; *) continue ;; esac
+    sig=$(status_open_decision_sig "$f")
+    if [ -n "$sig" ]; then
+      printf '%s' "$sig" > "$state/.decision-seen-$task" 2>/dev/null || true
+    else
+      rm -f "$state/.decision-seen-$task" 2>/dev/null || true
+    fi
+  done
   return 0
 }
 
