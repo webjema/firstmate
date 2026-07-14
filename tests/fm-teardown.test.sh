@@ -38,6 +38,8 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) PR mode + NO pr= recorded, PR discovered by branch   -> ALLOW  (yolo/no-CI merge)
+#   (q2) PR mode + pushed branch + PR OPEN, not merged       -> ALLOW  (teardown at PR-open)
+#   (q3) PR mode + PR OPEN but a local commit never pushed   -> REFUSE (guard not weakened)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -625,6 +627,176 @@ test_pr_mode_truly_unpushed_refuses() {
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "a PR-mode worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+# Report PR 7 as OPEN (never merged) - the state at the moment the crew opens its PR,
+# which is now when firstmate releases the workspace (AGENTS.md section 6, Teardown).
+# It must answer the PLAIN `--json state` query teardown actually makes; a mock that only
+# knows the merged-path query would silently send teardown down the full-purge branch and
+# the test would prove nothing.
+add_gh_pr_open() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,open" ; exit 0 ;;
+  "pr view")
+    printf '%s\n' "pull_request:" "  number: 7" "  state: open" ; exit 0 ;;
+  "pr merge") exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *"state,headRefOid"*) printf '%s\t%s\n' 'OPEN' 'deadbeef' ; exit 0 ;;
+      *"--json state"*) printf '%s\n' 'OPEN' ; exit 0 ;;
+      *"statusCheckRollup"*) printf '%s\n' 'OPEN deadbeef pending' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# The CI poll firstmate arms at PR-open (bin/fm-pr-check.sh writes exactly these).
+arm_ci_poll() {
+  local case_dir=$1
+  printf 'echo merged\n' > "$case_dir/state/task-x1.check.sh"
+  : > "$case_dir/state/task-x1.ci-seen"
+}
+
+test_pr_open_releases_workspace_but_keeps_the_ci_watch_and_merge_state() {
+  local case_dir rc meta
+  case_dir=$(make_case pr-open-release)
+  write_meta "$case_dir" PR ship
+  wt_commit_file "$case_dir" feature.txt shipped "the crew's change"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_gh_pr_open "$case_dir"
+  append_pr_meta_url "$case_dir"
+  arm_ci_poll "$case_dir"
+  printf 'done: PR https://github.com/example/repo/pull/7\n' > "$case_dir/state/task-x1.status"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  meta="$case_dir/state/task-x1.meta"
+
+  expect_code 0 "$rc" "pr-open-release: teardown must succeed once the PR is open and the branch is pushed"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "pr-open-release: refused work that is already on the remote"
+
+  # The workspace - the expensive thing - is gone.
+  assert_absent "$case_dir/state/task-x1.status" "pr-open-release: crew status log should be cleared"
+
+  # ...but everything firstmate needs AFTER the crew is gone survives. These two are the
+  # whole point: without check.sh there are no `check:` wakes at all (bin/fm-watch.sh's
+  # sweep is their only source), so a PR that goes red is NEVER reported; and without the
+  # meta, bin/fm-pr-merge.sh refuses to merge, which kills every PR-mode task.
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "pr-open-release: DELETED THE CI POLL - firstmate is now blind to a red PR"
+  assert_present "$case_dir/state/task-x1.ci-seen" "pr-open-release: dropped the CI seen-marker"
+  assert_present "$meta" \
+    "pr-open-release: DELETED THE META - bin/fm-pr-merge.sh now refuses every merge"
+  assert_grep 'pr=https://github.com/example/repo/pull/7' "$meta" \
+    "pr-open-release: released meta lost the PR url the merge path requires"
+  assert_grep 'released=' "$meta" "pr-open-release: released meta is not marked released"
+  # No window: a crewless task that still advertises a pane reads as a DEAD crew to
+  # recovery and to the watcher's window sweep, and firstmate would try to respawn it.
+  assert_no_grep 'window=' "$meta" "pr-open-release: released meta still advertises a window"
+  pass "at PR-open the workspace is released while the CI watch and the merge state survive"
+}
+
+test_merge_still_works_after_the_workspace_is_released() {
+  local case_dir rc out
+  case_dir=$(make_case pr-open-merge)
+  write_meta "$case_dir" PR ship
+  wt_commit_file "$case_dir" feature.txt shipped "the crew's change"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_gh_pr_open "$case_dir"
+  append_pr_meta_url "$case_dir"
+  arm_ci_poll "$case_dir"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+
+  # THE captain's next move, and the one the first version of this change broke outright:
+  # "merge it". bin/fm-pr-merge.sh:39 refuses without state/<id>.meta, and AGENTS.md
+  # forbids the `gh pr merge` fallback - so a purge at PR-open dead-ends every task here.
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-merge.sh" task-x1 'https://github.com/example/repo/pull/7' 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "post-release merge: the sanctioned merge path must still work"$'\n'"$out"
+  assert_not_contains "$out" 'no meta for task' \
+    "post-release merge: fm-pr-merge.sh cannot find the meta teardown deleted"
+  assert_not_contains "$out" 'refusing to merge' "post-release merge: merge path refused"
+  pass "after the workspace is released, the captain's merge still goes through fm-pr-merge.sh"
+}
+
+test_second_teardown_after_the_merge_purges_the_state() {
+  local case_dir rc
+  case_dir=$(make_case pr-merged-purge)
+  write_meta "$case_dir" PR ship
+  wt_commit_file "$case_dir" feature.txt shipped "the crew's change"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_gh_pr_open "$case_dir"
+  append_pr_meta_url "$case_dir"
+  arm_ci_poll "$case_dir"
+  run_teardown "$case_dir" > /dev/null 2>&1
+
+  # The PR merges; firstmate runs the SAME command again to close the task out. It must
+  # tolerate the already-released workspace (no worktree, no window) and purge for real,
+  # or the state dir accumulates a poll that polls a merged PR forever.
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/project" rev-parse origin/fm/task-x1)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "post-merge purge: second teardown must succeed on a released task"
+  assert_absent "$case_dir/state/task-x1.meta" "post-merge purge: meta should be gone once merged"
+  assert_absent "$case_dir/state/task-x1.check.sh" "post-merge purge: CI poll should be gone once merged"
+  assert_absent "$case_dir/state/task-x1.ci-seen" "post-merge purge: ci-seen should be gone once merged"
+  pass "the second teardown, after the merge, purges the supervision state for real"
+}
+
+test_pr_open_with_unpushed_commit_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case pr-open-unpushed)
+  write_meta "$case_dir" PR ship
+  # An OPEN PR is not a licence to discard work. The crew pushed, opened the PR, and then
+  # committed something MORE that never reached the remote and is in no PR. That commit is
+  # genuinely unlanded, and teardown must still refuse it: releasing the workspace at
+  # PR-open fires the guard EARLIER, it does not weaken it.
+  wt_commit_file "$case_dir" feature.txt shipped "pushed work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  wt_commit_file "$case_dir" extra.txt later "a commit made after the push"
+  add_gh_pr_open "$case_dir"
+  append_pr_meta_url "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pr-open-unpushed: teardown must refuse a commit that never reached the remote"
+  grep -q REFUSED "$case_dir/stderr" || fail "pr-open-unpushed: no REFUSED line in stderr"
+  # And nothing may have been released: the workspace must still be there to fix in.
+  assert_present "$case_dir/state/task-x1.meta" "pr-open-unpushed: refused teardown still touched the meta"
+  pass "an open PR does not license discarding a commit that was never pushed"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -1249,6 +1421,10 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_pr_mode_origin_remote_allows
 test_pr_mode_truly_unpushed_refuses
+test_pr_open_releases_workspace_but_keeps_the_ci_watch_and_merge_state
+test_merge_still_works_after_the_workspace_is_released
+test_second_teardown_after_the_merge_purges_the_state
+test_pr_open_with_unpushed_commit_still_refuses
 test_local_only_force_overrides_unpushed
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head

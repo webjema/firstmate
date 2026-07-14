@@ -286,6 +286,10 @@ task_json_lines() {
     yolo=$(meta_value "$meta" yolo)
     project=$(meta_value "$meta" project)
     worktree=$(meta_value "$meta" worktree)
+    # Set by bin/fm-teardown.sh's workspace release at PR-open: the crew is gone by design
+    # and the task lives on only as an open PR. Carried into the snapshot so no consumer
+    # mistakes a crewless task for a dead one.
+    released=$(meta_value "$meta" released)
     home=$(meta_value "$meta" home)
     projects=$(meta_value "$meta" projects)
     backend=$(fm_backend_of_meta "$meta")
@@ -372,6 +376,7 @@ task_json_lines() {
       --arg projects "$projects" \
       --arg backend "$backend" \
       --arg target "$target" \
+      --arg released "$released" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
@@ -404,7 +409,7 @@ task_json_lines() {
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:$current_state,
-        endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive},
+        endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,released:($released | if . == "" then null else . end)},
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
         hints:{
           pending_decision:$pending_decision,

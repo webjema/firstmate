@@ -275,7 +275,15 @@ for meta in "$STATE"/*.meta; do
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
-  if [ -n "$window" ]; then
+  released=$(fm_meta_get "$meta" released)
+  if [ -n "$released" ]; then
+    # Workspace released at PR-open (bin/fm-teardown.sh phase 1): there is NO crew by
+    # design, and its absence is not a fault to reconcile. The task is alive only as an
+    # open PR, watched by state/<id>.check.sh. Say so explicitly, because a windowless
+    # meta otherwise reads as a dead crew and recovery would try to resurrect a task whose
+    # work is already on the remote.
+    printf 'endpoint: released (%s) - no crew expected; PR open, CI watched. Do NOT respawn.\n' "$released"
+  elif [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
     if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"

@@ -35,7 +35,10 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     elif $t.endpoint.exists then "present"
     else "absent" end;
   def endpoint_of($t):
-    if $t.kind == "secondmate" then "\(endpoint_exists($t)) / \($t.endpoint.agent_alive)"
+    # A released task has no crew ON PURPOSE (workspace freed at PR-open); it is not a
+    # dead endpoint to reconcile.
+    if $t.endpoint.released != null then "released (PR open)"
+    elif $t.kind == "secondmate" then "\(endpoint_exists($t)) / \($t.endpoint.agent_alive)"
     else endpoint_exists($t) end;
   def artifact($t):
     if $t.pr.url != null then $t.pr.url

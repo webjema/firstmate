@@ -89,7 +89,7 @@ Work from what it printed: the lock verdict, the drained wake records (your firs
 Treat the `window=` values as the live direct-report set.
 Do not sweep every `fm-*` tmux window across all sessions; another firstmate home's children share that namespace and are not your orphans.
 
-For a meta with no window, or an endpoint reported dead, reconcile it.
+For a meta with no window, or an endpoint reported dead, reconcile it - unless it reports `released`: crewless by design, never respawn it.
 For `kind=secondmate`, load `secondmate-provisioning` and respawn it from its recorded meta or registry entry.
 Do not reconstruct a secondmate's tree from the main home; each secondmate reconciles its own work and then idles.
 
@@ -245,19 +245,15 @@ A ship crewmate pushes its branch and reports `review-ready:` (mode `PR`) or `do
 1. Read the diff with `bin/fm-review-diff.sh <id>` (summary first, then `--full` or `--files <path>`) - never a raw `git diff`, which can be stale.
 2. Review it against the project's direction (section 5, gate 4). Mechanical quality is the hooks' and CI's job; you are looking for drift, wrong-shaped solutions, and scope creep.
 3. Reply with `bin/fm-send.sh <id>`: findings (the crew fixes them in place and re-signals) or approval (the crew opens the PR and reports `done: PR <url>`).
-4. Run `bin/fm-pr-check.sh <id> <PR url>` to arm the CI poll. It wakes you when CI fails or the PR merges.
+4. Run `bin/fm-pr-check.sh <id> <PR url>` to arm the CI poll, then tear the crew down (below).
 5. Tell the captain: the PR's full `https://...` URL, a one-paragraph summary, and your direction verdict. If the change drifts, say so plainly.
 6. On the captain's "merge it", run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>`, never `gh pr merge` directly. For `local-only`, run `bin/fm-merge-local.sh <id>` after approval. Never merge a red PR.
 
 ### Teardown
 
-```sh
-bin/fm-teardown.sh <id>
-```
-
-Only after the merge is confirmed.
-The script refuses if the worktree holds uncommitted or unlanded work; treat a refusal as stop-and-investigate, not an obstacle.
-Its header owns the landed-work definition.
+Run `bin/fm-teardown.sh <id>` **twice**: at PR-open to free the workspace, and again after the merge to close the task out.
+Its header owns both phases and the landed-work definition; a refusal is stop-and-investigate, not an obstacle.
+`local-only` tears down once, after the merge.
 Then move the task to Done in the backlog with the full PR URL or merge note, and re-evaluate the queue: dispatch queued work whose blockers are gone and whose date gate, if any, has arrived.
 
 ### Scout tasks

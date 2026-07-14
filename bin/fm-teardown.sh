@@ -4,6 +4,28 @@
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
+#
+# TWO PHASES, because a PR-mode task is torn down at PR-OPEN and the PR outlives the
+# crew. Run the SAME command both times; it picks the phase from the PR's state:
+#   PR still OPEN  -> WORKSPACE RELEASE. Frees the worktree, window, and task tmp (the
+#                     multi-GB things a finished crew holds for nothing), and KEEPS the
+#                     supervision state firstmate still needs with no crew alive:
+#                     state/<id>.check.sh + .ci-seen (the ONLY source of `check:` wakes,
+#                     so a PR going red is still reported and the merge still wakes the
+#                     fleet sync) and state/<id>.meta (bin/fm-pr-merge.sh refuses to merge
+#                     without it). The meta's window= line is dropped, so a crewless task
+#                     never reads as a dead crew to recovery or the watcher's window sweep.
+#   otherwise      -> FULL TEARDOWN. Purges every state file, syncs the clone. This is what
+#                     the second run (after the merge) does, and what a scout, a secondmate,
+#                     a local-only task, a no-PR task, and --force always do.
+# The safety checks are identical in both phases and are not relaxed by either: nothing is
+# released until the work is LANDED as defined below.
+#
+# THE TRADE-OFF, stated plainly: releasing at PR-open means that if CI fails, or the captain
+# wants changes once the PR is open, there is no crew left and the fix costs a fresh spawn.
+# That is deliberate. A finished crew otherwise idles for as long as a human takes to look
+# (measured: 3m13s of work, then 51m29s idle, holding a multi-GB workspace), and reviewing
+# BEFORE the push is what makes a post-PR finding rare in the first place.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -307,6 +329,53 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default
+}
+
+# --- the two phases of teardown ---------------------------------------------
+#
+# Teardown does two separable things, and conflating them is a bug:
+#
+#   1. RELEASE THE WORKSPACE - kill the window, return the worktree, drop the task tmp.
+#      This is the expensive thing a finished crew holds (multi-GB), and once its PR is
+#      open there is nothing left for the crew to do, so it should happen at PR-open.
+#   2. PURGE THE SUPERVISION STATE - meta, status, CI poll. This must NOT happen while a
+#      PR is open, because firstmate still needs it AFTER the crew is gone:
+#        - state/<id>.check.sh is the ONLY source of `check:` wakes (bin/fm-watch.sh's
+#          `for c in "$STATE"/*.check.sh` sweep). Delete it and a PR that goes red is
+#          never reported, and the merged-PR wake (and its fleet sync) never fires.
+#        - state/<id>.meta is a hard precondition of bin/fm-pr-merge.sh, which refuses to
+#          merge without it - so purging it breaks the sanctioned merge path outright.
+#
+# So an open PR releases the workspace and KEEPS the watch; the second teardown (after the
+# merge) purges. The window= line is dropped from the released meta on purpose: with no
+# crew, a meta that still advertises a pane reads as a DEAD crew to recovery and to the
+# watcher's window sweep, and firstmate would try to resurrect a task that is simply done.
+pr_is_still_open() {
+  local state
+  [ -n "$PR_URL" ] || return 1
+  [ "$FORCE" != "--force" ] || return 1
+  case "$KIND" in scout|secondmate) return 1 ;; esac
+  [ "$MODE" != local-only ] || return 1
+  # Ask from the PROJECT, not the worktree: by this point the worktree is already gone.
+  state=$(cd "$PROJ" && gh pr view "$PR_URL" --json state -q .state 2>/dev/null) || return 1
+  case "$state" in
+    OPEN|open) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+release_supervision_state() {
+  local tmp
+  tmp=$(mktemp "$STATE/.$ID.meta.XXXXXX") || return 1
+  grep -v '^window=' "$META" > "$tmp"
+  printf 'released=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$tmp"
+  mv "$tmp" "$META"
+  # Everything the crew-liveness machinery keys on goes; the PR watch and the merge
+  # precondition stay. state/<id>.check.sh and state/<id>.ci-seen are deliberately absent
+  # from this list.
+  rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.pi-ext.ts" \
+    "$STATE/$ID.grok-turnend-token" "$STATE/.turnend-seen-$ID" "$STATE/.decision-seen-$ID" \
+    "$STATE/.wt-size-$ID" "$STATE/.wt-snap-$ID" "$STATE/.wt-since-$ID" "$STATE/.wt-still-woke-$ID"
 }
 
 backlog_refresh_reminder() {
@@ -1042,6 +1111,17 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+
+if pr_is_still_open; then
+  release_supervision_state
+  echo "teardown $ID: WORKSPACE RELEASED (window $T, worktree $WT); PR $PR_URL is still open."
+  echo "  Kept state/$ID.meta (bin/fm-pr-merge.sh refuses to merge without it) and"
+  echo "  state/$ID.check.sh (the ONLY source of check: wakes - CI failure and merge)."
+  echo "  Run bin/fm-teardown.sh $ID again once the PR merges to close the task out."
+  backlog_refresh_reminder
+  exit 0
+fi
+
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.ci-seen" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/.turnend-seen-$ID" "$STATE/.decision-seen-$ID" "$STATE/.wt-size-$ID" "$STATE/.wt-snap-$ID" "$STATE/.wt-since-$ID" "$STATE/.wt-still-woke-$ID"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
