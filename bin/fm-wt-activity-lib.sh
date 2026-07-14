@@ -23,34 +23,70 @@
 #           skipped (see the cost bound below).
 #   dirty=  count of modified tracked files, or `?` when the status leg is skipped.
 #
-# COST BOUND. This runs on every watcher poll for every in-flight task, so the
-# cheap legs (head, idx) are two file reads and always run. The `edit`/`dirty`
-# leg needs `git status`, whose cost scales with the tracked-file count, so it is
-# skipped on a repo above FM_WT_PROBE_MAX_FILES (default 20000). The tracked-file
-# count is measured ONCE per worktree and cached in <state>/.wt-size-<task>, so the
-# bound itself costs nothing after the first poll. A skipped leg is reported
-# honestly as `edit=0 dirty=?`, never as "no changes": the caller then falls back
-# to head/idx, which still catch every commit. FM_WT_PROBE=0 disables the probe
-# entirely and every snapshot is empty.
+# COST BOUND. This runs on every watcher poll for every in-flight task, so every leg
+# is bounded in FORKS, which is the cost that actually matters here.
+#   head, idx  two file reads, always taken.
+#   edit,dirty one `git diff --name-only`, whose cost scales with the tracked-file
+#              count, so it is skipped on a repo above FM_WT_PROBE_MAX_FILES (default
+#              20000) - a count measured ONCE per worktree and cached in
+#              <state>/.wt-size-<task>, so the bound itself costs nothing after the
+#              first poll. The mtimes of the modified files are then read in BATCHES
+#              of FM_WT_STAT_BATCH (default 200) paths per stat invocation: every file
+#              is still read - nothing is sampled - but the fork count is
+#              ceil(dirty/200) rather than one fork per dirty file, which is what the
+#              first cut of this probe did on every poll of every window.
+# A skipped leg is reported honestly as `edit=0 dirty=?`, never as "no changes": the
+# caller then falls back to head/idx, which still catch every commit. FM_WT_PROBE=0
+# disables the probe entirely and every snapshot is empty.
 
 # 0 if the probe is enabled at all.
 wt_probe_enabled() {
   [ "${FM_WT_PROBE:-1}" != 0 ]
 }
 
+# Portable batched stat. Detected once, not per call: on Linux `stat -f` is
+# *filesystem* stat and prints a partial dump before failing, so the two forms must
+# never be tried as a fallback pair (the same trap fm-watch.sh documents).
+if [ "$(uname)" = Darwin ]; then
+  _wt_stat_mtimes() { stat -f %m "$@" 2>/dev/null; }
+else
+  _wt_stat_mtimes() { stat -c %Y "$@" 2>/dev/null; }
+fi
+
+# How many paths go into one stat invocation. The cost that matters is FORKS, not
+# files: statting one file per fork, on every poll, for every window, is what made
+# this probe's real cost scale with the dirty-file count rather than with the bound
+# the header advertises.
+FM_WT_STAT_BATCH=${FM_WT_STAT_BATCH:-200}
+
 # Reduce a NUL-separated path list on stdin to "<newest-mtime> <count>".
 # NUL-separated (git -z) so a path with a newline or a quote in it is still read
 # exactly, and reduced INSIDE the pipe: a command substitution around the raw list
 # would silently drop the NULs (bash strips them), which is how an early cut of
 # this probe lost the only modified file and reported an editing crew as idle.
+# Every path is still statted - nothing is sampled or truncated - but in batches, so
+# the fork count is ceil(dirty / FM_WT_STAT_BATCH) instead of one per file. The max is
+# folded in bash, with no further forks.
 _wt_reduce_changed() {  # <worktree>
-  local wt=$1 p newest=0 n=0 m
+  # Named _wt_batch, not `paths`: bin/fm-supervise-daemon.sh sources this lib and has
+  # its own string `paths`, and a shared name confuses shellcheck's array analysis.
+  local wt=$1 p newest=0 n=0 m i
+  local -a _wt_batch=()
   while IFS= read -r -d '' p; do
     [ -n "$p" ] || continue
+    _wt_batch+=("$wt/$p")
     n=$((n + 1))
-    m=$(stat -c %Y "$wt/$p" 2>/dev/null || stat -f %m "$wt/$p" 2>/dev/null || echo 0)
-    case "$m" in ''|*[!0-9]*) m=0 ;; esac
-    [ "$m" -gt "$newest" ] && newest=$m
+  done
+  [ "$n" -gt 0 ] || { printf '0 0'; return; }
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    while IFS= read -r m; do
+      case "$m" in ''|*[!0-9]*) continue ;; esac
+      [ "$m" -gt "$newest" ] && newest=$m
+    done <<EOF
+$(_wt_stat_mtimes "${_wt_batch[@]:i:FM_WT_STAT_BATCH}")
+EOF
+    i=$(( i + FM_WT_STAT_BATCH ))
   done
   printf '%s %s' "$newest" "$n"
 }

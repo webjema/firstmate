@@ -92,6 +92,32 @@ test_snapshot_and_progress_rule() {
   pass "the probe reads commits, stages and edits, and never invents evidence"
 }
 
+# The probe runs every poll, for every window. Reading mtimes one stat-fork per dirty
+# file made its real cost scale with the dirty-file count, not with the tracked-file
+# bound its header advertises. Batched now - and batching must not silently sample.
+test_dirty_file_mtimes_are_batched_not_sampled() {
+  local dir wt snap i
+  dir=$(make_case wt-batch); wt="$dir/wt"
+  make_repo "$wt"
+  i=1
+  while [ "$i" -le 25 ]; do printf 'x\n' > "$wt/f$i.txt"; i=$((i + 1)); done
+  git -C "$wt" add -A
+  git -C "$wt" commit -qm many
+  sleep 1
+  i=1
+  while [ "$i" -le 25 ]; do printf 'y\n' >> "$wt/f$i.txt"; i=$((i + 1)); done
+
+  # A batch size far below the file count: every file must still be counted and
+  # statted, in several batches, with nothing dropped off the end of a batch.
+  snap=$(FM_WT_STAT_BATCH=4 wt_activity_snapshot "$wt")
+  assert_contains "$snap" "dirty=25" "batching lost dirty files from the count"
+  [ "$(wt_field "$snap" edit)" -gt 0 ] || fail "batching lost the mtimes of every dirty file"
+  # Same answer whatever the batch size: batching is an implementation detail.
+  [ "$(FM_WT_STAT_BATCH=1000 wt_activity_snapshot "$wt")" = "$snap" ] \
+    || fail "the snapshot changed with the batch size"
+  pass "modified-file mtimes are read in batches, and every file is still read"
+}
+
 # --- a crew that committed and then STOPPED must still surface at once --------
 #
 # The worktree is PAST evidence: it says the crew did work recently, never that it is
@@ -244,6 +270,7 @@ test_spinning_gates() {
 }
 
 test_snapshot_and_progress_rule
+test_dirty_file_mtimes_are_batched_not_sampled
 test_committed_then_stopped_surfaces_immediately
 test_signal_absorbed_when_worktree_advanced
 test_spinning_crew_surfaces
