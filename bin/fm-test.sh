@@ -109,11 +109,14 @@ cd "$ROOT" || exit 1
 # The cost is real, and stating it honestly is the point (measured on this 8-core box):
 #   serial (the old CI loop)          421s
 #   parallel, quarantine EMPTY        155s   <- and red about 1 run in 6
-#   parallel + serial tail (this)     279s   <- 10 consecutive runs, 10 green
-# Determinism costs ~124s over a flaky parallel suite and still beats serial by ~2.4 minutes. A
-# suite that is fast and occasionally wrong is worth less than no suite at all, because it is
-# believed. Shrinking this list means fixing a test so it no longer races a live process -
-# not deleting the line and hoping.
+#   parallel + serial tail (this)     ~344s  <- 10 consecutive runs, 10 green (333-348s for 8
+#                                              of them; 383s and 424s the two under box load)
+# Determinism costs ~190s over a flaky parallel suite and still beats serial by ~75s. Six more
+# tests joined the serial tail after a hazard audit, so the tail is heavier than an earlier
+# estimate of this line claimed - the 344s is measured, not projected. A suite that is fast and
+# occasionally wrong is worth less than no suite at all, because it is believed. Shrinking this
+# list means fixing a test so it no longer races a live process - not deleting the line and
+# hoping.
 #
 # Unrelated, and stated because an earlier version of this comment got it wrong: NOT every test
 # uses a private tmux server. tests/fm-afk-launch.test.sh creates sessions on the DEFAULT server
