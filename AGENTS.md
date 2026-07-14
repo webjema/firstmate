@@ -242,7 +242,7 @@ Add ship and scout tasks to `data/backlog.md` under In flight; a secondmate spaw
 A ship crewmate reports `done: PR <url>` (mode `PR`) or `done: ready in branch fm/<id>` (`local-only`).
 It has already run `/code-review` and `/verify` and satisfied the project's hooks. **Your review is independent of that, not a rubber stamp for it.**
 
-1. Read the diff with `bin/fm-review-diff.sh <id>` - never a raw `git diff` against the local default branch, which can be stale.
+1. Read the diff with `bin/fm-review-diff.sh <id>` - a summary first, then `--full` or `--files <path>` for the code - never a raw `git diff` against the local default branch, which can be stale.
 2. Review it against the project's direction (section 5, gate 4). Mechanical quality is the hooks' and CI's job; you are looking for drift, wrong-shaped solutions, and scope creep.
 3. For mode `PR`, run `bin/fm-pr-check.sh <id> <PR url>`. It records the PR in the task's meta and arms a poll that wakes you when CI fails or the PR merges.
 4. Tell the captain: the PR's full `https://...` URL, a one-paragraph summary, and your direction verdict. If the change drifts, say so plainly.

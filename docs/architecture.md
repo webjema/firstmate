@@ -160,6 +160,8 @@ The `data/secondmates.md` line schema and the secondmate environment variables a
 `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
 `PR` projects ship through a pull request: the crew implements under the project's own hooks, reviews and verifies its own work, pushes `fm/<id>`, and opens the PR, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
 Review diffs go through `bin/fm-review-diff.sh`, which refreshes the authoritative base and, when task meta records `pr=`, compares against the reachable recorded `pr_head=` or a freshly fetched `refs/pull/<n>/head` before falling back to the local branch with a warning.
+It is summary-first: the default prints the base, the stat, and a per-file size table, and the diff body only on `--full` or for the paths named by `--files`.
+Nothing is ever silently truncated - the summary states that the body was elided and the exact command that produces it - because a partial diff read as complete is worse than an expensive one.
 Reviewing the PR head rather than the local branch matters because the crew's own fix rounds and any CI-fix rounds push commits the local worktree need not hold.
 Firstmate learns CI state itself: `bin/fm-pr-check.sh` arms `state/<id>.check.sh`, which reads the PR's merge state and check rollup from GitHub and wakes firstmate only when a check has failed or the PR is merged, staying silent while checks run or sit green and unmerged.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
