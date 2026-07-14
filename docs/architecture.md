@@ -22,13 +22,16 @@ The costly one, used only when the body proves nothing, is `bin/fm-crew-state.sh
 Absence of evidence is never progress: no body, no previous body, or an unchanged worktree all fall back to the probe, and a crew that is genuinely finished still surfaces through its captain-relevant status verb or the stale path.
 
 The same worktree probe runs on every poll for every in-flight window, and the watcher classifies the pane against it rather than on its own.
-A worktree that advanced within `FM_WT_FRESH_SECS` (default 120) absorbs a stale pane outright, with no `fm-crew-state.sh` probe at all: a crew that commits steadily and says nothing has a static pane and used to be indistinguishable from a wedged one.
+A worktree that advanced absorbs a no-verb SIGNAL - a `working:` note, a turn end - with no `fm-crew-state.sh` probe: the crew's work is visibly moving, and if it has nonetheless stopped, the stale path still surfaces it.
+It deliberately does NOT absorb a stale PANE. The worktree is past evidence: it says the crew did work recently, never that it is alive now, and an idle pane over a freshly-advanced worktree is exactly the swallowed finish - the crew made its final commit and stopped.
+Only `fm-crew-state.sh` answers "alive now", so only the probe decides the stale path, and a wake never states an absorb class that no probe derived.
 The converse is the wedge the pane hash structurally cannot see: a pane that keeps CHANGING never goes stale, so a crew spinning on tool calls without touching a file was invisible until the heartbeat.
 When such a pane's worktree has not moved for `FM_WT_STILL_SECS` (default 1800, `0` disables), the watcher surfaces one `stale:` wake per stillness episode carrying `class=spinning wt=still`, and clears the episode the moment the worktree moves.
 That wake is deliberately narrow: ship tasks only (a scout's deliverable is a report outside the worktree), never while the pane shows a busy signature (a long build or test run is legitimately motionless and its harness says so), never for a declared pause, and never under away mode.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 
-Secondmates are idle by charter, so their idle panes are never surfaced - but a secondmate with LIVE WORK, meaning at least one task meta in its own home, must be alive to supervise that crew, and a pane frozen across two polls while its children run surfaces once per stale hash with `kind=secondmate`.
+Secondmates are idle by charter, so their idle panes are never surfaced - but a secondmate with LIVE WORK, meaning at least one UNFINISHED child in its own home, must be alive to supervise that crew, and a pane frozen across two polls while its children run surfaces once per stale hash with `kind=secondmate`.
+A child that has already reported `done:` or `failed:` is not live work: it waits on the captain's merge or on firstmate, neither of which its secondmate can hurry, so counting it would call a correctly-idle secondmate wedged.
 A secondmate's own `working:` line is not live-work evidence (it writes one while merely standing by), and `bin/fm-crew-state.sh` still exempts secondmates from the busy check, because that exemption is what keeps a secondmate's open decision visible through a busy pane.
 A secondmate that wedges before spawning any crew leaves no live-work evidence anywhere and remains invisible to the stale path; its routed request still reaches firstmate through the signal path.
 

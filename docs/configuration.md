@@ -188,7 +188,8 @@ FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'   # OPT-IN whole-line reg
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; not captain-relevant, and distinct from blocked
 FM_WT_PROBE=1                      # 0 disables the worktree-activity probe entirely (turn-end bodies and the watcher's per-poll work evidence)
 FM_WT_PROBE_MAX_FILES=20000        # tracked-file cap above which the probe skips its modified-file leg and reports dirty=? honestly
-FM_WT_FRESH_SECS=120               # a worktree that moved this recently is positive working evidence: absorbs a stale pane with no crew-state probe
+FM_WT_FRESH_SECS=120               # a worktree that moved this recently counts as still-moving work, so the spinning check does not fire on it
+FM_WT_STAT_BATCH=200               # modified-file paths per stat invocation in the worktree probe (forks, not files, are the cost)
 FM_WT_STILL_SECS=1800              # a LIVE pane whose worktree has not moved this long surfaces once as class=spinning; 0 disables
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
 FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wait re-surfaces for a recheck in the watcher or away-mode daemon
