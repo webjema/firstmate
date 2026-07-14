@@ -208,13 +208,15 @@ status_open_decisions() {  # <status-file>
 #
 # Fields:
 #   task=  the task id the wake is about
-#   class= the crew_absorb_class verdict at wake time: working | paused | none,
-#          or `untriaged` when the away-mode daemon owns triage and the watcher
-#          deliberately did not probe
+#   class= the crew_absorb_class verdict at wake time: working | paused | none;
+#          `spinning` when the worktree probe found a LIVE pane over a motionless
+#          worktree (no pane probe was needed, or taken); or `untriaged` when the
+#          away-mode daemon owns triage and the watcher deliberately did not probe
 #   idle=  seconds the pane has been idle (stale wakes, where known)
 #   wedge= consecutive wedge escalations on this same unchanged pane
 #   demand-deep-inspection=1  at FM_WEDGE_DEMAND_INSPECT_COUNT escalations
 #   recheck=pause  the bounded re-surface of a declared external wait
+#   wt=still  the worktree has not moved for FM_WT_STILL_SECS (pairs with class=spinning)
 #   last=  the last non-blank status line, verbatim, or `(none)`
 #
 # A payload is a token diet, not a new verbosity: one line, no prose.
@@ -395,12 +397,31 @@ turnend_record_seen() {  # <state> <file> ...
   return 0
 }
 
+# 0 if the crew's WORKTREE has advanced since the watcher last recorded it: positive
+# working evidence taken from the work itself rather than from the screen, and free
+# of any pane probe. Reads the recorded snapshot the watcher's per-poll tracker
+# owns (state/.wt-snap-<task>) and mutates nothing, so calling it never consumes the
+# movement the tracker is about to see. No recorded snapshot, no worktree in the
+# task's meta, or an unprobeable worktree all return 1 - no evidence is not progress.
+crew_worktree_advanced() {  # <state> <task>
+  local state=$1 task=$2 prev wt now
+  prev=$(head -1 "$state/.wt-snap-$task" 2>/dev/null || true)
+  [ -n "$prev" ] || return 1
+  wt=$(grep '^worktree=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] || return 1
+  now=$(wt_activity_snapshot "$wt" "$state" "$task")
+  wt_activity_advanced "$prev" "$now"
+}
+
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake can be
-# absorbed, by EITHER of the two independent positive-evidence tests: its turn-end
-# body proves it moved the work (free - no probe), or the crew is provably working
-# on its endpoint (one probe). The free test is tried first, so the common case -
-# a crew that ended a turn having committed something - costs nothing at all.
-# 1 (surface) if any referenced task passes neither, or none can be resolved.
+# absorbed, by ANY of three independent positive-evidence tests, cheapest first:
+#   1. its turn-end body proves the turn moved the work (free);
+#   2. its worktree has advanced since the watcher last looked (one git read);
+#   3. the crew is provably working on its endpoint (one pane probe).
+# The two free tests come first, so the common cases - a crew that ended a turn
+# having committed something, or one that files a `working:` note mid-commit - cost
+# no probe at all. 1 (surface) if a referenced task passes none of the three, or if
+# no task can be resolved.
 signal_crew_absorbable() {  # <state> <file> ...
   local state=$1 f base task seen=""
   shift
@@ -415,6 +436,7 @@ signal_crew_absorbable() {  # <state> <file> ...
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
     turnend_shows_progress "$state" "$task" && continue
+    crew_worktree_advanced "$state" "$task" && continue
     crew_is_provably_working "$task" || return 1
   done
   [ -n "$seen" ] || return 1

@@ -123,6 +123,8 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+WT_FRESH_SECS=${FM_WT_FRESH_SECS:-120}    # worktree moved this recently => a positive working signal, no pane probe
+WT_STILL_SECS=${FM_WT_STILL_SECS:-1800}   # worktree unmoved this long on a LIVE pane => spinning; 0 disables
 # A crew that DECLARED a pause (paused: <reason>, fm-classify-lib.sh) is idling on
 # a known external wait, so its stale pane is absorbed rather than wedge-escalated;
 # it re-surfaces once for a recheck every PAUSE_RESURFACE_SECS - far longer than the
@@ -204,6 +206,87 @@ window_kind() {
     return 0
   fi
   echo unknown
+}
+
+window_worktree() {
+  local w=$1 meta
+  meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+  [ -n "$meta" ] || return 0
+  fm_meta_get "$meta" worktree 2>/dev/null || true
+}
+
+# Watch the WORK, not just the screen. The pane lies in both directions: a crew
+# committing steadily but quiet for five minutes has a static pane and looks
+# wedged, while a crew spinning without touching a file has a lively pane and looks
+# alive. bin/fm-wt-activity-lib.sh reads the worktree, which cannot fake either.
+#
+# Prints "<class> <age-secs>", where class is:
+#   fresh - the worktree ADVANCED since the last poll, or within WT_FRESH_SECS: a
+#           positive working signal, free of any pane probe;
+#   still - the worktree has not moved for WT_STILL_SECS: the wedge signal the
+#           pane-hash heuristic structurally cannot see;
+#   quiet - neither. No evidence, so the caller falls back to its pane/status
+#           evidence exactly as before.
+# The FIRST snapshot of a task is `quiet`, never `fresh`: a watcher that restarted
+# next to an already-dead crew must not read its own ignorance as progress.
+# Cheap enough for every poll by construction (see the probe's cost bound).
+wt_track() {  # <task> <worktree>
+  local task=$1 wt=$2 snap prev snapf sincef now since age
+  [ -n "$task" ] && [ -n "$wt" ] || { printf 'quiet 0'; return; }
+  snap=$(wt_activity_snapshot "$wt" "$STATE" "$task")
+  [ -n "$snap" ] || { printf 'quiet 0'; return; }
+  snapf="$STATE/.wt-snap-$task"
+  sincef="$STATE/.wt-since-$task"
+  prev=$(cat "$snapf" 2>/dev/null || true)
+  now=$(date +%s)
+  if [ -z "$prev" ]; then
+    printf '%s\n' "$snap" > "$snapf"
+    printf '%s\n' "$now" > "$sincef"
+    printf 'quiet 0'
+    return
+  fi
+  if wt_activity_advanced "$prev" "$snap"; then
+    printf '%s\n' "$snap" > "$snapf"
+    printf '%s\n' "$now" > "$sincef"
+    rm -f "$STATE/.wt-still-woke-$task"
+    printf 'fresh 0'
+    return
+  fi
+  since=$(cat "$sincef" 2>/dev/null || true)
+  case "$since" in ''|*[!0-9]*) since=$now; printf '%s\n' "$now" > "$sincef" ;; esac
+  age=$(( now - since ))
+  [ "$age" -lt 0 ] && age=0
+  if [ "$age" -lt "$WT_FRESH_SECS" ]; then printf 'fresh %s' "$age"; return; fi
+  if [ "$WT_STILL_SECS" -gt 0 ] && [ "$age" -ge "$WT_STILL_SECS" ]; then printf 'still %s' "$age"; return; fi
+  printf 'quiet %s' "$age"
+}
+
+# A crew whose PANE keeps changing but whose WORKTREE has not moved for
+# WT_STILL_SECS is spinning: reading, re-planning, looping on tool calls, producing
+# screen but not work. Nothing else in this watcher can see it - the pane never goes
+# stale, so no stale wake ever fires and the heartbeat is its only backstop.
+# Surfaced ONCE per stillness episode (the marker is cleared the moment the worktree
+# moves again), and deliberately narrow:
+#   - ship tasks only: a scout's deliverable is a REPORT outside the worktree, so a
+#     scout that touches no tracked file is doing exactly its job;
+#   - not while the pane shows a busy signature: a long build or test run is
+#     legitimately still, and its harness says so;
+#   - not for a declared pause, and not under afk (the daemon owns triage);
+#   - default WT_STILL_SECS is deliberately long (30 minutes), because the cost of a
+#     false wake is a wasted firstmate turn and the cost of a late one is minutes.
+# FM_WT_STILL_SECS=0 disables it.
+surface_still_worktree() {  # <window> <task> <kind> <age> <tail40>
+  local w=$1 task=$2 kind=$3 age=$4 tail40=$5 reason
+  [ "$WT_STILL_SECS" -gt 0 ] || return 0
+  [ "$kind" = ship ] || return 0
+  afk_present && return 0
+  [ -e "$STATE/.wt-still-woke-$task" ] && return 0
+  window_is_busy "$w" "$tail40" && return 0
+  status_is_paused "$(last_status_line "$STATE/$task.status")" && return 0
+  reason=$(wake_payload stale "$w" "$STATE" "$task" spinning "wt=still" "idle=${age}s")
+  fm_wake_append stale "$w" "$reason" || exit 1
+  date +%s > "$STATE/.wt-still-woke-$task"
+  wake "$reason"
 }
 
 window_label() {
@@ -621,6 +704,11 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture tmux "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    # The worktree read runs every poll for every window, before any pane triage:
+    # it is the cheap evidence, and both branches below consult it.
+    read -r wtclass wtage <<EOF
+$(wt_track "$task" "$(window_worktree "$w")")
+EOF
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
@@ -709,6 +797,18 @@ EOF
           #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
+            # A worktree that just moved IS the positive working evidence this
+            # triage is looking for, and it is already in hand - so take it before
+            # paying fm-crew-state.sh for a pane probe that can only say the same
+            # thing less reliably. The wedge timer still starts, so a crew that
+            # commits and then freezes still escalates.
+            if [ "$wtclass" = fresh ]; then
+              clear_pause_tracking "$w"
+              printf '%s' "$h" > "$sf"
+              date +%s > "$ssf"
+              triage_log "absorbed non-terminal stale (worktree advanced ${wtage}s ago): $w"
+              continue
+            fi
             case "$(crew_absorb_class "$task")" in
               working)
                 clear_pause_tracking "$w"
@@ -758,6 +858,11 @@ EOF
         esac
       else
         [ -e "$pf" ] && clear_pause_tracking "$w"
+        # The pane changed, so no stale wake will ever fire for this crew. That is
+        # exactly where a spinning crew hides: lively screen, motionless work.
+        if [ "$wtclass" = still ]; then
+          surface_still_worktree "$w" "$task" "$kind" "$wtage" "$tail40"
+        fi
       fi
     fi
   done < <(recorded_windows)

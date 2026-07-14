@@ -20,6 +20,12 @@ The free one is the turn-end marker's body: every harness's turn-end hook calls 
 No harness's turn-end hook supplies a turn number, a last tool, or an exit reason, so the counter is firstmate's own and the other two fields are simply absent rather than invented.
 The costly one, used only when the body proves nothing, is `bin/fm-crew-state.sh` reporting a backend busy signature on that crew's recorded endpoint.
 Absence of evidence is never progress: no body, no previous body, or an unchanged worktree all fall back to the probe, and a crew that is genuinely finished still surfaces through its captain-relevant status verb or the stale path.
+
+The same worktree probe runs on every poll for every in-flight window, and the watcher classifies the pane against it rather than on its own.
+A worktree that advanced within `FM_WT_FRESH_SECS` (default 120) absorbs a stale pane outright, with no `fm-crew-state.sh` probe at all: a crew that commits steadily and says nothing has a static pane and used to be indistinguishable from a wedged one.
+The converse is the wedge the pane hash structurally cannot see: a pane that keeps CHANGING never goes stale, so a crew spinning on tool calls without touching a file was invisible until the heartbeat.
+When such a pane's worktree has not moved for `FM_WT_STILL_SECS` (default 1800, `0` disables), the watcher surfaces one `stale:` wake per stillness episode carrying `class=spinning wt=still`, and clears the episode the moment the worktree moves.
+That wake is deliberately narrow: ship tasks only (a scout's deliverable is a report outside the worktree), never while the pane shows a busy signature (a long build or test run is legitimately motionless and its harness says so), never for a declared pause, and never under away mode.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so a busy pane outranks an old captain-relevant status-log line the crew has since moved past.
