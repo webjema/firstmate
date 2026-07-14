@@ -627,8 +627,14 @@ while :; do
     # while it runs. It is a short-lived child of the watcher, not a new always-on
     # process. A failed warm logs and retires quietly; it can never break a spawn
     # or wake the captain, so its exit status is deliberately ignored here.
+    # The overrides ride along explicitly: this watcher resolved STATE/CONFIG from
+    # them, and they are plain shell vars here, not exported - so a home running on
+    # an override would otherwise have its warmer write to a DIFFERENT state dir
+    # than the one the watcher is watching.
     if [ "${FM_POOL_WARM:-1}" = 1 ] && [ -x "$SCRIPT_DIR/fm-pool-warm.sh" ]; then
-      FM_HOME="$FM_HOME" nohup "$SCRIPT_DIR/fm-pool-warm.sh" >/dev/null 2>&1 &
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-}" \
+        nohup "$SCRIPT_DIR/fm-pool-warm.sh" >/dev/null 2>&1 &
       disown 2>/dev/null || true
     fi
     for c in "$STATE"/*.check.sh; do

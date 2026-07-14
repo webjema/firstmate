@@ -118,7 +118,7 @@ fm_provision_probe_pane_pid() {  # <target>
   esac
 }
 
-# fm_provision_pane_state <target>: busy | idle | unknown.
+# fm_provision_pane_state <target> [descendants]: busy | idle | unknown.
 #   busy     a process is running under the pane's shell (treehouse, its hook, npm)
 #   idle     the shell is at a prompt with nothing running => whatever we asked it
 #            to run has EXITED
@@ -127,13 +127,18 @@ fm_provision_probe_pane_pid() {  # <target>
 # install is running perfectly well, so an unreadable probe must keep waiting and
 # let the stall/timeout bounds decide. Same posture as fm_backend_agent_alive,
 # which gates a respawn on a CONFIDENT `dead` only (bin/backends/tmux.sh).
-fm_provision_pane_state() {  # <target>
-  local target=$1
+# The caller passes the descendant list it already read, so the loop pays for one
+# process-tree read per tick rather than two.
+fm_provision_pane_state() {  # <target> [descendants]
+  local target=$1 descendants=${2-}
   if [ -z "$(fm_provision_probe_pane_pid "$target")" ]; then
     printf 'unknown'
     return 0
   fi
-  if [ -z "$(fm_provision_probe_descendants "$target")" ]; then
+  if [ $# -lt 2 ]; then
+    descendants=$(fm_provision_probe_descendants "$target")
+  fi
+  if [ -z "$descendants" ]; then
     printf 'idle'
   else
     printf 'busy'
@@ -192,7 +197,7 @@ fm_provision_wait() {  # <target> <project-real-path> [timeout] [stall]
   local target=$1 proj_real=$2
   local timeout=${3:-${FM_SPAWN_WORKTREE_TIMEOUT:-$FM_PROVISION_TIMEOUT_DEFAULT}}
   local stall=${4:-${FM_SPAWN_WORKTREE_STALL:-$FM_PROVISION_STALL_DEFAULT}}
-  local elapsed=0 quiet=0 path sig prev_sig kind tail
+  local elapsed=0 quiet=0 path sig prev_sig kind tail state descendants
   prev_sig=""
 
   while :; do
@@ -205,11 +210,17 @@ fm_provision_wait() {  # <target> <project-real-path> [timeout] [stall]
       return 0
     fi
 
+    # One process-tree read per tick, reused for BOTH the state verdict and the
+    # progress signature below. Probing twice would run a second `ps` sweep every
+    # second for the whole (possibly 900s) wait, for no new information.
+    descendants=$(fm_provision_probe_descendants "$target")
+    state=$(fm_provision_pane_state "$target" "$descendants")
+
     # 2. EXITED: the pane's shell is provably back at an idle prompt and the cwd
     #    never moved. treehouse gave up. Diagnose from its own last words and fail
     #    NOW - seconds after the failure, not at a timeout. Only a CONFIDENT idle
     #    reading may do this; `unknown` falls through and keeps waiting.
-    if [ "$(fm_provision_pane_state "$target")" = idle ]; then
+    if [ "$state" = idle ]; then
       tail=$(fm_provision_probe_tail "$target" || true)
       kind=$(fm_provision_classify_tail "$tail")
       fm_provision_failure "$kind" "$tail" >&2
@@ -219,7 +230,7 @@ fm_provision_wait() {  # <target> <project-real-path> [timeout] [stall]
     # 3. BUSY (or unreadable): something is running. This is the cold install, and
     #    it is allowed to take its time - bounded only by silence (stall) and the
     #    ceiling.
-    sig=$(fm_provision_progress_signature "$target")
+    sig=$(fm_provision_progress_signature "$target" "$descendants")
     if [ "$sig" != "$prev_sig" ]; then
       quiet=0
       prev_sig=$sig
@@ -242,15 +253,20 @@ fm_provision_wait() {  # <target> <project-real-path> [timeout] [stall]
   done
 }
 
-# fm_provision_progress_signature <target>: cheap evidence that the pane is
-# still MOVING. Pane output plus the pane's own process set: an npm install
+# fm_provision_progress_signature <target> [descendants]: cheap evidence that the
+# pane is still MOVING. Pane output plus the pane's own process set: an npm install
 # spawns and reaps children constantly, so a real install churns this signature
 # even between printed lines, while a wedged process holds it perfectly still.
-fm_provision_progress_signature() {  # <target>
-  local target=$1
+# Takes the already-read descendant list so the loop reads the process tree once
+# per tick.
+fm_provision_progress_signature() {  # <target> [descendants]
+  local target=$1 descendants=${2-}
+  if [ $# -lt 2 ]; then
+    descendants=$(fm_provision_probe_descendants "$target" 2>/dev/null)
+  fi
   printf '%s|%s' \
     "$(fm_provision_probe_tail "$target" 2>/dev/null | cksum 2>/dev/null || true)" \
-    "$(fm_provision_probe_descendants "$target" 2>/dev/null | cksum 2>/dev/null || true)"
+    "$(printf '%s' "$descendants" | cksum 2>/dev/null || true)"
 }
 
 # Seams the tests replace to run the loop with no real clock.

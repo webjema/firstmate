@@ -60,7 +60,10 @@ slot_evidence() {  # <slot-path>
   # Commits on this worktree's HEAD that exist on no remote-tracking branch: the
   # dead crew's work that a discard would destroy. Same question fm-teardown.sh
   # asks before it lets a worktree go.
-  commits=$(git -C "$path" log --oneline --branches --not --remotes 2>/dev/null | grep -c . || true)
+  # HEAD, deliberately, not --branches: treehouse checks a slot out DETACHED, so a
+  # crew that committed without branching has work that --branches cannot see. Any
+  # under-report here reads as "nothing to lose" on a slot that has plenty.
+  commits=$(git -C "$path" log --oneline HEAD --not --remotes 2>/dev/null | grep -c . || true)
   if [ "${commits:-0}" -gt 0 ]; then
     [ -n "$evidence" ] && evidence="$evidence and "
     evidence="${evidence}${commits} unpushed commit(s)"

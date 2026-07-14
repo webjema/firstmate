@@ -253,19 +253,22 @@ trap release_pool_lock EXIT
 
 case "${1:-}" in
   --status)
-    for p in $(projects_in_flight); do
+    # `while read`, not `for $(...)`: a project path may contain spaces.
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
       if fm_pool_read "$p"; then
         printf '%s: %s slots, %s available (max_trees %s)\n' \
           "$(basename "$p")" "$FM_POOL_SLOTS" "$FM_POOL_AVAILABLE" "$(fm_pool_max_trees "$p")"
       else
         printf '%s: no readable pool\n' "$(basename "$p")"
       fi
-    done
+    done < <(projects_in_flight)
     ;;
   "")
-    for p in $(projects_in_flight); do
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
       warm_one "$p"
-    done
+    done < <(projects_in_flight)
     ;;
   *)
     proj=$(resolve_project "$1") || { echo "error: no such project: $1" >&2; exit 1; }

@@ -89,10 +89,30 @@ assert_contains "$out" "uncommitted file" "(b) it must report the evidence of un
 assert_present "$slot/rescue-me.txt" "(b) a dead crew's unlanded work must NOT be discarded"
 pass "(b) a dirty slot holding a dead crew's work is reported, and the work survives"
 
+# --- (b2) a crew that COMMITTED on the detached HEAD still counts as work ------
+# treehouse checks a slot out DETACHED. A crew that committed without branching
+# leaves commits that `git log --branches` cannot see - so an evidence check built
+# on --branches would report "nothing to lose" about a slot holding exactly the
+# work we must not lose.
+C=$(new_case b2)
+# A real origin, so that ALREADY-LANDED commits are correctly excluded and the
+# only unique commit is the one the dead crew made. Without a remote, everything
+# looks unpushed and the check would pass for the wrong reason.
+fm_git_add_origin "$C/home/projects/proj" "$C/origin.git"
+git -C "$C/home/projects/proj" fetch -q origin
+slot=$(dirty_slot "$C")
+git -C "$slot" add rescue-me.txt
+git -C "$slot" -c user.name=t -c user.email=t@t.t commit -qm 'the dead crew committed work'
+printf 'and left this uncommitted too\n' > "$slot/also-dirty.txt"
+printf '1     dirty        %s\n' "$slot" > "$C/status.txt"
+out2=$(run_status "$C")
+assert_contains "$out2" "1 unpushed commit" "(b2) a detached-HEAD commit is unlanded work and must be reported"
+pass "(b2) work committed on a detached HEAD is still reported as unlanded"
+
 # --- (c) the report is actionable: inspect first, discard only deliberately ----
-assert_contains "$out" "git -C $slot status" "(c) must print how to INSPECT the work first"
-assert_contains "$out" "DISCARDS" "(c) the reclaim command must be labelled destructive"
-assert_contains "$out" "treehouse destroy $slot --include-unlanded --yes" "(c) must print the exact reclaim command"
+assert_contains "$out2" "git -C $slot status" "(c) must print how to INSPECT the work first"
+assert_contains "$out2" "DISCARDS" "(c) the reclaim command must be labelled destructive"
+assert_contains "$out2" "treehouse destroy $slot --include-unlanded --yes" "(c) must print the exact reclaim command"
 pass "(c) the report says how to inspect, and marks the reclaim as destructive"
 
 # --- (d) a stale warm lease: reserved forever by a warmer that died -----------
