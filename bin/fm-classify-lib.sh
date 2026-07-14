@@ -89,11 +89,42 @@ last_status_line() {
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
 }
 
-# 0 if the given (last) status line is captain-relevant: its LEADING VERB is one of
-# FM_CLASSIFY_CAPTAIN_VERBS. The note after the verb is never scanned - a crewmate
-# writing "working: rebased onto merged main" is reporting progress, not a merge.
-# A home that sets FM_CAPTAIN_RE has explicitly asked for a whole-line regex instead,
-# and gets exactly that, verb anchoring included or not as it chooses.
+# Normalize a leading verb for comparison. The old whole-line test was `grep -qiE`:
+# case-INSENSITIVE and unanchored, so it caught "Done:", "DONE:", "- done:" and
+# "**done**:" as well as "done:". Anchoring to the verb (which is right - the prose
+# scan was the bug) must NOT quietly narrow that: a crew that decorates its line, or
+# whose harness capitalizes it, is genuinely done, and swallowing that forever is the
+# single worst failure this whole subsystem exists to prevent. So the verb is
+# case-folded and stripped of the list/markdown punctuation a crewmate may wrap it in
+# ("- ", "* ", "#", ">", "**...**", quotes) before it is compared.
+# It is deliberately NOT a substring scan: only the LEADING token is ever considered,
+# so "working: rebased onto merged main" still does not escalate.
+status_normalize_verb() {  # <verb> -> lowercase, punctuation-stripped
+  local v=$1
+  v=$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')
+  v=${v#"${v%%[![:space:]]*}"}
+  v=${v%"${v##*[![:space:]]}"}
+  # Strip any run of leading/trailing decoration: - * # > ` " ' _ ~ and spaces.
+  while :; do
+    case "$v" in
+      [-*#\>\`\"\'_~[:space:]]*) v=${v#?} ;;
+      *) break ;;
+    esac
+  done
+  while :; do
+    case "$v" in
+      *[-*#\>\`\"\'_~[:space:]]) v=${v%?} ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$v"
+}
+
+# 0 if the given (last) status line is captain-relevant: its LEADING VERB, normalized,
+# is one of FM_CLASSIFY_CAPTAIN_VERBS. The note after the verb is never scanned - a
+# crewmate writing "working: rebased onto merged main" is reporting progress, not a
+# merge. A home that sets FM_CAPTAIN_RE has explicitly asked for a whole-line regex
+# instead, and gets exactly that, verb anchoring included or not as it chooses.
 status_is_captain_relevant() {
   local line=$1 verb v
   [ -n "$line" ] || return 1
@@ -102,7 +133,7 @@ status_is_captain_relevant() {
     printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
     return
   fi
-  verb=$(status_line_verb "$line")
+  verb=$(status_normalize_verb "$(status_line_verb "$line")")
   for v in $FM_CLASSIFY_CAPTAIN_VERBS; do
     [ "$verb" = "$v" ] && return 0
   done
@@ -116,7 +147,9 @@ status_is_captain_relevant() {
 status_is_paused() {  # <status-line>
   local line=$1 verb
   [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
+  # Normalized like every other verb test (status_normalize_verb owns the rule), so
+  # "Paused:" is the pause a crewmate meant it to be.
+  verb=$(status_normalize_verb "$(status_line_verb "$line")")
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
@@ -193,7 +226,7 @@ status_open_decisions() {  # <status-file>
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
-    verb=$(status_line_verb "$line")
+    verb=$(status_normalize_verb "$(status_line_verb "$line")")
     key=$(_fm_decision_key "$line") || continue
     case "$verb" in
       needs-decision|blocked)
