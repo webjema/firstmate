@@ -519,13 +519,27 @@ signal_crew_absorbable() {  # <state> <file> ...
 # has produced no live-work evidence anywhere, and stays invisible to the stale path.
 # Its routed request is not lost - an open needs-decision or blocked still reaches
 # firstmate through the signal path and the open-decision fold.
+#
+# A child that has REPORTED - done: or failed: - is not live work: its task is over
+# and it is waiting on the captain's merge or on firstmate, neither of which its
+# secondmate can hurry. Counting those metas would report a correctly-idle secondmate
+# as wedged the moment one of its tasks finished, which is exactly the "don't make
+# healthy idle secondmates noisy" constraint. A child with no status file yet has just
+# been spawned, and IS live work.
 secondmate_has_live_work() {  # <state> <task>
-  local state=$1 task=$2 home meta
+  local state=$1 task=$2 home meta child last verb
   [ -n "$task" ] || return 1
   home=$(grep '^home=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$home" ] || return 1
   for meta in "$home"/state/*.meta; do
-    [ -e "$meta" ] && return 0
+    [ -e "$meta" ] || continue
+    child=$(basename "$meta"); child=${child%.meta}
+    last=$(last_status_line "$home/state/$child.status")
+    verb=$(status_normalize_verb "$(status_line_verb "$last")")
+    case "$verb" in
+      done|failed) continue ;;   # reported: over, and not this secondmate's to hurry
+      *) return 0 ;;
+    esac
   done
   return 1
 }

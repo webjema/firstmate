@@ -140,10 +140,25 @@ test_secondmate_with_crew_of_its_own_counts_as_live_work() {
   fm_write_meta "$home/state/child-1.meta" "window=sess:fm-child-1" "kind=ship"
   secondmate_has_live_work "$state" sm3 || fail "a secondmate with crew in flight was called idle"
 
+  # A child that has REPORTED is not live work: its task is over and it waits on the
+  # captain's merge, which its secondmate cannot hurry. Counting it would call a
+  # correctly-idle secondmate wedged.
+  printf 'done: PR https://example.invalid/pull/7\n' > "$home/state/child-1.status"
+  secondmate_has_live_work "$state" sm3 \
+    && fail "a child that had reported done (awaiting the captain's merge) was called live work"
+  printf 'failed: the suite is red\n' > "$home/state/child-1.status"
+  secondmate_has_live_work "$state" sm3 && fail "a child that had reported failed was called live work"
+
+  # A child still working, or one just spawned with no status file at all, IS live work.
+  printf 'working: implementing\n' > "$home/state/child-1.status"
+  secondmate_has_live_work "$state" sm3 || fail "a child still working was not called live work"
+  rm -f "$home/state/child-1.status"
+  secondmate_has_live_work "$state" sm3 || fail "a freshly spawned child with no status was not live work"
+
   # Its crew torn down: idle again.
   rm -f "$home/state/child-1.meta"
   secondmate_has_live_work "$state" sm3 && fail "a secondmate whose crew is gone was called live"
-  pass "live work is crew of its own in flight, never a standing-by working: line"
+  pass "live work is an UNFINISHED child of its own, never a standing-by working: line"
 }
 
 # --- (b) a masked open decision ---------------------------------------------

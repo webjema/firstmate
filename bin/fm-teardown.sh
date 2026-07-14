@@ -920,7 +920,7 @@ cleanup_firstmate_home_children() {
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.ci-seen" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token" "$sub_state/.turnend-seen-$child_id" "$sub_state/.wt-size-$child_id" "$sub_state/.wt-snap-$child_id" "$sub_state/.wt-since-$child_id" "$sub_state/.wt-still-woke-$child_id"
+    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.ci-seen" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token" "$sub_state/.turnend-seen-$child_id" "$sub_state/.decision-seen-$child_id" "$sub_state/.wt-size-$child_id" "$sub_state/.wt-snap-$child_id" "$sub_state/.wt-since-$child_id" "$sub_state/.wt-still-woke-$child_id"
   done
 }
 
@@ -1042,7 +1042,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.ci-seen" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/.turnend-seen-$ID" "$STATE/.wt-size-$ID" "$STATE/.wt-snap-$ID" "$STATE/.wt-since-$ID" "$STATE/.wt-still-woke-$ID"
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.ci-seen" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/.turnend-seen-$ID" "$STATE/.decision-seen-$ID" "$STATE/.wt-size-$ID" "$STATE/.wt-snap-$ID" "$STATE/.wt-since-$ID" "$STATE/.wt-still-woke-$ID"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
