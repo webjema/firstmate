@@ -187,6 +187,54 @@ status_open_decisions() {  # <status-file>
   printf '%s' "$open"
 }
 
+# --- wake payloads ----------------------------------------------------------
+#
+# THE ONE OWNER of the wake-payload grammar. Every wake the watcher prints (and
+# enqueues) carries, on ONE line, the evidence the watcher already computed, so
+# the orchestrator never re-derives a fact bash held in a variable:
+#
+#   <kind>: <target> | task=<id> class=<verdict> [<field>=<value> ...] last=<status-line>
+#
+# The part before " | " is the historical target (a status-file list for
+# `signal:`, a window for `stale:`) and stays first so a consumer that only wants
+# the target can cut at the separator - which bin/fm-supervise-daemon.sh's
+# handle_wake does. `last=` is always the FINAL field because a status note is
+# free text and may contain anything, including a `=` or a `|`.
+#
+# Fields:
+#   task=  the task id the wake is about
+#   class= the crew_absorb_class verdict at wake time: working | paused | none,
+#          or `untriaged` when the away-mode daemon owns triage and the watcher
+#          deliberately did not probe
+#   idle=  seconds the pane has been idle (stale wakes, where known)
+#   wedge= consecutive wedge escalations on this same unchanged pane
+#   demand-deep-inspection=1  at FM_WEDGE_DEMAND_INSPECT_COUNT escalations
+#   recheck=pause  the bounded re-surface of a declared external wait
+#   last=  the last non-blank status line, verbatim, or `(none)`
+#
+# A payload is a token diet, not a new verbosity: one line, no prose.
+wake_evidence() {  # <state> <task> <class> [extra-field ...]
+  local state=$1 task=$2 class=$3 last
+  shift 3
+  last=$(last_status_line "$state/$task.status")
+  [ -n "$last" ] || last='(none)'
+  printf 'task=%s class=%s' "$task" "$class"
+  [ "$#" -gt 0 ] && printf ' %s' "$*"
+  printf ' last=%s' "$last"
+}
+
+wake_payload() {  # <kind> <target> <state> <task> <class> [extra-field ...]
+  local kind=$1 target=$2 state=$3 task=$4 class=$5
+  shift 5
+  printf '%s: %s | %s' "$kind" "$target" "$(wake_evidence "$state" "$task" "$class" "$@")"
+}
+
+# The target half of a payload: everything before the evidence separator. The
+# inverse of wake_payload for a consumer that wants the window or file list back.
+wake_payload_target() {  # <reason-after-the-kind-prefix>
+  printf '%s' "${1%% | *}"
+}
+
 # task id from a recorded window target, falling back to the tmux-shaped
 # "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {

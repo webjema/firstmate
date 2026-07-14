@@ -10,10 +10,17 @@
 # the separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
-# on every wake. Printed reason lines:
+# on every wake.
+#
+# Every printed (and enqueued) reason is a FAT PAYLOAD - one line that carries the
+# evidence this watcher already computed, so the supervisor re-derives nothing:
+#   <kind>: <target> | task=<id> class=<verdict> [<field>=<value> ...] last=<status-line>
+# bin/fm-classify-lib.sh's wake_payload owns that grammar and its field vocabulary.
+# Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
+#                          is not provably working, unless afk is active. One
+#                          evidence block per referenced task, separated by " ; ".
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -24,11 +31,11 @@
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
-#                          wedge threshold also surfaces, with an "escalation N"
-#                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
-#                          consecutive escalations on the SAME pane, the reason
-#                          also carries a "demand-deep-inspection" marker so the
-#                          wake payload itself, not just repetition, forces a
+#                          wedge threshold also surfaces, with a "wedge=N"
+#                          count in the payload; at FM_WEDGE_DEMAND_INSPECT_COUNT
+#                          consecutive escalations on the SAME pane, the payload
+#                          also carries "demand-deep-inspection=1" so the
+#                          wake itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active.
 #   check: <script>: <out> per-task check output, always actionable
@@ -158,6 +165,35 @@ window_is_busy() {  # <window> <tail40>
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"
 }
 
+# The one-line payload for a signal wake: the historical "signal: <files>" target,
+# then one evidence block per distinct task, blocks separated by " ; ". Called ONLY
+# on the surfacing path, so the absorb-verdict probe it pays for is spent on a wake
+# that is actually going out. Under afk the daemon owns triage and probes for
+# itself, so the watcher records `untriaged` rather than probing twice.
+signal_payload() {  # <state> <file>...
+  local state=$1 f base task class seen="" ev=""
+  shift
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.status)     task=${base%.status} ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *)            continue ;;
+    esac
+    [ -n "$task" ] || continue
+    case " $seen " in *" $task "*) continue ;; esac
+    seen="$seen $task"
+    if afk_present; then class=untriaged; else class=$(crew_absorb_class "$task"); fi
+    [ -n "$ev" ] && ev="$ev ; "
+    ev="$ev$(wake_evidence "$state" "$task" "$class")"
+  done
+  if [ -n "$ev" ]; then
+    printf 'signal: %s | %s' "$*" "$ev"
+  else
+    printf 'signal: %s' "$*"
+  fi
+}
+
 window_kind() {
   local w=$1 meta kind
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
@@ -223,7 +259,7 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason extra
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -235,10 +271,12 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+        extra="idle=${age}s wedge=$n"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          extra="$extra demand-deep-inspection=1"
         fi
+        # shellcheck disable=SC2086  # $extra is a deliberate multi-field split.
+        reason=$(wake_payload stale "$win" "$STATE" "$(window_to_task "$win" "$STATE")" working $extra)
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
         wake "$reason"
@@ -270,7 +308,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
-    reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+    reason=$(wake_payload stale "$win" "$STATE" "$task" paused "idle=${age}s" "recheck=pause")
     fm_wake_append stale "$win" "$reason" || exit 1
     date +%s > "$rf"
     wake "$reason"
@@ -319,13 +357,17 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
+# Surface a stale pane whose crew is NOT provably working and not paused: it
+# stopped. The payload carries the absorb verdict (class=none) and the crew's
+# last status line, so the wake needs no follow-up status read.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key
+  local win=$1 h=$2 key reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  fm_wake_append stale "$win" "stale: $win" || exit 1
+  reason=$(wake_payload stale "$win" "$STATE" "$(window_to_task "$win" "$STATE")" none)
+  fm_wake_append stale "$win" "$reason" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
-  wake "stale: $win"
+  wake "$reason"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -510,7 +552,6 @@ while :; do
     done <<EOF
 $pending
 EOF
-    reason="signal:$files"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file carries a captain-relevant verb;
@@ -526,6 +567,12 @@ EOF
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+      # The wake is going out, so pay for its evidence ONCE here, in bash: each
+      # referenced task's absorb verdict and last status line ride the payload,
+      # and the orchestrator re-reads nothing for the common case. The verdict is
+      # `untriaged` under afk (the daemon owns triage and probes for itself).
+      # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+      reason=$(signal_payload "$STATE" $files)
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
@@ -547,7 +594,7 @@ EOF
       done <<EOF
 $pending
 EOF
-      triage_log "absorbed benign $reason"
+      triage_log "absorbed benign signal:$files"
     fi
   fi
 
@@ -593,11 +640,14 @@ EOF
             *)      clear_pause_tracking "$w" ;;
           esac
         elif afk_present; then
-          # Daemon owns triage: one-shot per distinct stale hash, as before.
+          # Daemon owns triage: one-shot per distinct stale hash, as before. The
+          # watcher deliberately does not probe the crew here (that is the
+          # daemon's job), so the payload's verdict is `untriaged`.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
+            reason=$(wake_payload stale "$w" "$STATE" "$task" untriaged)
+            fm_wake_append stale "$w" "$reason" || exit 1
             printf '%s' "$h" > "$sf"
-            wake "stale: $w"
+            wake "$reason"
           fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
@@ -620,11 +670,12 @@ EOF
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
+              reason=$(wake_payload stale "$w" "$STATE" "$task" none)
+              fm_wake_append stale "$w" "$reason" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "stale: $w"
+              mark_surfaced "$STATE/$task.status"
+              wake "$reason"
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a

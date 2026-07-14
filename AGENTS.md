@@ -286,13 +286,13 @@ Never `pkill -f bin/fm-watch.sh` - that pattern matches every firstmate home's w
 
 Waiting is intentionally silent. After arming, send no idle progress updates; empty polls and elapsed time are bookkeeping, not conversation.
 
-On wake, in order of cheapness:
+Every wake carries its own evidence after the `|`: the task, the watcher's absorb verdict, idle age, and the last status line.
+**Act on the payload. Read nothing further unless it is self-contradictory or absent.**
 
-1. Read the reason line and drain the queue.
-2. `signal:` read the listed status files. A status line is the wake *event*, not current state. When you need live state - especially to confirm a `needs-decision`/`blocked`/`paused` is still real and not already resolved - read it with `bin/fm-crew-state.sh <id>`. Never `tail` the status log as a current-state source.
-3. `stale:` the crewmate stopped without reporting. Peek the window with `bin/fm-peek.sh`. If it is waiting, looping, confused, or unresponsive, load `stuck-crewmate-recovery`.
-4. `check:` a per-task poll fired (a CI failure or a merge). Act on it.
-5. `heartbeat:` something turned up that the per-wake path missed. Review the whole fleet with `bin/fm-fleet-view.sh`, then resume. Do not report that the fleet is unchanged.
+1. Drain the queue.
+2. `signal:` / `stale:` act on the payload. `class=none` on a stale means the crew stopped: peek with `bin/fm-peek.sh`, and if it is waiting, looping, or unresponsive, load `stuck-crewmate-recovery`. Only when a payload lacks the evidence you need, read live state with `bin/fm-crew-state.sh <id>` - never a `tail` of the status log.
+3. `check:` a per-task poll fired (a CI failure or a merge). Act on it.
+4. `heartbeat:` something turned up that the per-wake path missed. Review the whole fleet with `bin/fm-fleet-view.sh`, then resume. Do not report that the fleet is unchanged.
 
 When a wake reports a merged PR for a project this home also has cloned, run `bin/fm-fleet-sync.sh <project>` so the clone never sits stale.
 
