@@ -92,27 +92,31 @@ test_snapshot_and_progress_rule() {
   pass "the probe reads commits, stages and edits, and never invents evidence"
 }
 
-# --- a committing crew on a static pane is absorbed, for free ---------------
+# --- a crew that committed and then STOPPED must still surface at once --------
+#
+# The worktree is PAST evidence: it says the crew did work recently, never that it is
+# alive NOW. An idle pane over a fresh worktree is the swallowed finish - the crew
+# made its final commit and stopped dead. An earlier cut of this branch absorbed on
+# worktree freshness here, which made such a crew wait out FM_STALE_ESCALATE_SECS
+# where main surfaced it instantly, and made the wake claim class=working without
+# ever probing. A wake that is cheaper but less true is not a fix.
 
-test_stale_pane_absorbed_when_worktree_advanced() {
+test_committed_then_stopped_surfaces_immediately() {
   local dir wt state fakebin out probes capture window pid
-  dir=$(make_case wt-absorb); state="$dir/state"; fakebin="$dir/fakebin"
+  dir=$(make_case wt-stopped); state="$dir/state"; fakebin="$dir/fakebin"
   wt="$dir/wt"; out="$dir/watch.out"; probes="$dir/probes"; capture="$dir/capture"
   window="sess:fm-wa1"
   make_repo "$wt"
   : > "$probes"
-  printf 'compiling\n' > "$capture"
+  printf 'idle prompt\n' > "$capture"
   fm_write_meta "$state/wa1.meta" "window=$window" "worktree=$wt" "kind=ship"
   printf 'working: mid-task\n' > "$state/wa1.status"
-  # Primed, so the pre-existing status does not fire the signal path: this case is
-  # about the STALE path (the signal path's own worktree absorb is the next case).
   printf '%s' "$(stat -c '%s:%Y' "$state/wa1.status" 2>/dev/null || stat -f '%z:%Fm' "$state/wa1.status")" \
     > "$state/.seen-wa1_status"
 
-  # Baseline snapshot: the watcher has seen this worktree before.
+  # The crew's worktree moved moments ago (its final commit), and its pane is idle.
   printf '%s\n' "$(wt_activity_snapshot "$wt")" > "$state/.wt-snap-wa1"
   printf '%s\n' "$(date +%s)" > "$state/.wt-since-wa1"
-  # ... and then the crew commits, while its pane sits perfectly still.
   printf 'landed\n' > "$wt/c.txt"
   git -C "$wt" add c.txt
   git -C "$wt" commit -qm landed
@@ -120,16 +124,18 @@ test_stale_pane_absorbed_when_worktree_advanced() {
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
     FM_FAKE_CREW_STATE='state: unknown · source: none · stopped' FM_FAKE_CREW_STATE_LOG="$probes" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_STALE_ESCALATE_SECS=240 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  sleep 5
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  wait_for_exit "$pid" 120 \
+    || fail "a crew that committed and then stopped did not surface (it is waiting out the wedge timer)"
 
-  grep -q 'stale:' "$out" && fail "a crew that had just committed was surfaced as stale: $(cat "$out")"
-  [ ! -s "$probes" ] || fail "the absorb paid for a pane probe the worktree had already answered"
-  assert_grep "worktree advanced" "$state/.watch-triage.log" "the absorb was not attributed to the worktree"
-  pass "a static pane whose worktree just advanced is absorbed with no probe"
+  # It surfaced AT ONCE, and the payload states the verdict that was actually probed.
+  assert_grep "stale: $window | task=wa1 class=none" "$out" \
+    "the wake did not carry the probed verdict"
+  grep -q 'class=working' "$out" && fail "the payload fabricated class=working for a crew that had stopped"
+  [ -s "$probes" ] || fail "the stale triage decided liveness without probing the crew at all"
+  pass "an idle pane over a fresh worktree is a swallowed finish: surfaced at once, class=none"
 }
 
 # --- a working: note from a crew that is committing is absorbed too ----------
@@ -141,7 +147,10 @@ test_signal_absorbed_when_worktree_advanced() {
   window="sess:fm-wn1"
   make_repo "$wt"
   : > "$probes"
-  printf 'compiling\n' > "$capture"
+  # A busy pane, so the STALE path (which must always probe - it decides liveness)
+  # never fires and cannot pollute this case's zero-probe assertion. What is under
+  # test here is the SIGNAL path: a no-verb note absorbed on worktree evidence alone.
+  printf 'esc to interrupt\n' > "$capture"
   fm_write_meta "$state/wn1.meta" "window=$window" "worktree=$wt" "kind=ship"
   printf '%s\n' "$(wt_activity_snapshot "$wt")" > "$state/.wt-snap-wn1"
 
@@ -235,7 +244,7 @@ test_spinning_gates() {
 }
 
 test_snapshot_and_progress_rule
-test_stale_pane_absorbed_when_worktree_advanced
+test_committed_then_stopped_surfaces_immediately
 test_signal_absorbed_when_worktree_advanced
 test_spinning_crew_surfaces
 test_spinning_gates

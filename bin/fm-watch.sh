@@ -348,8 +348,14 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason extra
+# <class> is the absorb verdict the CALLER actually derived from a probe. It is a
+# parameter, not a constant, because the payload must never state a verdict nobody
+# computed: an earlier cut of this branch hard-coded `working` here and reached it
+# from a path that had taken no probe at all, so the wake asserted a working crew
+# that had in fact stopped. Every call site below is downstream of a
+# crew_absorb_class read that returned `working`, and says so.
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <class>
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 class=$5 since age n reason extra
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -366,7 +372,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           extra="$extra demand-deep-inspection=1"
         fi
         # shellcheck disable=SC2086  # $extra is a deliberate multi-field split.
-        reason=$(wake_payload stale "$win" "$STATE" "$(window_to_task "$win" "$STATE")" working $extra)
+        reason=$(wake_payload stale "$win" "$STATE" "$(window_to_task "$win" "$STATE")" "$class" $extra)
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
         wake "$reason"
@@ -809,7 +815,7 @@ EOF
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
+            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" working
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
@@ -831,18 +837,14 @@ EOF
           #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
-            # A worktree that just moved IS the positive working evidence this
-            # triage is looking for, and it is already in hand - so take it before
-            # paying fm-crew-state.sh for a pane probe that can only say the same
-            # thing less reliably. The wedge timer still starts, so a crew that
-            # commits and then freezes still escalates.
-            if [ "$wtclass" = fresh ]; then
-              clear_pause_tracking "$w"
-              printf '%s' "$h" > "$sf"
-              date +%s > "$ssf"
-              triage_log "absorbed non-terminal stale (worktree advanced ${wtage}s ago): $w"
-              continue
-            fi
+            # The worktree is deliberately NOT consulted here. A fresh worktree is
+            # PAST evidence - it says the crew did work recently, never that it is
+            # alive NOW - and an idle pane over a fresh worktree is precisely the
+            # swallowed finish: the crew made its final commit and stopped. An earlier
+            # cut of this branch absorbed on that signal, which made a stopped crew
+            # wait out FM_STALE_ESCALATE_SECS where main surfaced it instantly, and
+            # made the resulting payload claim class=working without ever probing.
+            # Only the probe answers "alive now", so only the probe decides here.
             case "$(crew_absorb_class "$task")" in
               working)
                 clear_pause_tracking "$w"
@@ -864,12 +866,12 @@ EOF
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
+                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" working
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       surface_nonterminal_stale "$w" "$h" ;;
               esac
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" working
             fi
           fi
         fi
