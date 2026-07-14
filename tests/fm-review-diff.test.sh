@@ -9,6 +9,11 @@
 #   (b) pr= without pr_head= -> fetch refs/pull/<n>/head and diff that
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
+#
+# Plus the summary-first contract: the DEFAULT prints the map (base, stat, per-file
+# sizes) and never the diff body, says loudly that the body was elided and how to
+# get it, and --full / --files are the two explicit ways to get code. The base/ref
+# cases above therefore ask for --full: they are about WHICH refs are compared.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -81,7 +86,7 @@ test_pr_meta_uses_pr_head_not_stale_local() {
     "pr=https://github.com/example/repo/pull/9" \
     "pr_head=$PR_SHA"
 
-  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  out=$(run_review_diff "$case_dir" task-x1 --full 2> "$case_dir/stderr")
 
   assert_contains "$out" '+pr-fixed' "pr-head-sha: diff should show the PR head content"
   assert_not_contains "$out" 'stale-local' "pr-head-sha: diff must not use the stale local branch"
@@ -97,7 +102,7 @@ test_pr_meta_fetches_pull_head_without_recorded_sha() {
   git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
   write_task_meta "$case_dir" "pr=https://github.com/example/repo/pull/9"
 
-  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  out=$(run_review_diff "$case_dir" task-x1 --full 2> "$case_dir/stderr")
 
   assert_contains "$out" '+pr-fixed' "pr-fetch: diff should use fetched PR head"
   assert_not_contains "$out" 'stale-local' "pr-fetch: diff must not use the stale local branch"
@@ -112,7 +117,7 @@ test_no_pr_meta_uses_local_branch() {
   stale_and_pr_commits "$case_dir"
   write_task_meta "$case_dir"
 
-  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  out=$(run_review_diff "$case_dir" task-x1 --full 2> "$case_dir/stderr")
 
   assert_contains "$out" '+stale-local' "no-pr-meta: diff should still use the local branch"
   assert_not_contains "$out" '+pr-fixed' "no-pr-meta: diff must not jump to the unpushed PR commit"
@@ -131,7 +136,7 @@ test_unreachable_pr_head_falls_back_with_warning() {
     "pr_head=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
   set +e
-  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  out=$(run_review_diff "$case_dir" task-x1 --full 2> "$case_dir/stderr")
   set -e
   err=$(cat "$case_dir/stderr")
 
@@ -142,7 +147,53 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+# --- summary first ----------------------------------------------------------
+
+test_default_is_a_summary_that_admits_what_it_elided() {
+  local case_dir out
+  case_dir=$(make_case summary-default)
+  stale_and_pr_commits "$case_dir"
+  write_task_meta "$case_dir"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base:' "summary: lost the base line"
+  assert_contains "$out" 'feature.txt' "summary: lost the stat"
+  assert_contains "$out" 'per-file sizes' "summary: lost the per-file size table"
+  assert_not_contains "$out" '+stale-local' "summary: printed the diff body it is supposed to elide"
+  # The elision must be LOUD, and must say how to get the code.
+  assert_contains "$out" 'ELIDED' "summary: elided the body without saying so"
+  assert_contains "$out" '--full' "summary: did not say how to get the full diff"
+  assert_contains "$out" '--files' "summary: did not say how to get a subset"
+  pass "the default is a summary that says loudly what it elided and how to get it"
+}
+
+test_full_and_files_produce_code() {
+  local case_dir out
+  case_dir=$(make_case summary-full)
+  stale_and_pr_commits "$case_dir"
+  printf 'other\n' > "$case_dir/wt/other.txt"
+  git -C "$case_dir/wt" add other.txt
+  git -C "$case_dir/wt" commit -qm "a second file"
+  write_task_meta "$case_dir"
+
+  out=$(run_review_diff "$case_dir" task-x1 --full 2> "$case_dir/stderr")
+  assert_contains "$out" '+stale-local' "--full: did not print the diff body"
+  assert_contains "$out" '+other' "--full: did not print every changed file"
+  assert_not_contains "$out" 'ELIDED' "--full: claimed to elide something"
+
+  # A named subset prints that file's code, not the others', and says how many of
+  # the changed files it is showing.
+  out=$(run_review_diff "$case_dir" task-x1 --files other.txt 2> "$case_dir/stderr")
+  assert_contains "$out" '+other' "--files: did not print the requested file"
+  assert_not_contains "$out" '+stale-local' "--files: leaked a file that was not requested"
+  assert_contains "$out" 'showing 1 of 2 changed files' "--files: did not say what it was showing"
+  pass "--full prints the whole diff and --files prints exactly the named subset"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_default_is_a_summary_that_admits_what_it_elided
+test_full_and_files_produce_code

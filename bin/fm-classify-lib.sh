@@ -26,16 +26,34 @@
 # bin/ script (which sets its own SCRIPT_DIR) or directly by a test.
 _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
 
+# The worktree-activity probe. It owns the snapshot grammar and the progress rule;
+# this lib only decides what a supervisor should DO with a verdict.
+# shellcheck source=bin/fm-wt-activity-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-wt-activity-lib.sh"
+
 # The crew current-state reader used for the "provably working" decision.
 # Overridable so tests can stub the pane/log verdict without a real worktree or a
 # live backend endpoint; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
-# Captain-relevant status verbs. A status line carrying any of these is work
-# firstmate must see. Lines without these verbs are no-verb signals: the watcher
-# absorbs them only with positive provably-working evidence, while the daemon uses
-# its away-mode classification. FM_CAPTAIN_RE overrides the whole set when a home
-# needs a custom verb vocabulary; absent, this default applies.
+# Captain-relevant status VERBS. A status line whose LEADING VERB is one of these is
+# work firstmate must see. Lines with any other verb are no-verb signals: the watcher
+# absorbs them only with positive evidence the crew is still moving, while the daemon
+# uses its away-mode classification.
+#
+# Relevance is anchored to the verb, never to a substring of the prose, because the
+# note after the verb is free text written by a crewmate. Scanning the whole line
+# escalated "working: rebased onto merged main" as captain-relevant - the word
+# `merged` appearing anywhere was enough - and burned a full firstmate turn on a
+# routine progress note. The verb is the crew's actual claim; everything after the
+# colon is commentary.
+FM_CLASSIFY_CAPTAIN_VERBS='done needs-decision blocked failed'
+
+# The whole-line regex is now ONLY the explicit escape hatch: a home that sets
+# FM_CAPTAIN_RE is deliberately asking for its own vocabulary, matched against the
+# whole line, and gets exactly that. This default is what such a home starts from,
+# and is never applied on its own - with FM_CAPTAIN_RE unset, the verb set above is
+# the entire test.
 FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
@@ -71,18 +89,55 @@ last_status_line() {
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
 }
 
-# 0 if the given (last) status line matches a captain-relevant verb.
+# Normalize a leading verb for comparison. The old whole-line test was `grep -qiE`:
+# case-INSENSITIVE and unanchored, so it caught "Done:", "DONE:", "- done:" and
+# "**done**:" as well as "done:". Anchoring to the verb (which is right - the prose
+# scan was the bug) must NOT quietly narrow that: a crew that decorates its line, or
+# whose harness capitalizes it, is genuinely done, and swallowing that forever is the
+# single worst failure this whole subsystem exists to prevent. So the verb is
+# case-folded and stripped of the list/markdown punctuation a crewmate may wrap it in
+# ("- ", "* ", "#", ">", "**...**", quotes) before it is compared.
+# It is deliberately NOT a substring scan: only the LEADING token is ever considered,
+# so "working: rebased onto merged main" still does not escalate.
+status_normalize_verb() {  # <verb> -> lowercase, punctuation-stripped
+  local v=$1
+  v=$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')
+  v=${v#"${v%%[![:space:]]*}"}
+  v=${v%"${v##*[![:space:]]}"}
+  # Strip any run of leading/trailing decoration: - * # > ` " ' _ ~ and spaces.
+  while :; do
+    case "$v" in
+      [-*#\>\`\"\'_~[:space:]]*) v=${v#?} ;;
+      *) break ;;
+    esac
+  done
+  while :; do
+    case "$v" in
+      *[-*#\>\`\"\'_~[:space:]]) v=${v%?} ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$v"
+}
+
+# 0 if the given (last) status line is captain-relevant: its LEADING VERB, normalized,
+# is one of FM_CLASSIFY_CAPTAIN_VERBS. The note after the verb is never scanned - a
+# crewmate writing "working: rebased onto merged main" is reporting progress, not a
+# merge. A home that sets FM_CAPTAIN_RE has explicitly asked for a whole-line regex
+# instead, and gets exactly that, verb anchoring included or not as it chooses.
 status_is_captain_relevant() {
-  local line=$1 verb
+  local line=$1 verb v
   [ -n "$line" ] || return 1
   status_is_paused "$line" && return 1
-  if [ -z "${FM_CAPTAIN_RE+x}" ]; then
-    verb=$(status_line_verb "$line")
-    case "$verb" in
-      done|needs-decision|blocked|failed) return 0 ;;
-    esac
+  if [ -n "${FM_CAPTAIN_RE+x}" ]; then
+    printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+    return
   fi
-  printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+  verb=$(status_normalize_verb "$(status_line_verb "$line")")
+  for v in $FM_CLASSIFY_CAPTAIN_VERBS; do
+    [ "$verb" = "$v" ] && return 0
+  done
+  return 1
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
@@ -92,7 +147,9 @@ status_is_captain_relevant() {
 status_is_paused() {  # <status-line>
   local line=$1 verb
   [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
+  # Normalized like every other verb test (status_normalize_verb owns the rule), so
+  # "Paused:" is the pause a crewmate meant it to be.
+  verb=$(status_normalize_verb "$(status_line_verb "$line")")
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
@@ -169,7 +226,7 @@ status_open_decisions() {  # <status-file>
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
-    verb=$(status_line_verb "$line")
+    verb=$(status_normalize_verb "$(status_line_verb "$line")")
     key=$(_fm_decision_key "$line") || continue
     case "$verb" in
       needs-decision|blocked)
@@ -185,6 +242,59 @@ status_open_decisions() {  # <status-file>
     esac
   done < "$f"
   printf '%s' "$open"
+}
+
+# --- wake payloads ----------------------------------------------------------
+#
+# THE ONE OWNER of the wake-payload grammar. Every wake the watcher prints (and
+# enqueues) carries, on ONE line, the evidence the watcher already computed, so
+# the orchestrator never re-derives a fact bash held in a variable:
+#
+#   <kind>: <target> | task=<id> class=<verdict> [<field>=<value> ...] last=<status-line>
+#
+# The part before " | " is the historical target (a status-file list for
+# `signal:`, a window for `stale:`) and stays first so a consumer that only wants
+# the target can cut at the separator - which bin/fm-supervise-daemon.sh's
+# handle_wake does. `last=` is always the FINAL field because a status note is
+# free text and may contain anything, including a `=` or a `|`.
+#
+# Fields:
+#   task=  the task id the wake is about
+#   class= the crew_absorb_class verdict at wake time: working | paused | none;
+#          `spinning` when the worktree probe found a LIVE pane over a motionless
+#          worktree (no pane probe was needed, or taken); or `untriaged` when the
+#          away-mode daemon owns triage and the watcher deliberately did not probe
+#   idle=  seconds the pane has been idle (stale wakes, where known)
+#   wedge= consecutive wedge escalations on this same unchanged pane
+#   demand-deep-inspection=1  at FM_WEDGE_DEMAND_INSPECT_COUNT escalations
+#   recheck=pause  the bounded re-surface of a declared external wait
+#   wt=still  the worktree has not moved for FM_WT_STILL_SECS (pairs with class=spinning)
+#   open-decision=<key>  a decision the crew opened is STILL OPEN in the durable fold,
+#          even if a later line masks it as `last=` (status_open_decisions owns the fold)
+#   kind=secondmate  a wedged secondmate with live work (an idle one is healthy, and silent)
+#   last=  the last non-blank status line, verbatim, or `(none)`
+#
+# A payload is a token diet, not a new verbosity: one line, no prose.
+wake_evidence() {  # <state> <task> <class> [extra-field ...]
+  local state=$1 task=$2 class=$3 last
+  shift 3
+  last=$(last_status_line "$state/$task.status")
+  [ -n "$last" ] || last='(none)'
+  printf 'task=%s class=%s' "$task" "$class"
+  [ "$#" -gt 0 ] && printf ' %s' "$*"
+  printf ' last=%s' "$last"
+}
+
+wake_payload() {  # <kind> <target> <state> <task> <class> [extra-field ...]
+  local kind=$1 target=$2 state=$3 task=$4 class=$5
+  shift 5
+  printf '%s: %s | %s' "$kind" "$target" "$(wake_evidence "$state" "$task" "$class" "$@")"
+}
+
+# The target half of a payload: everything before the evidence separator. The
+# inverse of wake_payload for a consumer that wants the window or file list back.
+wake_payload_target() {  # <reason-after-the-kind-prefix>
+  printf '%s' "${1%% | *}"
 }
 
 # task id from a recorded window target, falling back to the tmux-shaped
@@ -297,6 +407,202 @@ signal_crew_provably_working() {  # <file> ...
     crew_is_provably_working "$task" || return 1
   done
   [ -n "$seen" ] || return 1
+  return 0
+}
+
+# --- turn-end bodies --------------------------------------------------------
+#
+# A turn-end marker carries a BODY (bin/fm-turnend-mark.sh owns its format): the
+# turn counter plus the worktree snapshot taken as the turn ended. Comparing this
+# turn's snapshot with the one recorded at the PREVIOUS turn end answers, for
+# free, the question the watcher used to pay a pane probe to answer: did that turn
+# actually move the work?
+#
+# `turnend_shows_progress` is deliberately conservative. It absorbs ONLY on
+# positive evidence of movement (a commit, a stage, an edit). No body, no previous
+# body, or an unchanged worktree all return 1, and the caller falls back to the
+# pane probe exactly as before - a wedged crew is never absorbed by silence.
+#
+# Absorbing here does NOT hide a finished crew: a crew that is truly done says so
+# with a captain-relevant verb (which surfaces on the status signal), and a crew
+# that stops for any other reason goes stale, which the stale path surfaces.
+# All this removes is the pane probe and the peek for the routine case: a crew that
+# committed something and carried on.
+turnend_shows_progress() {  # <state> <task>
+  local state=$1 task=$2 body prev
+  body=$(head -1 "$state/$task.turn-ended" 2>/dev/null || true)
+  prev=$(head -1 "$state/.turnend-seen-$task" 2>/dev/null || true)
+  wt_activity_advanced "$prev" "$body"
+}
+
+# Record the turn-end bodies just handled, so the NEXT turn end has something to
+# compare against. Consumer bookkeeping, called once per handled signal whether it
+# was surfaced or absorbed - the same discipline the watcher's .seen-* signatures
+# follow, so a watcher killed mid-cycle re-handles rather than swallows.
+turnend_record_seen() {  # <state> <file> ...
+  local state=$1 f base task body
+  shift
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in *.turn-ended) task=${base%.turn-ended} ;; *) continue ;; esac
+    body=$(head -1 "$state/$task.turn-ended" 2>/dev/null || true)
+    [ -n "$body" ] || continue
+    printf '%s\n' "$body" > "$state/.turnend-seen-$task" 2>/dev/null || true
+  done
+  return 0
+}
+
+# 0 if the crew's WORKTREE has advanced since the watcher last recorded it: positive
+# working evidence taken from the work itself rather than from the screen, and free
+# of any pane probe. Reads the recorded snapshot the watcher's per-poll tracker
+# owns (state/.wt-snap-<task>) and mutates nothing, so calling it never consumes the
+# movement the tracker is about to see. No recorded snapshot, no worktree in the
+# task's meta, or an unprobeable worktree all return 1 - no evidence is not progress.
+crew_worktree_advanced() {  # <state> <task>
+  local state=$1 task=$2 prev wt now
+  prev=$(head -1 "$state/.wt-snap-$task" 2>/dev/null || true)
+  [ -n "$prev" ] || return 1
+  wt=$(grep '^worktree=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] || return 1
+  now=$(wt_activity_snapshot "$wt" "$state" "$task")
+  wt_activity_advanced "$prev" "$now"
+}
+
+# 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake can be
+# absorbed, by ANY of three independent positive-evidence tests, cheapest first:
+#   1. its turn-end body proves the turn moved the work (free);
+#   2. its worktree has advanced since the watcher last looked (one git read);
+#   3. the crew is provably working on its endpoint (one pane probe).
+# The two free tests come first, so the common cases - a crew that ended a turn
+# having committed something, or one that files a `working:` note mid-commit - cost
+# no probe at all. 1 (surface) if a referenced task passes none of the three, or if
+# no task can be resolved.
+signal_crew_absorbable() {  # <state> <file> ...
+  local state=$1 f base task seen=""
+  shift
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.status)     task=${base%.status} ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *)            continue ;;
+    esac
+    [ -n "$task" ] || continue
+    case " $seen " in *" $task "*) continue ;; esac
+    seen="$seen $task"
+    turnend_shows_progress "$state" "$task" && continue
+    crew_worktree_advanced "$state" "$task" && continue
+    crew_is_provably_working "$task" || return 1
+  done
+  [ -n "$seen" ] || return 1
+  return 0
+}
+
+# --- secondmates: idle is healthy, wedged is not ----------------------------
+#
+# A secondmate is idle BY CHARTER when nothing is routed to it, so its idle pane is
+# not a wedge and must never be surfaced - which is why the watcher skipped stale
+# detection for secondmates entirely. The cost of that blanket skip was a silent
+# hole: a secondmate that wedged mid-task produced no stale wake at all, ever.
+#
+# The discriminator is LIVE WORK: does its own home hold at least one task meta -
+# crew of its own, in flight? A secondmate supervising crew MUST be alive to
+# supervise it, so a pane frozen across two polls while its children run means its
+# whole fleet is unwatched, which is the wedge worth waking firstmate for. A
+# secondmate with no crew in flight is idle, and stays as silent as it is today.
+#
+# Deliberately NOT part of the test: the secondmate's own `working:` status line. A
+# secondmate writes one while merely standing by ("working: the parent supervises
+# this secondmate"), so it says nothing about whether work is outstanding - using it
+# would surface every healthy idle secondmate, which is exactly what must not happen.
+# The honest limit of this test: a secondmate that wedges BEFORE spawning any crew
+# has produced no live-work evidence anywhere, and stays invisible to the stale path.
+# Its routed request is not lost - an open needs-decision or blocked still reaches
+# firstmate through the signal path and the open-decision fold.
+#
+# A child that has REPORTED - done: or failed: - is not live work: its task is over
+# and it is waiting on the captain's merge or on firstmate, neither of which its
+# secondmate can hurry. Counting those metas would report a correctly-idle secondmate
+# as wedged the moment one of its tasks finished, which is exactly the "don't make
+# healthy idle secondmates noisy" constraint. A child with no status file yet has just
+# been spawned, and IS live work.
+secondmate_has_live_work() {  # <state> <task>
+  local state=$1 task=$2 home meta child last verb
+  [ -n "$task" ] || return 1
+  home=$(grep '^home=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$home" ] || return 1
+  for meta in "$home"/state/*.meta; do
+    [ -e "$meta" ] || continue
+    child=$(basename "$meta"); child=${child%.meta}
+    last=$(last_status_line "$home/state/$child.status")
+    verb=$(status_normalize_verb "$(status_line_verb "$last")")
+    case "$verb" in
+      done|failed) continue ;;   # reported: over, and not this secondmate's to hurry
+      *) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# --- open decisions must not be masked --------------------------------------
+#
+# status_open_decisions folds the WHOLE log into the decisions still open, but the
+# watcher's triage only ever read the LAST line. So a still-open needs-decision
+# followed by any later `working:` line was invisible to the wake path: the crew's
+# question sat unasked until a slow backstop happened to notice. The signature below
+# lets the wake path consume the fold.
+#
+# It is a signature, not a boolean, so the wake stays NARROW: firstmate is woken when
+# the open SET CHANGES (a new or different decision is open), not on every later line
+# while a known decision stays open. An already-surfaced decision that firstmate is
+# still thinking about must not re-wake it on the crew's next progress note.
+status_open_decision_sig() {  # <status-file>
+  local open
+  open=$(status_open_decisions "$1")
+  [ -n "$open" ] || return 0
+  printf '%s' "$open" | tr '\n\t' '; '
+}
+
+# The key of the most recently opened still-open decision, for the wake payload.
+status_open_decision_key() {  # <status-file>
+  local open
+  open=$(status_open_decisions "$1")
+  [ -n "$open" ] || return 1
+  printf '%s' "$open" | tail -1 | cut -f1
+}
+
+# 0 (actionable) if any status file in a signal wake has a still-open decision whose
+# open-set signature this watcher has not surfaced yet.
+signal_has_new_open_decision() {  # <state> <file> ...
+  local state=$1 f base task sig
+  shift
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in *.status) task=${base%.status} ;; *) continue ;; esac
+    sig=$(status_open_decision_sig "$f")
+    [ -n "$sig" ] || continue
+    [ "$sig" = "$(cat "$state/.decision-seen-$task" 2>/dev/null || true)" ] && continue
+    return 0
+  done
+  return 1
+}
+
+# Record the open-decision signatures just handled, so an open decision that stays
+# open does not re-wake firstmate on the crew's next line. Same discipline as the
+# .seen-* signatures: written whether the wake surfaced or was absorbed.
+decision_record_seen() {  # <state> <file> ...
+  local state=$1 f base task sig
+  shift
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in *.status) task=${base%.status} ;; *) continue ;; esac
+    sig=$(status_open_decision_sig "$f")
+    if [ -n "$sig" ]; then
+      printf '%s' "$sig" > "$state/.decision-seen-$task" 2>/dev/null || true
+    else
+      rm -f "$state/.decision-seen-$task" 2>/dev/null || true
+    fi
+  done
   return 0
 }
 

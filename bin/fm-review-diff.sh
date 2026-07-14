@@ -10,8 +10,19 @@
 # any CI-fix rounds push commits that need not exist locally. Reviewing the PR
 # head is what keeps firstmate's review of the real, mergeable change. If the PR
 # head cannot be resolved, the script falls back to the local branch with a warning.
-# Usage: fm-review-diff.sh <task-id> [--stat]
-#   --stat prints only the stat summary; default prints stat summary plus full diff.
+#
+# SUMMARY FIRST. The default used to print the stat AND the entire unbounded diff,
+# which on a large change is one of the most expensive reads in the supervision loop
+# - and most of it is read by nobody. The default is now the map: the base, the
+# stat, and a per-file size table. The code itself is one explicit command away, and
+# the summary says so LOUDLY: an elided diff that reads as complete is worse than an
+# expensive one, so nothing here is ever silently truncated.
+#
+# Usage: fm-review-diff.sh <task-id> [--full | --files <path>... ]
+#   (default)        base + stat + per-file sizes, and how to get the code
+#   --full           the above plus the complete diff (the historical default)
+#   --files <p>...   the above plus the complete diff for those paths only
+#   --stat           accepted as an alias of the default (it is now the default)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,7 +32,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
-  echo "usage: fm-review-diff.sh <task-id> [--stat]" >&2
+  echo "usage: fm-review-diff.sh <task-id> [--full | --files <path>...]" >&2
+  echo "       default: base + stat + per-file sizes (no diff body)" >&2
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
@@ -31,13 +43,28 @@ fi
 
 ID=${1:-}
 [ -n "$ID" ] || { usage; exit 1; }
-STAT_ONLY=false
-case "${2:-}" in
-  '') ;;
-  --stat) STAT_ONLY=true ;;
-  *) usage; exit 1 ;;
-esac
-[ $# -le 2 ] || { usage; exit 1; }
+shift || true
+MODE=summary
+PATHS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --full)  MODE=full; shift ;;
+    --stat)  MODE=summary; shift ;;   # the historical flag; now what the default does
+    --files)
+      MODE=files
+      shift
+      [ $# -gt 0 ] || { echo "error: --files needs at least one path" >&2; usage; exit 1; }
+      # Everything after --files is a path. Reject a flag-looking argument rather than
+      # silently diffing a file named "--full" and printing nothing.
+      while [ $# -gt 0 ]; do
+        case "$1" in --*) echo "error: --files takes paths, not flags (got $1); put --files last" >&2; exit 1 ;; esac
+        PATHS+=("$1")
+        shift
+      done
+      ;;
+    *) usage; exit 1 ;;
+  esac
+done
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
@@ -136,7 +163,32 @@ if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
 fi
 
 git -C "$WT" diff --stat "$BASE...$COMPARE_REF" --
-if ! "$STAT_ONLY"; then
-  echo
-  git -C "$WT" diff "$BASE...$COMPARE_REF" --
-fi
+
+case "$MODE" in
+  full)
+    echo
+    git -C "$WT" diff "$BASE...$COMPARE_REF" --
+    ;;
+  files)
+    echo
+    echo "showing ${#PATHS[@]} of $(git -C "$WT" diff --name-only "$BASE...$COMPARE_REF" -- | wc -l | tr -d ' ') changed files"
+    git -C "$WT" diff "$BASE...$COMPARE_REF" -- "${PATHS[@]}"
+    ;;
+  summary)
+    # The per-file size table: what a reviewer needs to decide WHICH code to read.
+    # Sorted biggest-first, because that is the order the reading decision is made in.
+    echo
+    echo "per-file sizes (added/removed lines):"
+    git -C "$WT" diff --numstat "$BASE...$COMPARE_REF" -- \
+      | sort -k1,1nr \
+      | while read -r add del path; do
+          printf '  +%-6s -%-6s %s\n' "$add" "$del" "$path"
+        done
+    # Say what was left out, and exactly how to get it. An elided diff that reads as
+    # complete is worse than an expensive one.
+    echo
+    echo "ELIDED: the diff body is not shown above."
+    echo "  full diff:      bin/fm-review-diff.sh $ID --full"
+    echo "  selected files: bin/fm-review-diff.sh $ID --files <path> [<path>...]"
+    ;;
+esac

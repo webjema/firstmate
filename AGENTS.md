@@ -242,7 +242,7 @@ Add ship and scout tasks to `data/backlog.md` under In flight; a secondmate spaw
 A ship crewmate reports `done: PR <url>` (mode `PR`) or `done: ready in branch fm/<id>` (`local-only`).
 It has already run `/code-review` and `/verify` and satisfied the project's hooks. **Your review is independent of that, not a rubber stamp for it.**
 
-1. Read the diff with `bin/fm-review-diff.sh <id>` - never a raw `git diff` against the local default branch, which can be stale.
+1. Read the diff with `bin/fm-review-diff.sh <id>` - a summary first, then `--full` or `--files <path>` for the code - never a raw `git diff` against the local default branch, which can be stale.
 2. Review it against the project's direction (section 5, gate 4). Mechanical quality is the hooks' and CI's job; you are looking for drift, wrong-shaped solutions, and scope creep.
 3. For mode `PR`, run `bin/fm-pr-check.sh <id> <PR url>`. It records the PR in the task's meta and arms a poll that wakes you when CI fails or the PR merges.
 4. Tell the captain: the PR's full `https://...` URL, a one-paragraph summary, and your direction verdict. If the change drifts, say so plainly.
@@ -286,13 +286,13 @@ Never `pkill -f bin/fm-watch.sh` - that pattern matches every firstmate home's w
 
 Waiting is intentionally silent. After arming, send no idle progress updates; empty polls and elapsed time are bookkeeping, not conversation.
 
-On wake, in order of cheapness:
+Every wake carries its own evidence after the `|`: the task, the watcher's absorb verdict, idle age, and the last status line.
+**Act on the payload. Read nothing further unless it is self-contradictory or absent.**
 
-1. Read the reason line and drain the queue.
-2. `signal:` read the listed status files. A status line is the wake *event*, not current state. When you need live state - especially to confirm a `needs-decision`/`blocked`/`paused` is still real and not already resolved - read it with `bin/fm-crew-state.sh <id>`. Never `tail` the status log as a current-state source.
-3. `stale:` the crewmate stopped without reporting. Peek the window with `bin/fm-peek.sh`. If it is waiting, looping, confused, or unresponsive, load `stuck-crewmate-recovery`.
-4. `check:` a per-task poll fired (a CI failure or a merge). Act on it.
-5. `heartbeat:` something turned up that the per-wake path missed. Review the whole fleet with `bin/fm-fleet-view.sh`, then resume. Do not report that the fleet is unchanged.
+1. Drain the queue.
+2. `signal:` / `stale:` act on the payload. `class=none` on a stale means the crew stopped: peek with `bin/fm-peek.sh`, and if it is waiting, looping, or unresponsive, load `stuck-crewmate-recovery`. Only when a payload lacks the evidence you need, read live state with `bin/fm-crew-state.sh <id>` - never a `tail` of the status log.
+3. `check:` a per-task poll fired (a CI failure or a merge). Act on it.
+4. `heartbeat:` something turned up that the per-wake path missed. Review the whole fleet with `bin/fm-fleet-view.sh`, then resume. Do not report that the fleet is unchanged.
 
 When a wake reports a merged PR for a project this home also has cloned, run `bin/fm-fleet-sync.sh <project>` so the clone never sits stale.
 

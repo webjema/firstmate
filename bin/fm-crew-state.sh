@@ -166,6 +166,10 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
+# This exemption is also what keeps a secondmate's open decision visible through a
+# busy pane, so do not "fix" it by treating a secondmate like a crewmate here: a
+# wedged secondmate is distinguished in the watcher, by whether it has live work
+# (fm-classify-lib.sh's secondmate_has_live_work), not by its busy signature.
 if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
   # The busy pane is live evidence and outranks the log. A needs-decision/blocked
   # line the crew has since moved past is deterministically stale, so say so

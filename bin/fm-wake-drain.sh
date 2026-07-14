@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 # Atomically drain durable watcher wake records, then assert watcher liveness.
+#
+# One deduped record per line, TAB-separated:
+#   <epoch>\t<seq>\t<kind>\t<key>\t<payload>
+# The payload is the same line the watcher printed, and it CARRIES ITS OWN
+# EVIDENCE: "<kind>: <target> | task=<id> class=<verdict> [<field>=<value> ...]
+# last=<status-line>" (bin/fm-classify-lib.sh's wake_payload owns that grammar).
+# A drained signal: or stale: record is therefore self-contained - the task, its
+# last status line, the watcher's absorb verdict, and idle age where known are all
+# already here, so handling one needs no follow-up status-file read.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

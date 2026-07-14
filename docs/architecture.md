@@ -12,8 +12,32 @@ A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies de
 Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, check-script output such as PR merge polling or an X-mode mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
-No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: a backend busy signature on that crew's recorded endpoint.
+Every wake is a fat payload: one line of the form `<kind>: <target> | task=<id> class=<verdict> [<field>=<value> ...] last=<status-line>`, carrying the evidence the watcher already computed - the task, its last status line, the absorb-class verdict, and idle age, wedge count, or pause recheck where they apply.
+`bin/fm-classify-lib.sh`'s `wake_payload` owns that grammar, and the orchestrator handles a typical `signal:` or `stale:` wake from the payload alone, with no follow-up status-file or pane read.
+The away-mode daemon cuts the evidence off with `wake_payload_target` and runs its own classification from the state files.
+No-verb wakes, such as `working:` notes and turn-ended signals, are benign only on POSITIVE evidence that the crew is still moving, from either of two independent sources.
+The free one is the turn-end marker's body: every harness's turn-end hook calls `bin/fm-turnend-mark.sh`, which writes one line carrying a turn counter and `bin/fm-wt-activity-lib.sh`'s worktree snapshot (HEAD sha, index mtime, newest modified-file mtime, modified-file count), so a turn that committed, staged, or edited work is absorbed with no probe at all.
+No harness's turn-end hook supplies a turn number, a last tool, or an exit reason, so the counter is firstmate's own and the other two fields are simply absent rather than invented.
+The costly one, used only when the body proves nothing, is `bin/fm-crew-state.sh` reporting a backend busy signature on that crew's recorded endpoint.
+Absence of evidence is never progress: no body, no previous body, or an unchanged worktree all fall back to the probe, and a crew that is genuinely finished still surfaces through its captain-relevant status verb or the stale path.
+
+The same worktree probe runs on every poll for every in-flight window, and the watcher classifies the pane against it rather than on its own.
+A worktree that advanced absorbs a no-verb SIGNAL - a `working:` note, a turn end - with no `fm-crew-state.sh` probe: the crew's work is visibly moving, and if it has nonetheless stopped, the stale path still surfaces it.
+It deliberately does NOT absorb a stale PANE. The worktree is past evidence: it says the crew did work recently, never that it is alive now, and an idle pane over a freshly-advanced worktree is exactly the swallowed finish - the crew made its final commit and stopped.
+Only `fm-crew-state.sh` answers "alive now", so only the probe decides the stale path, and a wake never states an absorb class that no probe derived.
+The converse is the wedge the pane hash structurally cannot see: a pane that keeps CHANGING never goes stale, so a crew spinning on tool calls without touching a file was invisible until the heartbeat.
+When such a pane's worktree has not moved for `FM_WT_STILL_SECS` (default 1800, `0` disables), the watcher surfaces one `stale:` wake per stillness episode carrying `class=spinning wt=still`, and clears the episode the moment the worktree moves.
+That wake is deliberately narrow: ship tasks only (a scout's deliverable is a report outside the worktree), never while the pane shows a busy signature (a long build or test run is legitimately motionless and its harness says so), never for a declared pause, and never under away mode.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
+
+Secondmates are idle by charter, so their idle panes are never surfaced - but a secondmate with LIVE WORK, meaning at least one UNFINISHED child in its own home, must be alive to supervise that crew, and a pane frozen across two polls while its children run surfaces once per stale hash with `kind=secondmate`.
+A child that has already reported `done:` or `failed:` is not live work: it waits on the captain's merge or on firstmate, neither of which its secondmate can hurry, so counting it would call a correctly-idle secondmate wedged.
+A secondmate's own `working:` line is not live-work evidence (it writes one while merely standing by), and `bin/fm-crew-state.sh` still exempts secondmates from the busy check, because that exemption is what keeps a secondmate's open decision visible through a busy pane.
+A secondmate that wedges before spawning any crew leaves no live-work evidence anywhere and remains invisible to the stale path; its routed request still reaches firstmate through the signal path.
+
+An open decision can no longer be masked by a later line.
+`status_open_decisions` folds the whole log into the decisions still open, and the wake path now consumes that fold rather than trusting `last_status_line`, so a still-open `needs-decision` followed by a routine `working:` note surfaces instead of waiting for a backstop.
+The wake carries the open decision's key as `open-decision=<key>`, and fires only when the open SET CHANGES, so a decision firstmate already holds does not re-wake it on the crew's every later line.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so a busy pane outranks an old captain-relevant status-log line the crew has since moved past.
 No-change heartbeats are also benign.
@@ -147,6 +171,8 @@ The `data/secondmates.md` line schema and the secondmate environment variables a
 `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
 `PR` projects ship through a pull request: the crew implements under the project's own hooks, reviews and verifies its own work, pushes `fm/<id>`, and opens the PR, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
 Review diffs go through `bin/fm-review-diff.sh`, which refreshes the authoritative base and, when task meta records `pr=`, compares against the reachable recorded `pr_head=` or a freshly fetched `refs/pull/<n>/head` before falling back to the local branch with a warning.
+It is summary-first: the default prints the base, the stat, and a per-file size table, and the diff body only on `--full` or for the paths named by `--files`.
+Nothing is ever silently truncated - the summary states that the body was elided and the exact command that produces it - because a partial diff read as complete is worse than an expensive one.
 Reviewing the PR head rather than the local branch matters because the crew's own fix rounds and any CI-fix rounds push commits the local worktree need not hold.
 Firstmate learns CI state itself: `bin/fm-pr-check.sh` arms `state/<id>.check.sh`, which reads the PR's merge state and check rollup from GitHub and wakes firstmate only when a check has failed or the PR is merged, staying silent while checks run or sit green and unmerged.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.

@@ -101,6 +101,9 @@ make_fake_crew_state() {  # <fakebin>
 #!/usr/bin/env bash
 set -u
 id=${1:-}
+# Probe ledger: a suite that must prove a wake was absorbed WITHOUT a pane probe
+# points FM_FAKE_CREW_STATE_LOG at a file and asserts it stayed empty.
+[ -n "${FM_FAKE_CREW_STATE_LOG:-}" ] && printf '%s\n' "$id" >> "$FM_FAKE_CREW_STATE_LOG"
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}

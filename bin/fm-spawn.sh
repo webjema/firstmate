@@ -48,6 +48,11 @@
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
+#     __TURNENDMARK__ absolute path to bin/fm-turnend-mark.sh, the shared writer every
+#                  harness's turn-end hook invokes (it owns the marker's body format)
+#     __WT__       absolute path to the task worktree, passed to that writer so the
+#                  marker body carries what the turn did to the WORK, not just that
+#                  a turn ended
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
@@ -219,7 +224,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"__TURNENDMARK__ __TURNEND__ __WT__\"]" "$(cat __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
@@ -631,12 +636,16 @@ fi
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
 
-# Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
-# agent finishes a turn. Worktree-resident hooks are kept out of git's view so
-# they never block teardown's dirty check or leak into a commit.
+# Per-harness turn-end hook: every harness invokes the SAME writer,
+# bin/fm-turnend-mark.sh, which writes state/<id>.turn-ended with a body saying what
+# the turn did to the worktree (it owns that format). It used to be a bare `touch`,
+# which told the watcher only THAT a turn ended and so cost a pane probe every time.
+# Worktree-resident hooks are kept out of git's view so they never block teardown's
+# dirty check or leak into a commit.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+TURNEND_MARK="$FM_ROOT/bin/fm-turnend-mark.sh"
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -648,8 +657,9 @@ if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"
+      turnend_cmd=$(json_escape "$(shell_quote "$TURNEND_MARK") $(shell_quote "$TURNEND") $(shell_quote "$WT")")
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$turnend_cmd"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
@@ -658,7 +668,7 @@ EOF
       cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
 export const FmTurnEnd = async ({ \$ }) => ({
   event: async ({ event }) => {
-    if (event.type === "session.idle") await \$\`touch $TURNEND\`
+    if (event.type === "session.idle") await \$\`'$TURNEND_MARK' '$TURNEND' '$WT'\`
   },
 })
 EOF
@@ -675,7 +685,7 @@ EOF
 // every turn boundary so an idle crewmate is surfaced, not just at shutdown.
 import { execFile } from "node:child_process";
 export default function (pi: any) {
-  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  pi.on("turn_end", () => execFile("$TURNEND_MARK", ["$TURNEND", "$WT"]));
 }
 EOF
       ;;
@@ -704,7 +714,10 @@ EOF
       umask 077
       auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
       umask "$old_umask"
-      printf '%s\n' "$TURNEND" > "$auth_file"
+      # Two lines: the marker path, then the writer that fills its body. An auth
+      # file left by an older firstmate has only the first, and the hook below then
+      # degrades to the historical bare touch (an empty body, never a wrong one).
+      printf '%s\n%s\n' "$TURNEND" "$TURNEND_MARK" > "$auth_file"
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.grok-turnend-token"
       sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
       cat > "$GROK_HOOKS_DIR/fm-turn-end.sh" <<EOF
@@ -720,9 +733,14 @@ IFS= read -r -n 256 first < "\$p" 2>/dev/null || [ -n "\$first" ] || exit 0
 case "\$first" in token=*) token=\${first#token=} ;; *) exit 0 ;; esac
 case "\$token" in fm.????????????) : ;; *) exit 0 ;; esac
 case "\$token" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
-t=\$(cat "\$auth_dir/\$token" 2>/dev/null) || exit 0
+t=\$(sed -n 1p "\$auth_dir/\$token" 2>/dev/null) || exit 0
+mark=\$(sed -n 2p "\$auth_dir/\$token" 2>/dev/null || true)
 case "\$t" in /*.turn-ended) : ;; *) exit 0 ;; esac
-touch "\$t" 2>/dev/null || true
+if [ -n "\$mark" ] && [ -x "\$mark" ]; then
+  "\$mark" "\$t" "\$workspace" 2>/dev/null || true
+else
+  touch "\$t" 2>/dev/null || true
+fi
 exit 0
 EOF
       chmod +x "$GROK_HOOKS_DIR/fm-turn-end.sh"
@@ -770,6 +788,8 @@ META_WINDOW=$T
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
+sq_turnendmark=$(shell_quote "$TURNEND_MARK")
+sq_wt=$(shell_quote "$WT")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
@@ -779,6 +799,8 @@ LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
+LAUNCH=${LAUNCH//__TURNENDMARK__/$sq_turnendmark}
+LAUNCH=${LAUNCH//__WT__/$sq_wt}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}

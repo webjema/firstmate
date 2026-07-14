@@ -1128,10 +1128,13 @@ handle_wake() {  # <reason> <state>
     log "wake force-self (FM_INJECT_SKIP): $reason"
     return
   fi
+  # A wake payload is "<kind>: <target> | <evidence>" (fm-classify-lib.sh owns the
+  # grammar). The daemon runs its own classification from the state files, so it
+  # takes only the target half; wake_payload_target cuts the evidence off.
   case "$reason" in
-    signal:*) kind=signal; arg="${reason#signal: }"
+    signal:*) kind=signal; arg=$(wake_payload_target "${reason#signal: }")
               decision=$(classify_signal "$arg" "$state") ;;
-    stale:*)  kind=stale; arg="${reason#stale: }"
+    stale:*)  kind=stale; arg=$(wake_payload_target "${reason#stale: }")
               decision=$(classify_stale "$arg" "$state") ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
