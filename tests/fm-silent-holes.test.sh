@@ -85,6 +85,44 @@ test_wedged_secondmate_surfaces() {
   pass "a secondmate that froze with live work surfaces as stale"
 }
 
+# A wedge fires ONCE per distinct stale hash. Firstmate cannot un-wedge a secondmate
+# in a single turn, so a wake that repeats on every poll is an infinite loop, not a
+# notification. The first cut of this fix cleared .stale-<key> (via
+# clear_pause_tracking) on the line immediately BEFORE the guard that reads it, so the
+# guard was always true and the wake never stopped.
+test_wedged_secondmate_wakes_only_once() {
+  local dir state fakebin out capture window pid home
+  dir=$(make_case sm-once); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/capture"; window="sess:fm-sm4"
+  home="$dir/home"; mkdir -p "$home/state"
+  printf 'frozen mid-task\n' > "$capture"
+  fm_write_meta "$state/sm4.meta" "window=$window" "kind=secondmate" "home=$home"
+  fm_write_meta "$home/state/child-9.meta" "window=sess:fm-child-9" "kind=ship"
+  printf 'working: the parent supervises this secondmate\n' > "$state/sm4.status"
+  printf '%s' "$(seen_sig "$state/sm4.status")" > "$state/.seen-sm4_status"
+
+  # First arm: it wedges, and firstmate is woken.
+  FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · stopped' \
+    watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 120 || fail "the wedged secondmate did not surface on the first arm"
+  assert_grep "class=none kind=secondmate" "$out" "the first wake lost its evidence"
+
+  # Second arm, with NOTHING changed - same pane, same hash, same live work. Firstmate
+  # is already dealing with it; waking again every poll would never end.
+  : > "$out"
+  FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · stopped' \
+    watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  sleep 6
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ ! -s "$out" ] || fail "the same wedged secondmate woke firstmate again with no state change: $(cat "$out")"
+  pass "a wedged secondmate wakes firstmate once per stale hash, not forever"
+}
+
 test_secondmate_with_crew_of_its_own_counts_as_live_work() {
   local dir state home
   dir=$(make_case sm-live-work); state="$dir/state"
@@ -160,6 +198,7 @@ test_open_decision_does_not_re_wake() {
 
 test_idle_secondmate_stays_silent
 test_wedged_secondmate_surfaces
+test_wedged_secondmate_wakes_only_once
 test_secondmate_with_crew_of_its_own_counts_as_live_work
 test_masked_open_decision_surfaces
 test_open_decision_does_not_re_wake

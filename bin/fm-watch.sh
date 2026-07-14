@@ -757,7 +757,14 @@ EOF
             paused)  handle_paused_stale "$w" "$task" "$h" ;;
             working) clear_pause_tracking "$w" ;;
             *)
-              clear_pause_tracking "$w"
+              # clear_pause_STATE, not clear_pause_TRACKING: the latter deletes
+              # .stale-<key> ($sf), which is the very suppressor the guard below
+              # reads. Clearing it first made that guard always true, so a wedged
+              # secondmate re-woke firstmate on EVERY poll, forever - and firstmate
+              # cannot un-wedge a secondmate in one turn, so the loop never ended.
+              # Only the pause flags are cleared here; the stale hash is the record of
+              # "already surfaced" and is written below.
+              clear_pause_state "$w"
               # Not paused, not working, and its pane has been frozen across two
               # polls while work is outstanding: this is the wedged secondmate the
               # blanket skip used to hide. Once per distinct stale hash, like any
