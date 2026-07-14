@@ -26,6 +26,11 @@
 # bin/ script (which sets its own SCRIPT_DIR) or directly by a test.
 _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
 
+# The worktree-activity probe. It owns the snapshot grammar and the progress rule;
+# this lib only decides what a supervisor should DO with a verdict.
+# shellcheck source=bin/fm-wt-activity-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-wt-activity-lib.sh"
+
 # The crew current-state reader used for the "provably working" decision.
 # Overridable so tests can stub the pane/log verdict without a real worktree or a
 # live backend endpoint; absent, it points at the real sibling script.
@@ -342,6 +347,74 @@ signal_crew_provably_working() {  # <file> ...
     [ -n "$task" ] || continue
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
+    crew_is_provably_working "$task" || return 1
+  done
+  [ -n "$seen" ] || return 1
+  return 0
+}
+
+# --- turn-end bodies --------------------------------------------------------
+#
+# A turn-end marker carries a BODY (bin/fm-turnend-mark.sh owns its format): the
+# turn counter plus the worktree snapshot taken as the turn ended. Comparing this
+# turn's snapshot with the one recorded at the PREVIOUS turn end answers, for
+# free, the question the watcher used to pay a pane probe to answer: did that turn
+# actually move the work?
+#
+# `turnend_shows_progress` is deliberately conservative. It absorbs ONLY on
+# positive evidence of movement (a commit, a stage, an edit). No body, no previous
+# body, or an unchanged worktree all return 1, and the caller falls back to the
+# pane probe exactly as before - a wedged crew is never absorbed by silence.
+#
+# Absorbing here does NOT hide a finished crew: a crew that is truly done says so
+# with a captain-relevant verb (which surfaces on the status signal), and a crew
+# that stops for any other reason goes stale, which the stale path surfaces.
+# All this removes is the pane probe and the peek for the routine case: a crew that
+# committed something and carried on.
+turnend_shows_progress() {  # <state> <task>
+  local state=$1 task=$2 body prev
+  body=$(head -1 "$state/$task.turn-ended" 2>/dev/null || true)
+  prev=$(head -1 "$state/.turnend-seen-$task" 2>/dev/null || true)
+  wt_activity_advanced "$prev" "$body"
+}
+
+# Record the turn-end bodies just handled, so the NEXT turn end has something to
+# compare against. Consumer bookkeeping, called once per handled signal whether it
+# was surfaced or absorbed - the same discipline the watcher's .seen-* signatures
+# follow, so a watcher killed mid-cycle re-handles rather than swallows.
+turnend_record_seen() {  # <state> <file> ...
+  local state=$1 f base task body
+  shift
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in *.turn-ended) task=${base%.turn-ended} ;; *) continue ;; esac
+    body=$(head -1 "$state/$task.turn-ended" 2>/dev/null || true)
+    [ -n "$body" ] || continue
+    printf '%s\n' "$body" > "$state/.turnend-seen-$task" 2>/dev/null || true
+  done
+  return 0
+}
+
+# 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake can be
+# absorbed, by EITHER of the two independent positive-evidence tests: its turn-end
+# body proves it moved the work (free - no probe), or the crew is provably working
+# on its endpoint (one probe). The free test is tried first, so the common case -
+# a crew that ended a turn having committed something - costs nothing at all.
+# 1 (surface) if any referenced task passes neither, or none can be resolved.
+signal_crew_absorbable() {  # <state> <file> ...
+  local state=$1 f base task seen=""
+  shift
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.status)     task=${base%.status} ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *)            continue ;;
+    esac
+    [ -n "$task" ] || continue
+    case " $seen " in *" $task "*) continue ;; esac
+    seen="$seen $task"
+    turnend_shows_progress "$state" "$task" && continue
     crew_is_provably_working "$task" || return 1
   done
   [ -n "$seen" ] || return 1

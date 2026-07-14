@@ -15,7 +15,11 @@ Those actionable wakes are written to a durable local queue (`state/.wake-queue`
 Every wake is a fat payload: one line of the form `<kind>: <target> | task=<id> class=<verdict> [<field>=<value> ...] last=<status-line>`, carrying the evidence the watcher already computed - the task, its last status line, the absorb-class verdict, and idle age, wedge count, or pause recheck where they apply.
 `bin/fm-classify-lib.sh`'s `wake_payload` owns that grammar, and the orchestrator handles a typical `signal:` or `stale:` wake from the payload alone, with no follow-up status-file or pane read.
 The away-mode daemon cuts the evidence off with `wake_payload_target` and runs its own classification from the state files.
-No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: a backend busy signature on that crew's recorded endpoint.
+No-verb wakes, such as `working:` notes and turn-ended signals, are benign only on POSITIVE evidence that the crew is still moving, from either of two independent sources.
+The free one is the turn-end marker's body: every harness's turn-end hook calls `bin/fm-turnend-mark.sh`, which writes one line carrying a turn counter and `bin/fm-wt-activity-lib.sh`'s worktree snapshot (HEAD sha, index mtime, newest modified-file mtime, modified-file count), so a turn that committed, staged, or edited work is absorbed with no probe at all.
+No harness's turn-end hook supplies a turn number, a last tool, or an exit reason, so the counter is firstmate's own and the other two fields are simply absent rather than invented.
+The costly one, used only when the body proves nothing, is `bin/fm-crew-state.sh` reporting a backend busy signature on that crew's recorded endpoint.
+Absence of evidence is never progress: no body, no previous body, or an unchanged worktree all fall back to the probe, and a crew that is genuinely finished still surfaces through its captain-relevant status verb or the stale path.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so a busy pane outranks an old captain-relevant status-log line the crew has since moved past.

@@ -555,18 +555,19 @@ EOF
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file carries a captain-relevant verb;
-    #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
-    #     NOT provably working - the crew stopped its turn with no actively-running
-    #     pipeline and no busy pane, so it may be done (even via an interactive menu
-    #     that wrote no done: status), waiting on a decision, or wedged. Absorbing
-    #     such a turn-end is exactly the swallowed-finish this change guards against.
-    # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
-    # whose crew IS provably working) in always-on mode -> advance the markers so it
-    # will not re-fire, log, and keep blocking without enqueuing. The provably-working
-    # check is the only costly one, so the ||
-    # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
+    #   - or it is a no-verb wake (a bare turn-end, a working: note) that is not
+    #     ABSORBABLE - neither its turn-end body nor its endpoint proves the crew is
+    #     still moving, so it may be done (even via an interactive menu that wrote no
+    #     done: status), waiting on a decision, or wedged. Absorbing such a turn-end
+    #     is exactly the swallowed-finish this guards against.
+    # Actionable -> enqueue, advance .seen-* markers, exit. Benign in always-on mode
+    # -> advance the markers so it will not re-fire, log, and keep blocking without
+    # enqueuing. signal_crew_absorbable is the only costly check (and only in its
+    # second leg: a turn-end body that shows progress absorbs for free, with no pane
+    # probe), so the || ordering evaluates it ONLY for a non-afk, no-captain-verb
+    # signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+    if afk_present || signal_reason_is_actionable $files || ! signal_crew_absorbable "$STATE" $files; then
       # The wake is going out, so pay for its evidence ONCE here, in bash: each
       # referenced task's absorb verdict and last status line ride the payload,
       # and the orchestrator re-reads nothing for the common case. The verdict is
@@ -586,6 +587,8 @@ EOF
       done <<EOF
 $pending
 EOF
+      # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+      turnend_record_seen "$STATE" $files
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
@@ -594,6 +597,8 @@ EOF
       done <<EOF
 $pending
 EOF
+      # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+      turnend_record_seen "$STATE" $files
       triage_log "absorbed benign signal:$files"
     fi
   fi
