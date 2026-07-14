@@ -328,7 +328,7 @@ pass "(i) an idle fleet warms nothing"
 C=$(new_case k)
 in_flight "$C"
 printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
-printf '30\n' > "$C/get-delay"          # a long install to be killed in the middle of
+printf '6\n' > "$C/get-delay"           # long enough to be killed mid-install; no longer
 run_warm_bg "$C"; pid=$WARM_PID
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   [ "$(lease_state "$C")" = leased ] && break
@@ -350,9 +350,9 @@ pass "(k) a warmer killed mid-install releases its lease - the slot is not lost 
 C=$(new_case l)
 in_flight "$C"
 printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
-printf '60\n' > "$C/get-delay"          # hangs far past the timeout below
+printf '10\n' > "$C/get-delay"          # hangs well past the timeout below
 start=$(date +%s)
-FM_POOL_WARM_TIMEOUT=3 run_warm "$C" || fail "(l) a bounded warm must still exit 0"
+FM_POOL_WARM_TIMEOUT=2 run_warm "$C" || fail "(l) a bounded warm must still exit 0"
 elapsed=$(( $(date +%s) - start ))
 [ "$elapsed" -lt 30 ] || fail "(l) the warm was not bounded: took ${elapsed}s"
 assert_contains "$(warm_log "$C")" "timed out" "(l) the timeout must be reported"
@@ -371,7 +371,7 @@ pass "(l) a hung install is bounded, its lease released and its lock freed"
 C=$(new_case m)
 in_flight "$C"
 printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
-printf '2\n' > "$C/get-delay"           # long enough for the racers to overlap
+printf '1\n' > "$C/get-delay"           # long enough for the racers to overlap
 pids=""
 for _ in 1 2 3 4 5; do
   run_warm_bg "$C"; pids="$pids $WARM_PID"

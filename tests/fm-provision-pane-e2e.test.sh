@@ -56,15 +56,53 @@ fi
 SH
 chmod +x "$TMP_ROOT/bin/drive.sh"
 
-fresh_pane() {  # <window>
-  tmux -L "$SOCKET" kill-server 2>/dev/null || true
-  tmux -L "$SOCKET" new-session -d -s s -n "$1" -c "$PROJ"
+# ONE long-lived server for the whole file; a fresh WINDOW per case.
+#
+# It used to kill and recreate the server per case, and that RACED: the next case's
+# first probe could land while the server was still dying or not yet up, tmux
+# answered nothing, the pane state read `unknown`, and the wait - correctly - treats
+# unknown as "still busy" and ran to its ceiling. That made this file fail randomly
+# (3 in 6 runs, on two different assertions, each preceded by "server exited
+# unexpectedly"). A test that fails randomly is worse than one that is slow: it
+# teaches you to ignore it, which is exactly how the bug this file guards got shipped.
+#
+# Note what is NOT waited for: the pane's SHELL. Readiness here means the SERVER
+# answers (pane_pid resolves), which is the same state a real spawn is in when it
+# sends. The shell still has not consumed the keystroke on the first probe - that
+# race is the whole point of this file, and it is preserved.
+server_start() {
+  tmux -L "$SOCKET" new-session -d -s s -n idle -c "$PROJ" 2>/dev/null || return 1
+  local i=0
+  while [ "$i" -lt 100 ]; do
+    tmux -L "$SOCKET" list-sessions >/dev/null 2>&1 && return 0
+    sleep 0.05; i=$((i + 1))
+  done
+  return 1
 }
 
-drive() {  # <window> <command> [timeout] [stall]
-  PATH="$TMP_ROOT/bin:$PATH" "$TMP_ROOT/bin/drive.sh" \
-    "$PROJ" "s:$1" "$2" "${3:-60}" "${4:-30}" 2>/dev/null | tail -n 1
+WINDOW_N=0
+fresh_pane() {  # -> sets WINDOW to a brand-new, server-ready window
+  WINDOW_N=$((WINDOW_N + 1))
+  WINDOW="w$WINDOW_N"
+  tmux -L "$SOCKET" new-window -t s -n "$WINDOW" -c "$PROJ" 2>/dev/null || return 1
+  local i=0 pid
+  while [ "$i" -lt 100 ]; do   # the SERVER must be answering before we drive it
+    pid=$(tmux -L "$SOCKET" display-message -p -t "s:$WINDOW" '#{pane_pid}' 2>/dev/null)
+    case "${pid:-}" in
+      ''|*[!0-9]*) ;;
+      *) return 0 ;;
+    esac
+    sleep 0.05; i=$((i + 1))
+  done
+  return 1
 }
+
+drive() {  # <command> [timeout] [stall]
+  PATH="$TMP_ROOT/bin:$PATH" "$TMP_ROOT/bin/drive.sh" \
+    "$PROJ" "s:$WINDOW" "$1" "${2:-60}" "${3:-30}" 2>/dev/null | tail -n 1
+}
+
+server_start || fail "setup: could not start the private tmux server"
 
 # --- (a) THE REGRESSION: a spawn-shaped acquire must not die on tick one -------
 # Window created and command sent with NO grace, exactly as fm-spawn.sh does it.
@@ -72,8 +110,8 @@ drive() {  # <window> <command> [timeout] [stall]
 # shell with no children and called it "treehouse gave up".
 fails=0
 for _ in 1 2 3; do
-  fresh_pane w
-  out=$(drive w "sleep 2; cd '$WORKTREE'" 60 30)
+  fresh_pane || fail "(a) setup: could not open a window"
+  out=$(drive "sleep 2; cd '$WORKTREE'" 60 30)
   case "$out" in
     "ENTERED $WORKTREE") ;;
     *) fails=$((fails + 1)) ;;
@@ -83,17 +121,17 @@ done
 pass "(a) a real spawn-shaped acquire is not killed by the not-yet-started shell"
 
 # --- (b) a slow (cold-install-shaped) pane is still waited out ----------------
-fresh_pane w
-out=$(drive w "echo '[post_create] installing deps'; sleep 8; cd '$WORKTREE'" 90 60)
+fresh_pane || fail "(b) setup: could not open a window"
+out=$(drive "echo '[post_create] installing deps'; sleep 8; cd '$WORKTREE'" 90 60)
 [ "$out" = "ENTERED $WORKTREE" ] || fail "(b) a slow install must be waited out, got: $out"
 pass "(b) a real slow install is waited out and yields the worktree"
 
 # --- (c) a REALLY failed acquire is still caught, and quickly ------------------
 # The guard must not turn a real failure into a hang: an idle pane that STAYS idle
 # is still called out, in seconds, well inside the ceiling.
-fresh_pane w
+fresh_pane || fail "(c) setup: could not open a window"
 start=$(date +%s)
-out=$(drive w "echo 'error: all 16 worktrees are in use or dirty (max_trees = 16)'" 120 90)
+out=$(drive "echo 'error: all 16 worktrees are in use or dirty (max_trees = 16)'" 120 90)
 elapsed=$(( $(date +%s) - start ))
 [ "$out" = FAILED ] || fail "(c) a pane whose command exited without a worktree must fail, got: $out"
 [ "$elapsed" -lt 30 ] || fail "(c) a real failure must be caught in seconds, took ${elapsed}s"
