@@ -66,6 +66,14 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
     });
     child.on("error", () => resolveResult({ code: 0, stderr: "" }));
     child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+    // The child's "error" handler above does NOT cover the stdin STREAM. If the guard
+    // exits (or closes fd 0) before this payload is dispatched, the write fails EPIPE,
+    // and an unhandled "error" event on a stream is a hard process crash in Node - it
+    // would take the whole extension host down at session idle, which is precisely when
+    // the turn-end guard runs. The payload is advisory and the guard's EXIT CODE is what
+    // we act on, so a failed write is nothing to report: swallow it and let "close"
+    // deliver the verdict.
+    child.stdin.on("error", () => {});
     child.stdin.end('{"stop_hook_active":false}');
   });
 }

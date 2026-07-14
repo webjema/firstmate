@@ -54,14 +54,15 @@ Check and test the toolbelt before pushing:
 ```sh
 for script in bin/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt
 bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI runs
-for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior tests, matching CI
+bin/fm-test.sh   # behavior tests, parallel; the single owner CI runs (bin/fm-test.sh --help)
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test
 ```
 
-Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.
-Tests that need an explicit opt-in skip themselves and print the gate needed to enable them, so the run-all loop above is always safe.
+Discover tests with `bin/fm-test.sh --list`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly (`bin/fm-test.sh tests/<subject>.test.sh`) to focus on a subject.
+Tests that need an explicit opt-in skip themselves and print the gate needed to enable them, so the full run above is always safe.
+Run the affected tests as you work and the full `bin/fm-test.sh` once at the end - it is parallel, so the whole suite costs about as long as its slowest single test.
 
 ## Questions
 

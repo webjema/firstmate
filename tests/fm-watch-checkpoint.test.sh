@@ -24,6 +24,20 @@ test_quiet_checkpoint_exits_124_cleanly() {
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
   expect_code 124 "$status" "quiet checkpoint exit"
   assert_contains "$(cat "$out")" "checkpoint: no actionable wake within 1s" "quiet checkpoint line missing"
+  # The checkpoint returns 124 as soon as its window elapses, but the watcher it started
+  # releases the lock in a CHILD process - so the release is concurrent with this assertion,
+  # not ordered before it. Asserting instantly passed only because an idle box always won
+  # that race. Wait for the release, which is what the test always meant: it must not SURVIVE.
+  #
+  # This wait alone did NOT make the case reliable - it still failed 1 run in 6 in the
+  # parallel phase, because a bounded wait against a starved child is still a race. The fix
+  # is bin/fm-test.sh's FM_TEST_SERIAL_ONLY, which runs this file in the serial tail. The
+  # wait stays because asserting instantly on a concurrent release was wrong regardless.
+  local waited=0
+  while [ -e "$home/state/.watch.lock/pid" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
   assert_absent "$home/state/.watch.lock/pid" "watch lock pid survived quiet checkpoint timeout"
   pass "quiet checkpoint exits 124 with a clean checkpoint line and no live lock"
 }
