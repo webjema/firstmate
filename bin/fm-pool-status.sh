@@ -76,11 +76,13 @@ slot_evidence() {  # <slot-path>
 # pool lock means the warmer died mid-install (a reboot), and the slot is
 # reserved forever. Unlike a dirty slot, this holds NO work: releasing it is safe
 # and non-destructive, so the command we print is a plain `treehouse return`.
+#
+# Liveness is boot-aware (fm_pool_owner_alive), never a bare `kill -0` on a
+# recorded pid: the lock survives reboot, so after a restart that pid may belong to
+# an unrelated live process - and a false "the warmer is still working" would
+# SUPPRESS this very report, leaving the leaked lease permanent and invisible.
 warmer_is_live() {  # <project-real-path>
-  local lock owner
-  lock="$TREEHOUSE_ROOT/.fm-warm-locks/$(fm_pool_key "$1")"
-  owner=$(cat "$lock/pid" 2>/dev/null || true)
-  [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null
+  fm_pool_warmer_live "$TREEHOUSE_ROOT/.fm-warm-locks/$(fm_pool_key "$1")"
 }
 
 # treehouse's own state file records an owner_pid for a slot handed out without a
@@ -105,16 +107,30 @@ report_project() {  # <project-real-path>
   local project=$1 name line slot state path holder evidence pid
   name=$(basename "$project")
 
+  # Read-only means read-only: `treehouse status` CREATES a project's pool
+  # directory just by being asked (verified 2026-07-14), so a session-start sweep
+  # over every project would leave an empty pool behind for each one. A project with
+  # no slots has nothing to diagnose anyway (fm_pool_has_slots).
+  fm_pool_has_slots "$project" || return 0
+  fm_pool_read "$project" || return 0
+
   # A blocked warm (disk budget, max_trees) is a capacity fact raised by
   # fm-pool-warm.sh and surfaced HERE, at session start - never as a mid-flight
   # wake. The captain decides; firstmate does not silently fill the disk.
+  #
+  # Self-healing: the warmer only clears its own sentinel while it is still warming
+  # that project, so a pool that has since freed up - the task finished, a slot was
+  # reclaimed - would otherwise reprint a stale block at every session start
+  # forever. If the pool now HAS a free warm slot, the block is over: drop it.
   local sentinel
   sentinel="$STATE/.pool-warm-blocked.$(fm_pool_key "$project")"
   if [ -f "$sentinel" ]; then
-    printf 'POOL_BUDGET: %s: %s\n' "$name" "$(cat "$sentinel" 2>/dev/null)"
+    if [ "$FM_POOL_AVAILABLE" -ge 1 ]; then
+      rm -f "$sentinel" 2>/dev/null || true
+    else
+      printf 'POOL_BUDGET: %s: %s\n' "$name" "$(cat "$sentinel" 2>/dev/null)"
+    fi
   fi
-
-  fm_pool_read "$project" || return 0
 
   while IFS=$(printf '\t') read -r slot state path holder; do
     [ -n "${slot:-}" ] || continue
@@ -158,12 +174,36 @@ if [ -n "${1:-}" ]; then
   exit 0
 fi
 
-# Every clone, not just those with work in flight: a dirty slot left by a crew
-# that died OUTLIVES its task, and that is exactly the case that went unnoticed.
-[ -d "$PROJECTS" ] || exit 0
-for p in "$PROJECTS"/*; do
-  [ -d "$p" ] || continue
-  git -C "$p" rev-parse --git-dir >/dev/null 2>&1 || continue
-  report_project "$(cd "$p" && pwd -P)"
-done
+# WHICH POOLS TO SWEEP. Every clone under projects/ - a dirty slot left by a crew
+# that died OUTLIVES its task, so an in-flight-only sweep would miss exactly the
+# case that went unnoticed - PLUS every project named by a task meta.
+#
+# That second source is not a nicety. A crewmate working on FIRSTMATE ITSELF has
+# project=<the firstmate root>, which is NOT under projects/ - so a projects/-only
+# sweep is blind to the firstmate pool. That is the pool every firstmate crewmate
+# runs in, and it is the pool whose crash-dirty slot motivated this script. It must
+# be swept, or the detector cannot see the incident it was written for.
+seen=""
+report_unique() {  # <project-path>
+  local p=$1 real
+  [ -d "$p" ] || return 0
+  git -C "$p" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  real=$(cd "$p" && pwd -P) || return 0
+  case " $seen " in *" $real "*) return 0 ;; esac
+  seen="$seen $real"
+  report_project "$real"
+}
+
+if [ -d "$PROJECTS" ]; then
+  for p in "$PROJECTS"/*; do
+    report_unique "$p"
+  done
+fi
+if [ -d "$STATE" ]; then
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    proj=$(sed -n 's/^project=//p' "$meta" | head -n 1)
+    [ -n "$proj" ] && report_unique "$proj"
+  done
+fi
 exit 0

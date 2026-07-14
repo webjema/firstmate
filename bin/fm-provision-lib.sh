@@ -55,6 +55,18 @@ set -u
 FM_PROVISION_TIMEOUT_DEFAULT=900   # absolute ceiling, seconds (see header)
 FM_PROVISION_STALL_DEFAULT=300     # silent-while-busy ceiling, seconds
 FM_PROVISION_TAIL_LINES=40         # pane lines read for a failure diagnosis
+# AN IDLE PANE IS NEVER BELIEVED ON SIGHT. fm-spawn.sh sends `treehouse get` and
+# calls straight into the wait, so the FIRST probe lands ~35ms later - before the
+# pane's shell (still running its rc files) has even consumed the keystroke. It
+# therefore has no children and looks exactly like a shell whose command exited.
+# Measured on this box, window created and command sent with no grace, exactly as
+# fm-spawn.sh does it: 10/10 first probes read `idle`. Honoring that verdict
+# failed EVERY real spawn on tick one. So `idle` counts only once it has SETTLED
+# (a startup grace) and then held for CONFIRM consecutive probes. A treehouse that
+# really did fail stays idle forever and is still caught in seconds; a pane that
+# was merely slow to start goes busy and never trips it.
+FM_PROVISION_SETTLE_DEFAULT=5      # seconds before an idle pane may be believed at all
+FM_PROVISION_IDLE_CONFIRM_DEFAULT=3  # consecutive idle probes required to call it exited
 
 # --- probes -----------------------------------------------------------------
 # The ONLY tmux-aware surface. Tests redefine these four after sourcing to drive
@@ -66,8 +78,12 @@ fm_provision_probe_path() {
   fm_backend_tmux_current_path "$1"
 }
 
-# fm_provision_probe_tail <target>: the pane's last lines, for a diagnosis. Read
-# ONLY when the pane has already failed - never on the happy path.
+# fm_provision_probe_tail <target>: the pane's last lines. Read on every tick -
+# it is half of the progress signature (fm_provision_progress_signature), not just
+# the failure diagnosis. That is a pane capture per second for the life of the
+# wait, which the architecture direction calls a last resort: it is here because
+# the pane's OUTPUT is the only evidence that separates an install still churning
+# from one wedged in silence, and no script writes that fact to a file.
 fm_provision_probe_tail() {
   fm_backend_tmux_capture "$1" "$FM_PROVISION_TAIL_LINES"
 }
@@ -208,7 +224,9 @@ fm_provision_wait() {  # <target> <project-real-path> [timeout] [stall]
   local target=$1 proj_real=$2
   local timeout=${3:-${FM_SPAWN_WORKTREE_TIMEOUT:-$FM_PROVISION_TIMEOUT_DEFAULT}}
   local stall=${4:-${FM_SPAWN_WORKTREE_STALL:-$FM_PROVISION_STALL_DEFAULT}}
-  local elapsed=0 quiet=0 path sig prev_sig kind tail state descendants
+  local settle=${5:-${FM_SPAWN_WORKTREE_SETTLE:-$FM_PROVISION_SETTLE_DEFAULT}}
+  local confirm=${6:-${FM_SPAWN_WORKTREE_IDLE_CONFIRM:-$FM_PROVISION_IDLE_CONFIRM_DEFAULT}}
+  local elapsed=0 quiet=0 idle_streak=0 path sig prev_sig kind tail state descendants
   prev_sig=""
 
   while :; do
@@ -227,15 +245,25 @@ fm_provision_wait() {  # <target> <project-real-path> [timeout] [stall]
     descendants=$(fm_provision_probe_descendants "$target")
     state=$(fm_provision_pane_state "$target" "$descendants")
 
-    # 2. EXITED: the pane's shell is provably back at an idle prompt and the cwd
-    #    never moved. treehouse gave up. Diagnose from its own last words and fail
-    #    NOW - seconds after the failure, not at a timeout. Only a CONFIDENT idle
-    #    reading may do this; `unknown` falls through and keeps waiting.
+    # 2. EXITED: the pane's shell is back at an idle prompt and the cwd never
+    #    moved. treehouse gave up.
+    #    But an idle reading is NOT believed on sight: for the first ~35ms of a
+    #    real spawn the shell has not yet consumed the keystroke, so a pane that is
+    #    about to work perfectly reads exactly like one whose command exited
+    #    (10/10 measured - see the constants above). So idle must SETTLE and then
+    #    HOLD for `confirm` consecutive probes before it counts. A genuinely failed
+    #    treehouse stays idle and is still caught within seconds; a slow-starting
+    #    pane goes busy and clears the streak. `unknown` never counts at all.
     if [ "$state" = idle ]; then
-      tail=$(fm_provision_probe_tail "$target" || true)
-      kind=$(fm_provision_classify_tail "$tail")
-      fm_provision_failure "$kind" "$tail" >&2
-      return 1
+      idle_streak=$((idle_streak + 1))
+      if [ "$elapsed" -ge "$settle" ] && [ "$idle_streak" -ge "$confirm" ]; then
+        tail=$(fm_provision_probe_tail "$target" || true)
+        kind=$(fm_provision_classify_tail "$tail")
+        fm_provision_failure "$kind" "$tail" >&2
+        return 1
+      fi
+    else
+      idle_streak=0
     fi
 
     # 3. BUSY (or unreadable): something is running. This is the cold install, and

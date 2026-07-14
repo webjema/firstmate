@@ -49,10 +49,21 @@ fm_provision_probe_path() {
 # A pane is "busy" iff its shell has descendants. An idle shell has none: that is
 # how a FAILED treehouse (exited, back at a prompt) is told from a working one.
 # PANE_PID='' models a pane whose pid cannot be read at all => state unknown.
+#
+# BUSY_AT matters more than it looks. This stub USED to report the pane busy from
+# TICK=0, and that lie is exactly why the suite stayed green while the code failed
+# every real spawn: in reality the pane's shell has not even consumed the keystroke
+# on the first probe (measured 10/10 idle), so it starts IDLE and only goes busy a
+# tick later. BUSY_AT defaults to 1 to model that. Never set it to 0 "to keep the
+# tests simple" - that is the bug, re-asserted.
 PANE_PID=4242
+BUSY_AT=1
 fm_provision_probe_pane_pid() { printf '%s' "$PANE_PID"; }
 
 fm_provision_probe_descendants() {
+  if [ "$TICK" -lt "$BUSY_AT" ]; then
+    return 0  # the shell has not picked up the command yet: no children
+  fi
   if [ "$EXIT_AT" -gt 0 ] && [ "$TICK" -ge "$EXIT_AT" ]; then
     return 0  # no descendants: treehouse exited
   fi
@@ -66,7 +77,7 @@ fm_provision_probe_tail() { printf '%s\n' "$TAIL"; }
 # fm_provision_real_path must not touch the filesystem for these synthetic paths.
 fm_provision_real_path() { printf '%s' "$1"; }
 
-reset_pane() { TICK=0; ENTER_AT=0; EXIT_AT=0; TAIL=""; CHURN=1; PANE_PID=4242; }
+reset_pane() { TICK=0; ENTER_AT=0; EXIT_AT=0; TAIL=""; CHURN=1; PANE_PID=4242; BUSY_AT=1; }
 
 # run_wait <timeout> <stall>: drive the loop IN THIS SHELL (never a command
 # substitution - a subshell would discard the pane script's TICK) and capture its
@@ -155,6 +166,18 @@ run_wait 900 300
 [ "$RC" -eq 0 ] || fail "(h) an unreadable pane pid must not be treated as a dead pane: $ERR"
 [ "$OUT" = /worktree ] || fail "(h) expected the worktree path, got '$OUT'"
 pass "(h) an unreadable pane state keeps waiting - unknown is never a dead pane"
+
+# --- (j) an idle pane at tick 0 is the SHELL STARTING, not a failure ----------
+# The B1 regression, at unit level (tests/fm-provision-pane-e2e.test.sh holds the
+# same line against a real pane). The pane reads idle for the first ticks because
+# the shell has not consumed the keystroke yet; believing that killed every spawn.
+reset_pane
+BUSY_AT=3             # the shell takes a few probes to pick the command up
+ENTER_AT=8
+run_wait 900 300
+[ "$RC" -eq 0 ] || fail "(j) an idle pane that has not started yet must NOT be called a failure: $ERR"
+[ "$OUT" = /worktree ] || fail "(j) expected the worktree path, got '$OUT'"
+pass "(j) an idle pane at tick 0 is a shell still starting, not treehouse giving up"
 
 # --- (i) the quoted line is the ERROR, not the shell prompt -------------------
 # Found by driving a real tmux pane: by the time a failed `treehouse get` is

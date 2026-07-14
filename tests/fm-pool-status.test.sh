@@ -26,6 +26,19 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 STATUS="$ROOT/bin/fm-pool-status.sh"
+
+# A lock is only honored as live when its pid is alive AND recorded on THIS boot:
+# the lock outlives a reboot, so a bare pid can be recycled by an unrelated process
+# (fm_pool_owner_alive).
+current_boot() {
+  if [ -r /proc/sys/kernel/random/boot_id ]; then
+    tr -d '[:space:]' < /proc/sys/kernel/random/boot_id
+  elif [ -r /proc/stat ] && grep -q '^btime' /proc/stat 2>/dev/null; then
+    sed -n 's/^btime[[:space:]]*//p' /proc/stat | head -n 1 | tr -d '[:space:]'
+  else
+    printf 'no-boot-id'
+  fi
+}
 TMP_ROOT=$(fm_test_tmproot fm-pool-status)
 mkdir -p "$TMP_ROOT"
 
@@ -45,6 +58,15 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
   : > "$case_dir/status.txt"
   printf '%s\n' "$case_dir"
+}
+
+# give_pool_slot <case-dir>: a project with a pool HAS linked worktrees - that is
+# what a slot is, and what fm_pool_has_slots reads (asking treehouse would create
+# a pool). Cases that model a populated pool must therefore have a real one.
+give_pool_slot() {
+  local slot="$1/th-root/pool/0/proj"
+  mkdir -p "$(dirname "$slot")"
+  git -C "$1/home/projects/proj" worktree add -q --detach "$slot" 2>/dev/null
 }
 
 # A slot that a crashed crew left behind: a real worktree, with real uncommitted
@@ -71,6 +93,7 @@ run_status() {  # <case-dir>
 
 # --- (a) a healthy pool says nothing -----------------------------------------
 C=$(new_case a)
+give_pool_slot "$C"
 printf '1     available    /pool/1/proj\n2     in-use       /pool/2/proj\n' > "$C/status.txt"
 out=$(run_status "$C")
 [ -z "$out" ] || fail "(a) a healthy pool must be silent, got: $out"
@@ -117,6 +140,7 @@ pass "(c) the report says how to inspect, and marks the reclaim as destructive"
 
 # --- (d) a stale warm lease: reserved forever by a warmer that died -----------
 C=$(new_case d)
+give_pool_slot "$C"
 printf '1     leased       /pool/1/proj  (held by fm-warm-proj)\n' > "$C/status.txt"
 out=$(run_status "$C")   # no live warmer holds the pool lock
 assert_contains "$out" "no live warmer" "(d) a lease with no live warmer must be reported"
@@ -126,17 +150,25 @@ pass "(d) a warm lease orphaned by a dead warmer is reported as safely releasabl
 
 # --- (e) a LIVE warmer's lease is its job, not a fault ------------------------
 C=$(new_case e)
+give_pool_slot "$C"
 printf '1     leased       /pool/1/proj  (held by fm-warm-proj)\n' > "$C/status.txt"
+# A LIVE warmer holds the pool lock the way the code takes it: an flock held by a
+# live process (`exec sleep` so the pid we record is the one holding the fd).
 key=$(printf '%s' "$(cd "$C/home/projects/proj" && pwd -P)" | cksum | awk '{print $1}')
-mkdir -p "$C/th-root/.fm-warm-locks/proj-$key"
-printf '%s\n' "$$" > "$C/th-root/.fm-warm-locks/proj-$key/pid"   # a LIVE warmer
+base="$C/th-root/.fm-warm-locks/proj-$key"
+mkdir -p "$(dirname "$base")"
+( flock -x 9; exec sleep 60 ) 9>"$base.lock" &
+holder=$!
+i=0; while [ "$i" -lt 40 ] && flock -n "$base.lock" -c true 2>/dev/null; do sleep 0.1; i=$((i+1)); done
 out=$(run_status "$C")
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
 [ -z "$out" ] || fail "(e) a live warmer mid-install must not be reported as a fault, got: $out"
 pass "(e) a slot leased by a live warmer is not reported - it is doing its job"
 
 # --- (f) an orphaned slot: treehouse still reserves it, its owner is gone -----
 if command -v jq >/dev/null 2>&1; then
   C=$(new_case f)
+  give_pool_slot "$C"
   slot="$C/th-root/pool/1/proj"          # the pool dir must be derivable from the slot path
   mkdir -p "$slot"
   printf '1     in-use       %s\n' "$slot" > "$C/status.txt"
@@ -153,6 +185,7 @@ fi
 
 # --- (g) a blocked warm surfaces at session start -----------------------------
 C=$(new_case g)
+give_pool_slot "$C"
 printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
 key=$(printf '%s' "$(cd "$C/home/projects/proj" && pwd -P)" | cksum | awk '{print $1}')
 printf 'disk budget reached: pool uses 19.6 GB and the next slot needs about 2.8 GB, over the 20.0 GB budget\n' \
@@ -175,3 +208,62 @@ out=$( cd "$C" && env PATH="$C/fakebin:$PATH" TH_STATUS="$C/status.txt" \
 assert_contains "$out" "POOL_SLOT" "(h) bootstrap must surface an unusable pool slot"
 assert_present "$slot/rescue-me.txt" "(h) bootstrap must never discard the work either"
 pass "(h) bootstrap surfaces the pool diagnostic, and discards nothing"
+
+# --- (i) M6: a pool named only by a task META must be swept -------------------
+# The sweep used to walk projects/* only. But a crewmate working on FIRSTMATE
+# ITSELF has project=<the firstmate root>, which is NOT under projects/ - so the
+# detector was blind to the firstmate pool: the pool every firstmate crewmate runs
+# in, and the pool whose crash-dirty slot motivated this script in the first place.
+C=$(new_case i)
+printf '1     available    /pool/1/proj\n' > "$C/status.txt"   # projects/proj: healthy
+# A separate repo, OUTSIDE projects/, reachable only through a task meta.
+fm_git_init_commit "$C/outside"
+outside_slot="$C/th-root/outside/1/repo"
+mkdir -p "$(dirname "$outside_slot")"
+git -C "$C/outside" worktree add -q --detach "$outside_slot" 2>/dev/null
+printf 'a dead crew work in the firstmate pool\n' > "$outside_slot/rescue-me.txt"
+fm_write_meta "$C/home/state/t1.meta" \
+  "window=firstmate:fm-t1" "worktree=$outside_slot" "project=$C/outside" "kind=ship"
+# treehouse answers per-cwd: the outside repo's pool has the dirty slot.
+cat > "$C/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  status)
+    if [ "\$PWD" = "$(cd "$C/outside" && pwd -P)" ]; then
+      printf '1     dirty        %s\n' "$outside_slot"
+    else
+      cat "\${TH_STATUS:?}"
+    fi
+    ;;
+esac
+exit 0
+SH
+chmod +x "$C/fakebin/treehouse"
+out=$(run_status "$C")
+assert_contains "$out" "is DIRTY" "(i) a pool named only by a task meta (the firstmate pool) must be swept"
+assert_present "$outside_slot/rescue-me.txt" "(i) and its work must survive the report"
+pass "(i) the firstmate pool - named by a meta, not under projects/ - is swept too"
+
+# --- (j) the sweep must be READ-ONLY: no pool may be created by looking ---------
+# `treehouse status` is not a read: merely asking it about a repo CREATES that
+# repo's pool directory (verified against treehouse v2.0.0). A session-start sweep
+# over every project therefore used to leave an empty pool behind for each one -
+# and the test suite alone littered ~100 of them into the operator's real
+# ~/.treehouse. A project with no slots has nothing to diagnose; do not touch it.
+C=$(new_case j)
+printf '1     available    /pool/1/proj\n' > "$C/status.txt"
+# A real treehouse that records every invocation, so we can prove it is not called.
+cat > "$C/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+printf 'called %s\n' "\$*" >> "$C/th-calls.log"
+case "\${1:-}" in status) cat "\${TH_STATUS:?}" ;; esac
+exit 0
+SH
+chmod +x "$C/fakebin/treehouse"
+: > "$C/th-calls.log"
+run_status "$C" >/dev/null
+[ ! -s "$C/th-calls.log" ] \
+  || fail "(j) a project with no pool slots must not be handed to treehouse at all (it would create a pool): $(cat "$C/th-calls.log")"
+pass "(j) a project with no slots is never handed to treehouse - the sweep creates no pools"
