@@ -36,11 +36,24 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # live backend endpoint; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
-# Captain-relevant status verbs. A status line carrying any of these is work
-# firstmate must see. Lines without these verbs are no-verb signals: the watcher
-# absorbs them only with positive provably-working evidence, while the daemon uses
-# its away-mode classification. FM_CAPTAIN_RE overrides the whole set when a home
-# needs a custom verb vocabulary; absent, this default applies.
+# Captain-relevant status VERBS. A status line whose LEADING VERB is one of these is
+# work firstmate must see. Lines with any other verb are no-verb signals: the watcher
+# absorbs them only with positive evidence the crew is still moving, while the daemon
+# uses its away-mode classification.
+#
+# Relevance is anchored to the verb, never to a substring of the prose, because the
+# note after the verb is free text written by a crewmate. Scanning the whole line
+# escalated "working: rebased onto merged main" as captain-relevant - the word
+# `merged` appearing anywhere was enough - and burned a full firstmate turn on a
+# routine progress note. The verb is the crew's actual claim; everything after the
+# colon is commentary.
+FM_CLASSIFY_CAPTAIN_VERBS='done needs-decision blocked failed'
+
+# The whole-line regex is now ONLY the explicit escape hatch: a home that sets
+# FM_CAPTAIN_RE is deliberately asking for its own vocabulary, matched against the
+# whole line, and gets exactly that. This default is what such a home starts from,
+# and is never applied on its own - with FM_CAPTAIN_RE unset, the verb set above is
+# the entire test.
 FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
@@ -76,18 +89,24 @@ last_status_line() {
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
 }
 
-# 0 if the given (last) status line matches a captain-relevant verb.
+# 0 if the given (last) status line is captain-relevant: its LEADING VERB is one of
+# FM_CLASSIFY_CAPTAIN_VERBS. The note after the verb is never scanned - a crewmate
+# writing "working: rebased onto merged main" is reporting progress, not a merge.
+# A home that sets FM_CAPTAIN_RE has explicitly asked for a whole-line regex instead,
+# and gets exactly that, verb anchoring included or not as it chooses.
 status_is_captain_relevant() {
-  local line=$1 verb
+  local line=$1 verb v
   [ -n "$line" ] || return 1
   status_is_paused "$line" && return 1
-  if [ -z "${FM_CAPTAIN_RE+x}" ]; then
-    verb=$(status_line_verb "$line")
-    case "$verb" in
-      done|needs-decision|blocked|failed) return 0 ;;
-    esac
+  if [ -n "${FM_CAPTAIN_RE+x}" ]; then
+    printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+    return
   fi
-  printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+  verb=$(status_line_verb "$line")
+  for v in $FM_CLASSIFY_CAPTAIN_VERBS; do
+    [ "$verb" = "$v" ] && return 0
+  done
+  return 1
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure

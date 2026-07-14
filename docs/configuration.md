@@ -184,8 +184,12 @@ FM_ARM_ATTACH_POLL=0.5  # seconds between checks while fm-watch-arm is attached 
 FM_OPENCODE_ARM_READY_TIMEOUT_MS=12000   # milliseconds the OpenCode primary watcher plugin waits for an arm attempt to report started, healthy, wake, or failure
 FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE; seconds a live watcher lock may have a stale beacon before re-arm errors
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
-FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # status regex that makes watcher and daemon signal/stale/scan output captain-relevant
-FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
+FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'   # OPT-IN whole-line regex; UNSET (the default), a status line is captain-relevant only when its LEADING VERB is done/needs-decision/blocked/failed, so prose in a working: note never escalates
+FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; not captain-relevant, and distinct from blocked
+FM_WT_PROBE=1                      # 0 disables the worktree-activity probe entirely (turn-end bodies and the watcher's per-poll work evidence)
+FM_WT_PROBE_MAX_FILES=20000        # tracked-file cap above which the probe skips its modified-file leg and reports dirty=? honestly
+FM_WT_FRESH_SECS=120               # a worktree that moved this recently is positive working evidence: absorbs a stale pane with no crew-state probe
+FM_WT_STILL_SECS=1800              # a LIVE pane whose worktree has not moved this long surfaces once as class=spinning; 0 disables
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
 FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wait re-surfaces for a recheck in the watcher or away-mode daemon
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added

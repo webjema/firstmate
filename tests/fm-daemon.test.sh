@@ -104,14 +104,25 @@ test_classify_terminal_signal_escalates() {
   local dir state kw out
   dir=$(make_supercase classify-terminal)
   state="$dir/state"
-  for kw in "done: PR https://x/y/pull/1" "needs-decision: pick A" "blocked: no perms" \
-            "failed: rc 2" "PR ready https://x/y/pull/2" "checks green" \
-            "ready in branch fm/t1" "merged"; do
+  # Relevance is anchored to the LEADING VERB (fm-classify-lib.sh owns that rule):
+  # every terminal claim a crew is contracted to make carries one, and the whole
+  # PR/merge vocabulary rides a done: line.
+  for kw in "done: PR https://x/y/pull/1" "done: ready in branch fm/t1" \
+            "needs-decision: pick A" "blocked: no perms" "failed: rc 2"; do
     printf 'working\n%s\n' "$kw" > "$state/t.status"
     out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
     case "$out" in escalate\|*) ;; *) fail "captain verb did not escalate ($kw): $out" ;; esac
   done
-  pass "captain-relevant status verbs escalate"
+  # A verbless line, and a progress note whose PROSE happens to contain a terminal
+  # word, are NOT captain-relevant: that substring scan is what escalated
+  # "working: rebased onto merged main" and burned a firstmate turn on it.
+  for kw in "working: rebased onto merged main" "working: waiting for checks green" \
+            "PR ready https://x/y/pull/2" "merged"; do
+    printf 'working\n%s\n' "$kw" > "$state/t.status"
+    out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+    case "$out" in escalate\|*) fail "a verbless/prose line escalated ($kw): $out" ;; esac
+  done
+  pass "captain-relevant status verbs escalate, and prose without one does not"
 }
 
 test_classify_check_and_unknown_escalate() {
