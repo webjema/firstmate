@@ -7,6 +7,8 @@
 #                 "CREW_HARNESS_OVERRIDE: <name>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
+#                 "POOL_SLOT: <project>: <unusable slot + the exact reclaim command>",
+#                 "POOL_BUDGET: <project>: <why warming stopped>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: fm-<id>...",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>".
@@ -36,6 +38,12 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          POOL_SLOT / POOL_BUDGET lines come from bin/fm-pool-status.sh, whose
+#          header owns their full format and the reasoning behind them. They are
+#          read-only reports of treehouse pool slots that can no longer be handed
+#          out (dirty, stale-leased, orphaned) and of a warm that a ceiling
+#          stopped; bootstrap NEVER reclaims a slot, because a dirty one may hold
+#          a dead crew's unlanded work.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          tasks-axi is a required bootstrap tool (same class as lavish-axi) and is
@@ -366,6 +374,15 @@ crew=
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "TASKS_AXI: available"
+fi
+# Pool health: a crew that dies mid-task (three box reboots did this on
+# 2026-07-14) leaves its treehouse slot DIRTY, and treehouse then skips that slot
+# forever while prune refuses to reclaim it - so the pool silently shrinks until a
+# spawn fails. This is READ-ONLY detection: it reports unusable slots and never
+# discards one, because a dirty slot may hold the dead crew's unlanded work.
+# Runs in detect-only mode too, for exactly that reason.
+if [ -x "$FM_ROOT/bin/fm-pool-status.sh" ] && command -v treehouse >/dev/null 2>&1; then
+  "$FM_ROOT/bin/fm-pool-status.sh" 2>/dev/null || true
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync

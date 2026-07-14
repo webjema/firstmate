@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, NEEDS_GH_AUTH, TANGLE, CREW_HARNESS_OVERRIDE, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, or NUDGE_SECONDMATES - or when a standalone bin/fm-bootstrap.sh run prints one.
+  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, NEEDS_GH_AUTH, TANGLE, CREW_HARNESS_OVERRIDE, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, POOL_SLOT, or POOL_BUDGET - or when a standalone bin/fm-bootstrap.sh run prints one.
   A silent bootstrap section means all good and needs no skill load.
 user-invocable: false
 metadata:
@@ -38,3 +38,17 @@ The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then
 - `NUDGE_SECONDMATES: fm-<id>...` - the secondmate sweep fast-forwarded one or more *running* secondmate homes to firstmate's current version and their instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) actually changed; send a one-line re-read nudge with `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'` unless `FM_HOME` is already set to the active firstmate home.
   This mirrors `/updatefirstmate`'s `nudge-secondmates:` report: it is a gentle steer, never an interruption, and the fast-forward already landed safely.
   A secondmate that was skipped, already current, or whose advance changed no instructions is not listed and must not be disturbed.
+- `POOL_SLOT: <project>: slot <name> is DIRTY... ` - a crew died mid-task and left its workspace with uncommitted work in it.
+  `treehouse get` skips a dirty slot forever and `treehouse prune` refuses to reclaim it, so the project's pool has silently shrunk by one and will keep shrinking with every crash until someone looks.
+  **Never reclaim it reflexively.**
+  The line reports the evidence it found (uncommitted files, unpushed commits) precisely because that work may be worth saving - on 2026-07-14 exactly such a slot held a dead crew's work, and it was salvaged and shipped.
+  Inspect the slot with the printed `git -C <path> status`.
+  If it holds real work, dispatch a crewmate to recover it before anything else.
+  Only once the work is landed, or the captain has explicitly said to discard it, may the printed `treehouse destroy ... --include-unlanded --yes` be run - it is irreversible, so it needs the captain's word (`AGENTS.md` section 8: anything destructive reaches the captain).
+  A pool quietly shrinking is not urgent enough to interrupt the captain with on its own; fold it into the next natural reply, in outcome language ("one of the workspaces for <project> still has unsaved work in it from a crash").
+- `POOL_SLOT: <project>: slot <name> is LEASED ... with no live warmer` / `is ORPHANED ...` - a slot reserved by a process that no longer exists, so the pool cannot hand it out.
+  A stale warm lease holds no work: run the printed `treehouse return <path>` to release it.
+  An orphaned slot may still hold a dead crew's work: inspect it with the printed command and treat it exactly like the DIRTY case above.
+- `POOL_BUDGET: <project>: <reason>` - preventive workspace warming has STOPPED for that project because it hit its disk budget or treehouse's `max_trees`, and it will stay stopped until something changes; crews will pay the slow cold-install path again (`bin/fm-pool-warm.sh` owns the policy).
+  This is a capacity decision for the captain, so relay it in outcome language with the numbers the line carries ("<project>'s workspaces are using X GB of a Y GB budget, so I've stopped adding more - I can raise the budget or clear out old ones").
+  Raising the budget means `FM_POOL_DISK_BUDGET_GB` or `config/pool-disk-budget-gb` (`docs/configuration.md`); reclaiming a slot means resolving a POOL_SLOT line above.

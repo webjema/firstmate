@@ -35,6 +35,9 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with honest status reporting                |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe always-on watcher: absorb benign wakes, queue and exit on actionable ones |
+| `fm-pool-warm.sh`        | Keep one free warm treehouse slot ready per in-flight project, inside a disk budget  |
+| `fm-pool-lib.sh`         | Shared reader for a project's treehouse pool state, budget, and lease operations     |
+| `fm-provision-lib.sh`    | Progress-aware wait for `treehouse get`: tell a warming cold slot from a stuck pane  |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
 | `fm-afk-launch.sh`       | Own away-mode entry, exit, rollback, and the daemon terminal lifecycle                  |
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target for the daemon and launcher                   |
