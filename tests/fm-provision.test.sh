@@ -156,6 +156,20 @@ run_wait 900 300
 [ "$OUT" = /worktree ] || fail "(h) expected the worktree path, got '$OUT'"
 pass "(h) an unreadable pane state keeps waiting - unknown is never a dead pane"
 
+# --- (i) the quoted line is the ERROR, not the shell prompt -------------------
+# Found by driving a real tmux pane: by the time a failed `treehouse get` is
+# noticed, the pane has returned to its prompt, so the LAST non-empty line is the
+# prompt itself - and quoting it told the operator nothing. Quote the complaint.
+reset_pane
+EXIT_AT=2
+TAIL='error: all 16 worktrees are in use or dirty (max_trees = 16)
+user@box:~/projects/optiroq$ '
+run_wait 900 300
+[ "$RC" -ne 0 ] || fail "(i) an exhausted pool must fail"
+assert_contains "$ERR" "all 16 worktrees are in use or dirty" "(i) must quote treehouse's actual error"
+assert_not_contains "$ERR" "user@box" "(i) must NOT quote the shell prompt back at the operator"
+pass "(i) the failure quotes treehouse's error line, not the shell prompt beneath it"
+
 # --- (g) three causes, three DIFFERENT messages ------------------------------
 # The whole point of the change: one opaque string used to cover all of these.
 m_pool=$(fm_provision_failure pool-exhausted 'max_trees = 16')

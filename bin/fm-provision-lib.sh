@@ -153,7 +153,14 @@ fm_provision_pane_state() {  # <target> [descendants]
 # error needs its own message read, a stall needs the pane inspected.
 fm_provision_failure() {  # <kind> <tail> [elapsed]
   local kind=$1 tail=${2:-} elapsed=${3:-} last
-  last=$(printf '%s\n' "$tail" | grep -v '^[[:space:]]*$' | tail -n 1)
+  # Quote the DIAGNOSTIC line, not merely the last one. By the time a failed
+  # `treehouse get` is noticed the pane has returned to its prompt, so the last
+  # non-empty line is the prompt itself - which told the operator nothing. Prefer
+  # the last line that actually looks like a complaint, and fall back to the last
+  # non-empty line only when nothing does.
+  last=$(printf '%s\n' "$tail" | grep -Ei 'error|fatal|failed|max_trees|cannot|denied|refus' | tail -n 1)
+  [ -n "$last" ] || last=$(printf '%s\n' "$tail" | grep -v '^[[:space:]]*$' | tail -n 1)
+  last=$(printf '%s' "$last" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   case "$kind" in
     pool-exhausted)
       printf 'treehouse pool is FULL: every worktree is in use or dirty (max_trees reached), so no slot could be handed over. Reclaim a slot - "treehouse status" in the project lists them, and a DIRTY slot is skipped forever and is never reclaimed by "treehouse prune" either. treehouse said: %s' "$last"
@@ -162,7 +169,11 @@ fm_provision_failure() {  # <kind> <tail> [elapsed]
       printf 'treehouse get FAILED (it exited without handing over a worktree). treehouse said: %s' "$last"
       ;;
     no-worktree)
-      printf 'treehouse get exited without entering a worktree and printed no error; the pane is back at an idle shell'
+      # "Nothing running under the pane's shell" is the evidence; do not overclaim
+      # WHY. Almost always treehouse exited silently - but a shell blocked in a
+      # BUILTIN (a bare `read` prompt) also has no child process, and reads
+      # identically from outside. Say what was observed and point at the pane.
+      printf 'treehouse get did not enter a worktree: nothing is running under the pane shell (treehouse exited without handing one over, or the pane is waiting at a prompt) and it printed no error. Inspect the pane'
       ;;
     stalled)
       printf 'treehouse get is STUCK: a process is still running but has produced no output for %ss (a hook waiting on input, or a hung network call). Last pane line: %s' "$elapsed" "$last"
