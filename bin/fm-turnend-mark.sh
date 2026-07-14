@@ -50,7 +50,14 @@ esac
 case "$turn" in ''|*[!0-9]*) turn=0 ;; esac
 turn=$((turn + 1))
 
-snap=$(wt_activity_snapshot "$WT" 2>/dev/null || true)
+# Pass the state dir and task id, which the marker path already names: that is what
+# lets the probe CACHE its tracked-file count (<state>/.wt-size-<task>) instead of
+# re-walking the index on every single turn end - the exact cost its bound exists to
+# avoid on a large repo.
+STATE_DIR=${TURNEND%/*}
+TASK=${TURNEND##*/}
+TASK=${TASK%.turn-ended}
+snap=$(wt_activity_snapshot "$WT" "$STATE_DIR" "$TASK" 2>/dev/null || true)
 
 tmp="$TURNEND.tmp.$$"
 if [ -n "$snap" ]; then

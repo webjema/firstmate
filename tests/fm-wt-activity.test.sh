@@ -58,6 +58,15 @@ test_snapshot_and_progress_rule() {
   s1=$(wt_activity_snapshot "$wt")
   assert_contains "$s1" "head=$(git -C "$wt" rev-parse --short HEAD)" "snapshot lost HEAD"
   assert_contains "$s1" "dirty=0" "clean worktree not reported clean"
+  # idx= is the index mtime, and it is read from a path git reports RELATIVE to the
+  # worktree: an un-rooted stat silently yields 0 forever and kills the stage leg.
+  assert_not_contains "$s1" "idx=0" "the index mtime was not read (idx=0 means the stat missed the file)"
+
+  # Staging alone - no commit, no edit - is progress.
+  printf 'staged\n' > "$wt/s.txt"
+  git -C "$wt" add s.txt
+  wt_activity_advanced "$s1" "$(wt_activity_snapshot "$wt")" \
+    || fail "staging a file was not read as progress (the index leg is dead)"
 
   # Absence of evidence is never progress.
   wt_activity_advanced "$s1" "$s1" && fail "an identical snapshot was read as progress"

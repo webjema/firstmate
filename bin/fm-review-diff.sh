@@ -54,7 +54,13 @@ while [ $# -gt 0 ]; do
       MODE=files
       shift
       [ $# -gt 0 ] || { echo "error: --files needs at least one path" >&2; usage; exit 1; }
-      while [ $# -gt 0 ]; do PATHS+=("$1"); shift; done
+      # Everything after --files is a path. Reject a flag-looking argument rather than
+      # silently diffing a file named "--full" and printing nothing.
+      while [ $# -gt 0 ]; do
+        case "$1" in --*) echo "error: --files takes paths, not flags (got $1); put --files last" >&2; exit 1 ;; esac
+        PATHS+=("$1")
+        shift
+      done
       ;;
     *) usage; exit 1 ;;
   esac

@@ -668,7 +668,7 @@ EOF
       cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
 export const FmTurnEnd = async ({ \$ }) => ({
   event: async ({ event }) => {
-    if (event.type === "session.idle") await \$\`$TURNEND_MARK $TURNEND $WT\`
+    if (event.type === "session.idle") await \$\`'$TURNEND_MARK' '$TURNEND' '$WT'\`
   },
 })
 EOF

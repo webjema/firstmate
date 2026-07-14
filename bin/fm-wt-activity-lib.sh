@@ -81,14 +81,24 @@ _wt_status_leg_ok() {  # <worktree> <state> <task>
 # unreadable or missing worktree prints nothing, and the caller treats an empty
 # snapshot as "no evidence either way", never as "no progress".
 wt_activity_snapshot() {  # <worktree> [<state> <task>]
-  local wt=$1 state=${2:-} task=${3:-} head idx edit=0 dirty='?' changed
+  local wt=$1 state=${2:-} task=${3:-} head idx idxpath edit=0 dirty='?' changed
   wt_probe_enabled || return 0
   [ -n "$wt" ] && [ -d "$wt" ] || return 0
   git -C "$wt" rev-parse --git-dir >/dev/null 2>&1 || return 0
 
   head=$(git -C "$wt" rev-parse --short HEAD 2>/dev/null || true)
   [ -n "$head" ] || head=none
-  idx=$(_wt_mtime_of "$(git -C "$wt" rev-parse --git-path index 2>/dev/null)")
+  # `rev-parse --git-path` answers RELATIVE to the worktree (".git/index"), so it must
+  # be re-rooted before stat: statting it from the caller's cwd silently found nothing
+  # and reported idx=0 forever, quietly killing the stage/commit leg of the probe.
+  # Re-rooted by hand rather than with --path-format=absolute, which is git >= 2.31.
+  idxpath=$(git -C "$wt" rev-parse --git-path index 2>/dev/null || true)
+  case "$idxpath" in
+    '')  idxpath=/nonexistent ;;
+    /*)  ;;
+    *)   idxpath="$wt/$idxpath" ;;
+  esac
+  idx=$(_wt_mtime_of "$idxpath")
 
   # One `git diff --name-only HEAD` serves both remaining fields: the modified
   # tracked files are exactly what we count (dirty) and whose mtimes we max (edit).
