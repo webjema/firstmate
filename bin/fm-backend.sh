@@ -315,15 +315,24 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
 
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the recorded
 # TARGET endpoint still exist? Never starts a server or session. A gone tmux
-# window simply fails, which IS "does not exist" for this purpose.
+# window fails, which IS "does not exist" for this purpose.
 # Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
 # primitive so callers that only need a fast alive/dead read (recovery digests,
 # the session-start fleet digest) do not re-derive it inline.
+#
+# WINDOW-STRICT: the probe must fail for a gone WINDOW even while its session
+# lives on. `tmux display-message -t "$sess:$win"` does NOT do this - for a gone
+# window it silently falls back to the session's ACTIVE window and returns that
+# pane's id with exit 0, reporting a closed window as still present (this is what
+# defeated detached-crew auto-reclaim; see docs/tmux-backend.md
+# "Window-existence probe"). `tmux list-panes -t "$target"` fails with "can't
+# find window" for a gone window and never falls back, so it is the correct
+# primitive - the same window-strict listing fm_backend_tmux_create_task uses.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      tmux list-panes -t "$target" >/dev/null 2>&1
       ;;
     *)
       return 1

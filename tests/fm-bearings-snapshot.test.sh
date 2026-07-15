@@ -28,6 +28,9 @@ SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
+  # fm_backend_target_exists probes window existence with list-panes now; a
+  # "dead-" target fails ("can't find window"), everything else lists a pane.
+  list-panes) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
   capture-pane) printf 'all quiet\n> \n' ;;
 esac

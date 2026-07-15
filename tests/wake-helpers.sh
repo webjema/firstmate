@@ -123,6 +123,13 @@ make_supercase() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-panes)
+    # fm_backend_target_exists's window-strict existence probe (bin/fm-backend.sh)
+    # now lists panes instead of reading a pane_id via display-message; gate it on
+    # the same pane-alive flag so a "dead" supervisor pane reads as gone.
+    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
+    printf 'fakepane\n'
+    exit 0 ;;
   display-message)
     [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
     _print=0
@@ -204,6 +211,10 @@ make_bordered_case() {
 set -u
 COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
 case "${1:-}" in
+  list-panes)
+    # fm_backend_target_exists's window-strict existence probe: the bordered
+    # composer cases always model a present pane, so the window always exists.
+    printf 'fakepane\n'; exit 0 ;;
   display-message)
     print=0
     for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
