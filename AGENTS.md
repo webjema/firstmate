@@ -89,7 +89,8 @@ Work from what it printed: the lock verdict, the drained wake records (your firs
 Treat the `window=` values as the live direct-report set.
 Do not sweep every `fm-*` tmux window across all sessions; another firstmate home's children share that namespace and are not your orphans.
 
-For a meta with no window, or an endpoint reported dead, reconcile it - unless it reports `released`: crewless by design, never respawn it.
+For a meta with no window, or an endpoint reported dead, reconcile it - unless it reports `released` (crewless by design) or `detached` (handed to the captain): never respawn either.
+A `detached` meta is the captain driving that crew themselves; leave it be, and when its window is gone or idle, offer to return its worktree with `bin/fm-detach.sh --reclaim <id>`.
 For `kind=secondmate`, load `secondmate-provisioning` and respawn it from its recorded meta or registry entry.
 Do not reconstruct a secondmate's tree from the main home; each secondmate reconciles its own work and then idles.
 
@@ -255,6 +256,14 @@ Run `bin/fm-teardown.sh <id>` **twice**: at PR-open to free the workspace, and a
 Its header owns both phases and the landed-work definition; a refusal is stop-and-investigate, not an obstacle.
 `local-only` tears down once, after the merge.
 Then move the task to Done in the backlog with the full PR URL or merge note, and re-evaluate the queue: dispatch queued work whose blockers are gone and whose date gate, if any, has arrived.
+
+### Detach - handing a crew to the captain
+
+When the captain wants to take over a crew you spawned and drive it themselves, run `bin/fm-detach.sh <id>`.
+It severs only supervision: the crew's window and worktree stay alive for the captain, but the watcher and recovery stop tracking it.
+Move the task out of In flight; it is captain-managed now, not a firstmate task.
+When the captain is done - its window gone or sitting idle - `bin/fm-detach.sh --reclaim <id>` returns the worktree to the pool, reusing teardown's landed-work safety, so it refuses rather than discard uncommitted work.
+The header owns the idle gate and the reclaim contract.
 
 ### Scout tasks
 

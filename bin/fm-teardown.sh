@@ -114,6 +114,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-taskstate-lib.sh
+. "$SCRIPT_DIR/fm-taskstate-lib.sh"
 FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
@@ -371,11 +373,9 @@ release_supervision_state() {
   printf 'released=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$tmp"
   mv "$tmp" "$META"
   # Everything the crew-liveness machinery keys on goes; the PR watch and the merge
-  # precondition stay. state/<id>.check.sh and state/<id>.ci-seen are deliberately absent
-  # from this list.
-  rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.pi-ext.ts" \
-    "$STATE/$ID.grok-turnend-token" "$STATE/.turnend-seen-$ID" "$STATE/.decision-seen-$ID" \
-    "$STATE/.wt-size-$ID" "$STATE/.wt-snap-$ID" "$STATE/.wt-since-$ID" "$STATE/.wt-still-woke-$ID"
+  # precondition stay. state/<id>.check.sh and state/<id>.ci-seen are deliberately kept
+  # (fm-taskstate-lib.sh owns the exact cleared set and why they are excluded).
+  fm_clear_crew_liveness_state "$STATE" "$ID"
 }
 
 backlog_refresh_reminder() {
