@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for bin/fm-detach.sh: handing a live crew to the captain, then reclaiming
-# its worktree once the captain's session is done.
+# Tests for bin/fm-detach.sh: handing a live crew to the user, then reclaiming
+# its worktree once the user's session is done.
 #
 # Detach severs only the SUPERVISION tie: it drops window= (so bin/fm-watch.sh's
 # recorded_windows() and recovery stop seeing the task as a crew), stamps
@@ -8,7 +8,7 @@
 # the tmux window and the worktree untouched.
 #
 # Reclaim is an idle gate in front of ordinary teardown: it returns the worktree
-# only when the captain's session is done (window gone, or a bare shell), and it
+# only when the user's session is done (window gone, or a bare shell), and it
 # reuses teardown's landed-work safety verbatim, so unlanded work is protected.
 #
 # Matrix:
@@ -180,7 +180,7 @@ expect_code 1 "$CODE" "d: detach refuses a windowless task"
 assert_contains "$OUT" "no live crew window" "d: explains why"
 pass "d: detach refuses an already-detached task"
 
-# (e) reclaim is skipped while the captain's agent is still alive.
+# (e) reclaim is skipped while the user's agent is still alive.
 c=$(make_case reclaim-skips-live)
 write_active_meta "$c" ship
 run "$c" -- task-x1
@@ -257,7 +257,7 @@ esac
 SH
 chmod +x "$c/fakebin/tmux"
 # A detached-crew meta: detached_window= remembered, but window= dropped, exactly
-# as fm-detach.sh leaves it. The captain's window is already closed.
+# as fm-detach.sh leaves it. The user's window is already closed.
 fm_write_meta "$c/state/task-x1.meta" \
   "detached=2026-07-15T00:00:00Z" \
   "detached_window=firstmate:fm-task-x1" \

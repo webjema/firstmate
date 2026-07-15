@@ -31,7 +31,7 @@ That wake is deliberately narrow: ship tasks only (a scout's deliverable is a re
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 
 Secondmates are idle by charter, so their idle panes are never surfaced - but a secondmate with LIVE WORK, meaning at least one UNFINISHED child in its own home, must be alive to supervise that crew, and a pane frozen across two polls while its children run surfaces once per stale hash with `kind=secondmate`.
-A child that has already reported `done:` or `failed:` is not live work: it waits on the captain's merge or on firstmate, neither of which its secondmate can hurry, so counting it would call a correctly-idle secondmate wedged.
+A child that has already reported `done:` or `failed:` is not live work: it waits on the user's merge or on firstmate, neither of which its secondmate can hurry, so counting it would call a correctly-idle secondmate wedged.
 A secondmate's own `working:` line is not live-work evidence (it writes one while merely standing by), and `bin/fm-crew-state.sh` still exempts secondmates from the busy check, because that exemption is what keeps a secondmate's open decision visible through a busy pane.
 A secondmate that wedges before spawning any crew leaves no live-work evidence anywhere and remains invisible to the stale path; its routed request still reaches firstmate through the signal path.
 
@@ -147,9 +147,9 @@ Seeding is transactional: if validation, cloning, or registry update fails, gene
 The same project may appear in multiple secondmate homes when their scopes differ, such as issue triage versus feature development.
 Secondmates are idle by default: after startup recovery reconciles only work already in their own home, an empty queue waits silently for routed tasks, and they never self-initiate surveys or audits.
 When called with `FM_HOME=<this-firstmate-home>` or when `FM_HOME` is already set to the active firstmate home, metadata-routed `fm-send.sh` requests to a live `kind=secondmate` are prefixed with the from-firstmate marker from `bin/fm-marker-lib.sh`, so the secondmate returns terse answers through status lines and detailed answers through docs plus status pointers instead of replying only in its own chat.
-Explicit backend-target sends and direct human typing stay unmarked, so captain intervention in a secondmate pane remains conversational.
+Explicit backend-target sends and direct human typing stay unmarked, so user intervention in a secondmate pane remains conversational.
 After seeding a secondmate, `fm-backlog-handoff.sh` validates the fleet-specific handoff, then atomically delegates already-judged in-scope queued item moves to `tasks-axi mv` so the domain queue starts in the right place.
-Idle secondmate panes are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
+Idle secondmate panes are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the user has approved discard with `--force`.
 
 Secondmate homes converge conservatively to the primary's version and declared inheritable configuration at launch and during locked session start.
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the full guarded sync, propagation, nudge, and mid-session configuration-push contract.
@@ -180,8 +180,8 @@ The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, inv
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
-Detach hands a live crew to the captain without destroying it: [`bin/fm-detach.sh`](../bin/fm-detach.sh) drops `window=` from the meta and stamps `detached=` (with `detached_window=` for the later liveness probe), so the watcher's `recorded_windows()` and recovery stop tracking the task exactly as they skip a `released` one, while the tmux window and worktree stay alive for the captain.
-Reclaim is an idle gate in front of ordinary teardown: `--reclaim` returns the worktree only once the captain's session is done (window gone, or a bare shell per the `dead`-only agent-liveness probe), then delegates to `bin/fm-teardown.sh`, so the same landed-work safety protects any uncommitted or unlanded work the captain left behind.
+Detach hands a live crew to the user without destroying it: [`bin/fm-detach.sh`](../bin/fm-detach.sh) drops `window=` from the meta and stamps `detached=` (with `detached_window=` for the later liveness probe), so the watcher's `recorded_windows()` and recovery stop tracking the task exactly as they skip a `released` one, while the tmux window and worktree stay alive for the user.
+Reclaim is an idle gate in front of ordinary teardown: `--reclaim` returns the worktree only once the user's session is done (window gone, or a bare shell per the `dead`-only agent-liveness probe), then delegates to `bin/fm-teardown.sh`, so the same landed-work safety protects any uncommitted or unlanded work the user left behind.
 The crew-liveness state files that both release and detach clear have one owner in [`bin/fm-taskstate-lib.sh`](../bin/fm-taskstate-lib.sh).
 
 ## Optional X mode
@@ -222,7 +222,7 @@ The full ownership rule - what is project-intrinsic versus fleet-private, and ho
 ## Operational memory routing
 
 `/stow` sweeps the current session for durable knowledge that only exists in conversation and routes each finding to the most specific disk home.
-Captain preferences go to `data/captain.md`, fleet-local operational facts and gotchas go to `data/learnings.md`, project-intrinsic knowledge goes through normal crewmate delivery into that project's committed `AGENTS.md`, and task-scoped notes or undone next steps go to the backlog.
+User preferences go to `data/user.md`, fleet-local operational facts and gotchas go to `data/learnings.md`, project-intrinsic knowledge goes through normal crewmate delivery into that project's committed `AGENTS.md`, and task-scoped notes or undone next steps go to the backlog.
 Memory writes use inspect-then-update: read the current destination first, then rewrite or prune matching bullets or notes in place instead of appending by default.
 Task-scoped notes use `tasks-axi show <id> --full` followed by `tasks-axi update <id> --body-file <path>`, adding `--archive-body` when the prior body should remain recoverable.
 Generalizable firstmate knowledge goes to shared tracked docs through the normal PR pipeline; the firstmate-internal `/stow` deliberately never stores findings in either skill directory.
@@ -246,7 +246,7 @@ The mechanics are owned by the `/updatefirstmate` skill and firstmate's operatin
 
 ## Restart-proof
 
-Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), status event logs, local markdown under `data/` including `data/captain.md` and `data/learnings.md`, and persistent secondmate homes.
+Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), status event logs, local markdown under `data/` including `data/user.md` and `data/learnings.md`, and persistent secondmate homes.
 For herdr, respawning after a server-restored layout closes and replaces confirmed no-agent or dead task-tab husks instead of requiring manual tab cleanup.
 At session start, confirmed-dead secondmate agent endpoints are closed and relaunched through the same secondmate spawn path, while ambiguous liveness reads are left untouched to avoid duplicate supervisors.
 Use `/stow` before an intentional reset when the conversation may hold durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.

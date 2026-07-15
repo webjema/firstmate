@@ -18,7 +18,7 @@
 #   - a check has FAILED       -> "checks failed" (firstmate must act)
 # Stay silent while:
 #   - checks are still running/queued (the crew or CI is mid-flight)
-#   - checks are green but the PR is not merged (waiting on the captain's merge)
+#   - checks are green but the PR is not merged (waiting on the user's merge)
 #   - the repo reports no checks at all (nothing to fail)
 #   - gh is missing, unauthenticated, or the call fails (never wake on a tool error)
 #

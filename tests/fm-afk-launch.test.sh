@@ -9,9 +9,9 @@
 #
 #   E2E TOPOLOGY (per backend, skipped when its tool is absent): the anti-
 #   regression for the pane split/shrink - entering AND exiting away mode leaves
-#   the captain's active tab topology UNCHANGED, because the daemon lands in a
+#   the user's active tab topology UNCHANGED, because the daemon lands in a
 #   NON-VISIBLE separate terminal (a herdr dedicated workspace, a detached tmux
-#   session), never a split of the captain's pane. The herdr path runs on a
+#   session), never a split of the user's pane. The herdr path runs on a
 #   throwaway, NEVER-default HERDR_SESSION and asserts the default session is
 #   byte-identical via the fm-herdr-lab.sh fleet-state tripwire; the tmux path
 #   uses uniquely-named throwaway sessions killed by exact name. A harmless
@@ -782,7 +782,7 @@ unit_flag_write_failure_aborts() {
 }
 
 # ---------------------------------------------------------------------------
-# E2E tmux: topology invariant (captain window untouched; daemon in a separate
+# E2E tmux: topology invariant (user window untouched; daemon in a separate
 # detached session).
 # ---------------------------------------------------------------------------
 e2e_tmux() {

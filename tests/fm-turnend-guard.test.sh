@@ -97,7 +97,7 @@ test_predicate_detached_meta_is_not_supervisable() {
   local state="$TMP_ROOT/pred-detached/state"
   mkdir -p "$state"
   # A detached meta (bin/fm-detach.sh): window= dropped, detached= stamped. The
-  # captain drives this crew end to end; firstmate does zero supervision on it.
+  # user drives this crew end to end; firstmate does zero supervision on it.
   printf 'project=x\nworktree=/wt/detached\ndetached=2026-07-15T12:00:00Z\ndetached_window=firstmate:fm-task1\n' > "$state/task1.meta"
   fm_supervision_status "$state" 300
   [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "detached task must still count as a recorded task, got $FM_SUP_IN_FLIGHT"
@@ -257,7 +257,7 @@ test_hook_silent_when_no_work_in_flight() {
   pass "fm-turnend-guard: silent no-op with nothing in flight"
 }
 
-# A home whose ONLY task is detached demands no live watcher (captain-driven, no
+# A home whose ONLY task is detached demands no live watcher (user-driven, no
 # firstmate CI polling), so a genuinely-idle turn must end freely even with no
 # watcher armed. This is the false-positive the change fixes: it FAILS before the
 # change (the guard blocked on the raw recorded-task count) and PASSES after.

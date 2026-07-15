@@ -141,7 +141,7 @@ test_secondmate_with_crew_of_its_own_counts_as_live_work() {
   secondmate_has_live_work "$state" sm3 || fail "a secondmate with crew in flight was called idle"
 
   # A child that has REPORTED is not live work: its task is over and it waits on the
-  # captain's merge, which its secondmate cannot hurry. Counting it would call a
+  # user's merge, which its secondmate cannot hurry. Counting it would call a
   # correctly-idle secondmate wedged.
   printf 'done: PR https://example.invalid/pull/7\n' > "$home/state/child-1.status"
   secondmate_has_live_work "$state" sm3 \

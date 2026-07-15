@@ -37,7 +37,7 @@ firstmate is not a model, not a harness, not a skill, not an MCP server, and not
 firstmate is an agent distro for running a crew of agents.
 An agent distro is a portable directory of instructions, skills, tooling, policies, and state conventions that turns a general-purpose agent into a specialized one.
 There is no app to install: the cloned repo is the distro - `AGENTS.md`, bundled firstmate skills, and helper scripts that any terminal coding agent can follow.
-Launching a supported harness inside it instantiates your first mate - and makes you the captain.
+Launching a supported harness inside it instantiates your first mate - and makes you the user.
 
 ## Features
 
@@ -114,7 +114,7 @@ For Pi, approve the project trust prompt once per clone on first launch so both 
 # fm-fix-login-k3 and fm-dark-mode-p7.
 # Minutes later:
 
-  PR ready for review, captain: https://github.com/you/xyz/pull/42
+  PR ready for review, user: https://github.com/you/xyz/pull/42
   (fix flaky login test - risk: low - CI green)
 
 > alright merge it
@@ -127,7 +127,7 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
 ## How It Works
 
 ```
-            you (the captain)
+            you (the user)
                   │  chat: requests, decisions, "merge it"
                   ▼
  ┌─────────────────────────────────────┐

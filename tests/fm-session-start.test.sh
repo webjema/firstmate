@@ -226,7 +226,7 @@ EOF
   make_fake_ps_claude "$fakebin"
 
   printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
-  : > "$home/data/captain.md"
+  : > "$home/data/user.md"
   # secondmates.md and learnings.md deliberately absent
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
@@ -234,19 +234,19 @@ EOF
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
 
-  assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
+  assert_contains "$out" "data/user.md" "digest did not label the user.md section"
 
   assert_contains "$out" "data/secondmates.md" "digest did not label the secondmates.md section"
   assert_contains "$out" "data/learnings.md" "digest did not label the learnings.md section"
 
   # Exactly two ABSENT markers (secondmates.md, learnings.md; backlog.md is
-  # covered by its own test) - and the present-but-empty captain.md must NOT
+  # covered by its own test) - and the present-but-empty user.md must NOT
   # print ABSENT.
   absent_count=$(printf '%s\n' "$out" | grep -c '^ABSENT$')
   [ "$absent_count" -eq 3 ] || fail "expected 3 ABSENT markers (secondmates.md, learnings.md, backlog.md), got $absent_count: $out"
 
-  cap_section=$(printf '%s\n' "$out" | awk '/^data\/captain\.md$/{flag=1;next}/^data\//{flag=0}flag')
-  assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
+  cap_section=$(printf '%s\n' "$out" | awk '/^data\/user\.md$/{flag=1;next}/^data\//{flag=0}flag')
+  assert_contains "$cap_section" "(present, empty)" "empty-but-present user.md was not distinguished from ABSENT"
 
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }

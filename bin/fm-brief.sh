@@ -40,7 +40,7 @@
 #               suite run, and the PR's CI - the single largest source of rework measured in the
 #               fleet. The push still happens, so the work is durable against a box reboot.
 #   local-only  implement on branch, stop and report "ready in branch" (no push/PR);
-#               firstmate reviews, captain approves, firstmate merges to local main
+#               firstmate reviews, user approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge - but they still
 # carry the direction, because a recommendation that ignores it is worthless.
@@ -158,7 +158,7 @@ A request relayed to you by the main firstmate (your supervisor) is tagged with 
 When a message carries that marker, do the work, then respond via the STATUS/ESCALATION path below, never only in this chat: the main firstmate does not read your chat, so a chat-only reply is lost.
 For a terse result, a status line is the whole answer.
 For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
-A message with NO marker is the captain typing directly into your pane: treat it as authoritative captain intervention and stay conversational exactly as you would for any captain message; do not force it onto the status path.
+A message with NO marker is the user typing directly into your pane: treat it as authoritative user intervention and stay conversational exactly as you would for any user message; do not force it onto the status path.
 
 # Escalation to main firstmate
 Handle routine work yourself.
@@ -166,7 +166,7 @@ Report only true captain-relevant outcomes or a declared external wait by append
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
-Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
+Use this only for material phase changes, a user decision, a real blocker, a failure, or work ready for review.
 This is also how you return the answer to a marked from-firstmate request above.
 When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved: {how it was decided or unblocked}\` (keyed with \`[key=<slug>]\` if you opened it with one) so it is durably closed instead of resurfacing behind later unrelated events.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
@@ -258,7 +258,7 @@ This project ships **local-only**: no remote, no PR.
 5. Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 6. Append \`done: ready in branch fm/$ID\` to the status file and stop.
 
-Firstmate then reviews your branch diff against the project's direction, the captain approves, and firstmate merges it into local \`main\`.
+Firstmate then reviews your branch diff against the project's direction, the user approves, and firstmate merges it into local \`main\`.
 EOF
 )
     ;;
@@ -283,7 +283,7 @@ Firstmate reviews your pushed branch BEFORE any PR exists, so its findings cost 
    - **Findings.** Fix them IN PLACE on the same branch, push again, and append \`review-ready:\` again. Repeat until firstmate approves. No PR exists yet, so there is nothing to churn.
    - **Approval.** Open the PR with \`gh-axi\`, append \`done: PR {url}\` to the status file, and stop.
 
-Do NOT merge the PR, and do not wait for CI yourself. Firstmate watches CI; the captain merges.
+Do NOT merge the PR, and do not wait for CI yourself. Firstmate watches CI; the user merges.
 Once the PR is open your work is on the remote, so firstmate releases your worktree at that point - finish step 7 and stop cleanly.
 EOF
 )
@@ -339,7 +339,7 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
-Project-intrinsic knowledge goes in \`AGENTS.md\`. The Direction above is the captain's and lives with firstmate - never copy it into the project.
+Project-intrinsic knowledge goes in \`AGENTS.md\`. The Direction above is the user's and lives with firstmate - never copy it into the project.
 
 $DOD
 EOF

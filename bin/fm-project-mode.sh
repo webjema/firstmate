@@ -11,10 +11,10 @@
 # mode = how a finished change reaches main:
 #   PR          crewmate implements, the project's own hooks enforce lint/typecheck/
 #               tests, the crew self-reviews and verifies, then pushes fm/<id> and
-#               opens the PR; firstmate reviews the diff and watches CI -> captain merge
-#   local-only  local branch, no remote/PR -> firstmate review -> captain approve -> local merge
+#               opens the PR; firstmate reviews the diff and watches CI -> user merge
+#   local-only  local branch, no remote/PR -> firstmate review -> user approve -> local merge
 # yolo (orthogonal) = when on, firstmate makes approval decisions itself (PR merges,
-#   local-only merge approval) without checking the captain - except anything
+#   local-only merge approval) without checking the user - except anything
 #   destructive/irreversible/security-sensitive, which still escalates.
 #
 # Legacy tokens: the retired three-mode vocabulary wrote "no-mistakes" and

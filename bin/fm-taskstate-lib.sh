@@ -5,7 +5,7 @@
 #
 #   1. bin/fm-teardown.sh's release_supervision_state - PR-open workspace release,
 #      which drops window= and keeps the CI/merge watch.
-#   2. bin/fm-detach.sh - hands a live crew to the captain, which drops window=
+#   2. bin/fm-detach.sh - hands a live crew to the user, which drops window=
 #      and keeps the worktree for later reclaim.
 #
 # Both keep state/<id>.meta (each rewrites it with its own marker: released= or

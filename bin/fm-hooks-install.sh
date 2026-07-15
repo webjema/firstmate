@@ -3,7 +3,7 @@
 # enforce secret-scanning, lint, typecheck, and tests without an agent's cooperation.
 # Hooks are the floor that cannot be talked out of it. The judgment layer on top of
 # them is the crewmate's own /code-review pass and firstmate's independent,
-# direction-aware review of the diff before it reaches the captain.
+# direction-aware review of the diff before it reaches the user.
 #
 # This is a worktree utility for crewmates, not a supervision script, so it does not
 # call fm-guard.sh, and firstmate never runs it against a project clone itself:
@@ -48,7 +48,7 @@ HOOKDIR="$DIR/.claude/hooks"
 MARKER='fm-quality'
 
 # Already has hooks of any kind? Report and stop. This is the common case for a
-# project the captain already tuned by hand, and clobbering it would be a
+# project the user already tuned by hand, and clobbering it would be a
 # regression dressed up as an install.
 if [ -f "$SETTINGS" ] && grep -q '"hooks"' "$SETTINGS" 2>/dev/null; then
   if grep -q "$MARKER" "$SETTINGS" 2>/dev/null; then

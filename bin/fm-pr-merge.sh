@@ -10,7 +10,7 @@
 # has nothing to look up for a squash-merge-then-delete-branch flow and
 # false-refuses provably landed work.
 # This script makes recording part of the merge itself, so it cannot be skipped
-# by omission. Use it for every PR merge (captain-requested or yolo-authorized),
+# by omission. Use it for every PR merge (user-requested or yolo-authorized),
 # in place of calling `gh-axi pr merge` directly.
 #
 # gh-axi pr merge expects a PR number and --repo <owner>/<repo>; it does not

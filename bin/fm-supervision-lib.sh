@@ -28,7 +28,7 @@ fm_sup_stat_mtime() {
 #                         whether this home still needs a live watcher.
 #   FM_SUP_SUPERVISABLE   count of metas that DEMAND a live watcher = every meta
 #                         that is NOT detached. A detached task (`detached=` line,
-#                         stamped by bin/fm-detach.sh) is one the captain drives
+#                         stamped by bin/fm-detach.sh) is one the user drives
 #                         end to end; firstmate does zero watcher supervision or CI
 #                         polling on it, so it must not force a watcher to stay
 #                         armed. A released task (`released=`, bin/fm-teardown.sh's
@@ -54,7 +54,7 @@ fm_supervision_status() {
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
-    # A detached task demands no live watcher (captain-driven, no CI polling);
+    # A detached task demands no live watcher (user-driven, no CI polling);
     # every other meta - including a released one, whose PR CI the watcher still
     # polls - does. Presence of the `detached=` marker is the whole test.
     grep -q '^detached=' "$meta" 2>/dev/null && continue

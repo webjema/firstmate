@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
-# Hand a live crew to the captain, then reclaim its worktree once the captain is
+# Hand a live crew to the user, then reclaim its worktree once the user is
 # done - the two halves of "you started it, now I want to drive it myself".
 #
 # WHY THIS EXISTS. firstmate watches a task ONLY because state/<id>.meta carries a
 # window= line: bin/fm-watch.sh's recorded_windows() and recovery both key off it.
 # Ordinary teardown severs that tie by DESTROYING the worktree, which is the wrong
-# tool when the crew's window should stay alive for the captain. Detach severs only
+# tool when the crew's window should stay alive for the user. Detach severs only
 # the SUPERVISION tie: it drops window= (so the watcher and recovery stop treating
 # the task as a crew - see AGENTS.md recovery, which skips a detached meta exactly
 # as it skips a released one), stamps detached=, and remembers the window under
 # detached_window= for the later liveness probe. The tmux window and the worktree
-# are left untouched; the captain now owns both.
+# are left untouched; the user now owns both.
 #
 # Usage:
-#   fm-detach.sh <id>                 hand crew <id> to the captain
+#   fm-detach.sh <id>                 hand crew <id> to the user
 #   fm-detach.sh --reclaim <id>       return <id>'s worktree to the pool if idle
 #   fm-detach.sh --reclaim            reclaim every detached task that is idle
-#   fm-detach.sh --reclaim --force <id>   reclaim without the idle gate (captain
+#   fm-detach.sh --reclaim --force <id>   reclaim without the idle gate (user
 #                                         confirms the session is done)
 #
 # RECLAIM is deliberately just an idle gate in front of ordinary teardown, so the
 # landed-work safety that protects unlanded work is reused verbatim, never
 # re-implemented:
-#   1. Idle gate. The captain's session is "done" when the detached window is gone,
+#   1. Idle gate. The user's session is "done" when the detached window is gone,
 #      or still present but sitting at a bare shell (fm_backend_agent_alive => dead).
 #      An alive or ambiguous (unknown) agent is NOT reclaimed - the same dead-only
 #      rule the secondmate-liveness sweep uses, so a momentary read glitch can never
@@ -30,7 +30,7 @@
 #   2. Delegate to bin/fm-teardown.sh <id>. With window= already dropped this is a
 #      full teardown: it REFUSES if the worktree holds uncommitted or unlanded work
 #      (rule 3), returns the treehouse slot, and purges the meta. A refusal here is
-#      the captain's unfinished work being protected, not a failure to route around.
+#      the user's unfinished work being protected, not a failure to route around.
 # Detach never reclaims and reclaim never detaches; the split keeps each idempotent.
 set -eu
 
@@ -83,7 +83,7 @@ detach_one() {  # <id>
 
   echo "detached $id: the crew window ($window) is now yours to drive; its worktree ($worktree) is untouched."
   echo "When you are done, close that window and I will return the slot to the pool (or run: fm-detach.sh --reclaim $id)."
-  echo "Backlog: move $id out of In flight - it is captain-managed now, not a firstmate task."
+  echo "Backlog: move $id out of In flight - it is user-managed now, not a firstmate task."
 }
 
 # --- reclaim -----------------------------------------------------------------

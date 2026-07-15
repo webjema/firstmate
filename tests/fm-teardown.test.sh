@@ -726,7 +726,7 @@ test_merge_still_works_after_the_workspace_is_released() {
 
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
 
-  # THE captain's next move, and the one the first version of this change broke outright:
+  # THE user's next move, and the one the first version of this change broke outright:
   # "merge it". bin/fm-pr-merge.sh:39 refuses without state/<id>.meta, and AGENTS.md
   # forbids the `gh pr merge` fallback - so a purge at PR-open dead-ends every task here.
   set +e

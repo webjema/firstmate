@@ -10,13 +10,13 @@
 # WHY. A cold slot's post_create hook installs the project's dependencies before
 # treehouse hands it over: a measured 137s for optiroq on this box, versus 2s for
 # a warm slot (bin/fm-provision-lib.sh records the measurement). Paying that on
-# the spawn path means a crew - and the captain - waits. So pay it EARLY, in the
+# the spawn path means a crew - and the user - waits. So pay it EARLY, in the
 # background, on firstmate's time.
 #
 # THE INVARIANT: always-plus-one. For each project with work in flight, at least
 # one slot must sit AVAILABLE and warm. When the last free slot is taken, the
 # next one is provisioned preventively. This self-tunes with no target size: a
-# captain who habitually runs 4 tasks settles at 5 slots and stops growing,
+# user who habitually runs 4 tasks settles at 5 slots and stops growing,
 # because the 5th is never consumed.
 #
 # WARMING IS THIN - IT IS TREEHOUSE, NOT A REIMPLEMENTATION. To warm a slot:
@@ -46,7 +46,7 @@
 # slow FM_CHECK_INTERVAL cadence, never on the hot path. Every failure - network,
 # broken lockfile, treehouse error - is logged to state/.pool-warm.log and
 # retired quietly; this script always exits 0 for a failed warm, and a failed warm
-# never corrupts a slot (the lease is released either way) nor wakes the captain.
+# never corrupts a slot (the lease is released either way) nor wakes the user.
 #
 # TWO CEILINGS, both of which STOP warming rather than fill the disk silently:
 #
@@ -60,7 +60,7 @@
 # When a ceiling blocks a warm, it is reported ONCE with the real numbers (a
 # repeat is suppressed until the situation changes) and surfaced at session start
 # through bin/fm-pool-status.sh, not as a mid-flight wake: a full pool is a
-# capacity fact for the captain to decide on, never an emergency to interrupt them
+# capacity fact for the user to decide on, never an emergency to interrupt them
 # with.
 set -u
 

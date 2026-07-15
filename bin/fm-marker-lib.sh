@@ -4,22 +4,22 @@
 # When the MAIN firstmate relays a work request to one of its SECONDMATES,
 # bin/fm-send.sh prepends this marker to the message text. A secondmate is itself
 # a firstmate running in its own home, so without a marker it treats every
-# incoming fm-send/tmux line as if its captain typed it and answers
+# incoming fm-send/tmux line as if its user typed it and answers
 # CONVERSATIONALLY in its own chat. But the main firstmate never reads a
 # secondmate's chat: the only main<-secondmate wakeup channel is the status file
 # (charter escalation), optionally pointing to a doc for detail. A detailed
 # chat-only reply therefore strands, unseen.
 #
 # The marker lets the secondmate tell its supervisor's request apart from a
-# message the captain typed directly into its pane:
+# message the user typed directly into its pane:
 #
 #   - marked   -> a from-firstmate request. Do the work, then respond via the
 #                 STATUS/ESCALATION path (a status line for a terse result, or a
 #                 doc plus a status pointer - the scout-report pattern - for a
 #                 detailed one) so it surfaces to the main firstmate via the
 #                 watcher signal. It MUST NOT respond only in chat.
-#   - unmarked -> the captain typing directly. Stay conversational, exactly as
-#                 before: authoritative captain intervention.
+#   - unmarked -> the user typing directly. Stay conversational, exactly as
+#                 before: authoritative user intervention.
 #
 # This contract lives in the generated secondmate charter (bin/fm-brief.sh) so it
 # travels with the live secondmate, and is summarized in AGENTS.md.
@@ -41,7 +41,7 @@
 # source. set -u / set -e safe.
 
 # The label field: human-readable, greppable, and distinctive enough that the
-# captain would not type it by hand. This is the part the secondmate's LLM reads.
+# user would not type it by hand. This is the part the secondmate's LLM reads.
 FM_FROMFIRST_LABEL='[fm-from-firstmate]'
 
 # The full marker fm-send prepends to a from-firstmate request: the label, then
@@ -51,7 +51,7 @@ FM_FROMFIRST_MARK="${FM_FROMFIRST_LABEL}"$'\x1f'
 
 # fm_message_from_firstmate: 0 (true) if <message> carries the from-firstmate
 # marker - it begins with the label immediately followed by the unit separator -
-# and 1 otherwise. The unit separator is untypable, so a captain-typed message,
+# and 1 otherwise. The unit separator is untypable, so a user-typed message,
 # even one that happens to start with the label text alone, is never matched.
 fm_message_from_firstmate() {  # <message>
   case "$1" in

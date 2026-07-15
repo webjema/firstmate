@@ -199,7 +199,7 @@ test_guard_tolerates_fresh_arming_marker() {
 # --- GUARD: the detached-vs-released banner distinction ----------------------
 
 test_guard_silent_in_detached_only_home() {
-  # A detached task is captain-driven with no firstmate supervision, so a home
+  # A detached task is user-driven with no firstmate supervision, so a home
   # whose only task is detached demands no watcher: fm-guard.sh must raise NO
   # watcher-down banner even with no live lock. Before the FM_SUP_SUPERVISABLE
   # gate this false-alarmed on the raw recorded-task count.

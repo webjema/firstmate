@@ -315,7 +315,7 @@ task_json_lines() {
 
     # Durable keyed open-decision set: fold the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
-    # never mask a still-open captain decision. The set is derived purely from the
+    # never mask a still-open user decision. The set is derived purely from the
     # keyed fold - never from report bodies or decision-like prose - and then
     # reconciled against the crew LIFECYCLE, which only clears a stale decision the
     # crew has provably moved past. Two lifecycle signals clear it, neither of which
