@@ -129,6 +129,18 @@ exit=1
 `display-message -t` resolved the gone `testwin` to the session's active window (`other`, `%30`) and returned exit 0 - the fallback that mistakes a closed window for a live one.
 `list-panes -t` reports `can't find window: testwin` with exit 1 - the correct "does not exist".
 
+## Empty target kills the active window
+
+An empty tmux `-t` selector does NOT no-op.
+tmux resolves an empty target string to the session's CURRENT/active window, so `tmux kill-window -t ""` kills whatever window is focused rather than doing nothing.
+When firstmate itself runs inside tmux, the focused window is the coordinator's own tab - so an empty-target kill is a self-destruct.
+
+This is why `fm_backend_tmux_kill` (`bin/backends/tmux.sh`) refuses an empty target (`[ -n "$1" ] || return 0`) and owns that contract, `fm_backend_kill` (`bin/fm-backend.sh`) guards the same before dispatching, and `bin/fm-teardown.sh` falls back to `detached_window=` so its kill target is never empty for a detached-reclaimed task (whose meta has no `window=`).
+
+Incident, 2026-07-15, real tmux 3.4 on Linux (Ubuntu 24.04.4 LTS, 6.17.0-1019-aws):
+reclaiming a detached crew whose window was already closed ran teardown with an empty `window=`, and `tmux kill-window -t ""` returned exit 0 and killed the coordinator's own window while an unrelated throwaway session was untouched (confirming the empty target resolves to the ACTIVE window, not the throwaway session's window).
+The empty-target kill is deliberately NOT reproduced live in the test suite or here - doing so kills the running window; the guard is proven instead by a mocked `tmux` that records its arguments (`tests/fm-backend.test.sh`, `tests/fm-detach.test.sh`).
+
 ## Limitations
 
 The agent-liveness probe above has one known gap (`pi`'s generic `node` process name, see above).

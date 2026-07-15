@@ -130,7 +130,15 @@ fm_backend_tmux_send_literal() {  # <target> <text>
 
 # fm_backend_tmux_kill: remove the task's window, best-effort. Mirrors
 # fm-teardown.sh's `tmux kill-window -t "$T" 2>/dev/null || true`.
+#
+# EMPTY TARGET IS DANGEROUS - this function owns that contract. An empty tmux
+# `-t` selector does NOT no-op: tmux resolves it to the CURRENT/active window, so
+# `kill-window -t ""` kills whatever window is focused (the firstmate coordinator
+# tab), not nothing. A detached task's meta carries no window= (fm-detach.sh drops
+# it), so callers can reach here with an empty target; refuse it outright. See
+# docs/tmux-backend.md "Empty target kills the active window" for the incident.
 fm_backend_tmux_kill() {  # <target>
+  [ -n "${1:-}" ] || return 0
   tmux kill-window -t "$1" 2>/dev/null || true
 }
 

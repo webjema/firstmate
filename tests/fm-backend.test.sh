@@ -589,6 +589,54 @@ test_teardown_conformance_old_vs_new() {
   pass "fm-teardown.sh: treehouse return + tmux kill-window command log is byte-identical old vs new for a scout task"
 }
 
+# --- empty-target kill guard ------------------------------------------------
+#
+# An empty tmux `-t` selector resolves to the session's CURRENT/active window,
+# so `kill-window -t ""` kills whatever window is focused (the firstmate
+# coordinator's own tab) instead of no-op'ing. That self-destruct reproduced
+# live when a detached crew whose window was already closed got reclaimed: its
+# meta carries no window=, so teardown passed an empty target down to the kill.
+# fm_backend_tmux_kill (the primitive, contract owner) and fm_backend_kill (the
+# dispatcher) must BOTH refuse an empty target before ever invoking tmux. Proven
+# with a recording fake tmux - never a live empty-target kill (docs/tmux-backend.md).
+test_backend_kill_refuses_empty_target() {
+  local fakebin log
+  fakebin="$TMP_ROOT/kill-empty-fakebin"; mkdir -p "$fakebin"
+  log="$TMP_ROOT/kill-empty.log"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+{ printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+
+  fm_backend_source tmux || fail "fm_backend_source tmux should load the tmux adapter"
+
+  # (1) Primitive, empty target: MUST NOT reach tmux kill-window at all.
+  : > "$log"
+  PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_kill "" \
+    || fail "fm_backend_tmux_kill '' should return 0 (best-effort no-op)"
+  assert_not_contains "$(cat "$log")" "kill-window" \
+    "fm_backend_tmux_kill '' must NOT invoke tmux kill-window (empty -t kills the active window)"
+
+  # (2) Dispatcher, empty target: same refusal, before dispatching to a backend.
+  : > "$log"
+  PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_kill tmux "" \
+    || fail "fm_backend_kill tmux '' should return 0"
+  assert_not_contains "$(cat "$log")" "kill-window" \
+    "fm_backend_kill tmux '' must NOT invoke tmux kill-window"
+
+  # (3) Regression guard: a NON-empty target still kills that exact window.
+  : > "$log"
+  PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_kill "firstmate:fm-real" \
+    || fail "fm_backend_tmux_kill <target> should return 0"
+  assert_contains "$(cat "$log")" "kill-window"$'\x1f''-t'$'\x1f''firstmate:fm-real' \
+    "fm_backend_tmux_kill <target> must still invoke kill-window -t <target>"
+
+  pass "fm_backend_tmux_kill / fm_backend_kill: refuse an empty target, still kill a real one"
+}
+
 # --- backend selection loudly refuses an unknown backend --------------------
 
 test_spawn_default_backend_writes_no_meta_field() {
@@ -625,4 +673,5 @@ test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_teardown_conformance_old_vs_new
+test_backend_kill_refuses_empty_target
 test_spawn_default_backend_writes_no_meta_field
