@@ -9,8 +9,8 @@
 # call, so they cannot disagree. Beacon freshness is deliberately NOT that answer:
 # an orphaned watcher keeps state/.last-watcher-beat warm while holding no lock,
 # so FM_SUP_WATCHER_FRESH below is a descriptive age band for banner text only -
-# never a supervision-live decision. This file populates FM_SUP_IN_FLIGHT and
-# FM_SUP_BEACON_DESC for those banners.
+# never a supervision-live decision. This file populates FM_SUP_IN_FLIGHT,
+# FM_SUP_SUPERVISABLE, and FM_SUP_BEACON_DESC for those banners.
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
@@ -23,7 +23,19 @@ fm_sup_stat_mtime() {
 
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
-#   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
+#   FM_SUP_IN_FLIGHT      count of state/*.meta - EVERY recorded task. Human-facing
+#                         context only ("N task(s) in flight"); NOT the gate for
+#                         whether this home still needs a live watcher.
+#   FM_SUP_SUPERVISABLE   count of metas that DEMAND a live watcher = every meta
+#                         that is NOT detached. A detached task (`detached=` line,
+#                         stamped by bin/fm-detach.sh) is one the captain drives
+#                         end to end; firstmate does zero watcher supervision or CI
+#                         polling on it, so it must not force a watcher to stay
+#                         armed. A released task (`released=`, bin/fm-teardown.sh's
+#                         release-at-PR-open) STILL counts: the watcher is exactly
+#                         what polls its PR's CI, so dropping it would silently kill
+#                         post-PR supervision. The guards gate blind-turn blocking
+#                         on THIS count, not FM_SUP_IN_FLIGHT.
 #   FM_SUP_WATCHER_FRESH  true/false - DESCRIPTIVE: beacon within the grace window.
 #                         NOT a liveness verdict (see the header); use
 #                         fm_watcher_healthy for that.
@@ -34,6 +46,7 @@ fm_sup_stat_mtime() {
 fm_supervision_status() {
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta beat m age
   FM_SUP_IN_FLIGHT=0
+  FM_SUP_SUPERVISABLE=0
   FM_SUP_WATCHER_FRESH=false
   FM_SUP_BEACON_DESC=never
   FM_SUP_QUEUE_PENDING=false
@@ -41,6 +54,11 @@ fm_supervision_status() {
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
+    # A detached task demands no live watcher (captain-driven, no CI polling);
+    # every other meta - including a released one, whose PR CI the watcher still
+    # polls - does. Presence of the `detached=` marker is the whole test.
+    grep -q '^detached=' "$meta" 2>/dev/null && continue
+    FM_SUP_SUPERVISABLE=$((FM_SUP_SUPERVISABLE + 1))
   done
 
   beat="$state/.last-watcher-beat"

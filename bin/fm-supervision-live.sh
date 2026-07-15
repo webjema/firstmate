@@ -11,13 +11,14 @@
 # here, because ownership of the home lock - not beacon freshness - is the truth.
 #
 # Unlike the turn-end guard, this needs no hook payload: invoked directly it still
-# answers honestly. It reports what this home is supervising and how, so it
-# extends cleanly to future supervision classes (e.g. a custody-only detached
-# task with no per-wake watcher) without hard-assuming every recorded task demands
-# a live watcher - it answers strictly about the watcher, and prints the in-flight
-# count as context.
+# answers honestly. It reports what this home is supervising and how, and it does
+# NOT hard-assume every recorded task demands a live watcher: the count it prints
+# is FM_SUP_SUPERVISABLE (tasks that demand a watcher), and a custody-only detached
+# task with no per-wake watcher is surfaced separately as "(+<m> detached, custody
+# only)" context rather than folded into that count. The verdict stays strictly
+# about the watcher (fm_watcher_healthy).
 #
-# Output: one line on stdout.
+# Output: one line on stdout ("(+<m> detached...)" appears only when m > 0).
 #   watcher: live pid=<N> (holds this home lock, beacon <age>s) - <k> task(s) in flight
 #   watcher: DOWN - no live watcher holds this home lock (beacon <desc>) - <k> task(s) in flight
 # Exit: 0 when live, 1 when DOWN. --quiet suppresses the line (exit code only).
@@ -46,12 +47,20 @@ esac
 
 fm_supervision_status "$STATE" "$GRACE"
 
+# The count reports tasks that DEMAND a watcher (FM_SUP_SUPERVISABLE), so the
+# "demands a live watcher?" reading stays honest. Detached tasks (captain-driven
+# custody, no firstmate CI polling) are surfaced separately as context rather than
+# folded into the supervised count.
+detached=$(( FM_SUP_IN_FLIGHT - FM_SUP_SUPERVISABLE ))
+flight_ctx="$FM_SUP_SUPERVISABLE task(s) in flight"
+[ "$detached" -gt 0 ] && flight_ctx="$flight_ctx (+$detached detached, custody only)"
+
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-  [ "$QUIET" -eq 1 ] || printf 'watcher: live pid=%s (holds this home lock, beacon %ss) - %s task(s) in flight\n' \
-    "$FM_WATCHER_HEALTHY_PID" "$(fm_path_age "$BEAT")" "$FM_SUP_IN_FLIGHT"
+  [ "$QUIET" -eq 1 ] || printf 'watcher: live pid=%s (holds this home lock, beacon %ss) - %s\n' \
+    "$FM_WATCHER_HEALTHY_PID" "$(fm_path_age "$BEAT")" "$flight_ctx"
   exit 0
 fi
 
-[ "$QUIET" -eq 1 ] || printf 'watcher: DOWN - no live watcher holds this home lock (beacon %s) - %s task(s) in flight\n' \
-  "$FM_SUP_BEACON_DESC" "$FM_SUP_IN_FLIGHT"
+[ "$QUIET" -eq 1 ] || printf 'watcher: DOWN - no live watcher holds this home lock (beacon %s) - %s\n' \
+  "$FM_SUP_BEACON_DESC" "$flight_ctx"
 exit 1
