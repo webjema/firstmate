@@ -283,6 +283,11 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 fm_backend_kill() {  # <backend> <target>
   local backend=$1
   shift
+  # Empty target is dangerous: the tmux backend's empty `-t` kills the active
+  # window (fm_backend_tmux_kill owns this contract; see docs/tmux-backend.md).
+  # No backend removes anything but the target, so a missing target means
+  # "nothing to kill" - refuse before dispatching.
+  [ -n "${1:-}" ] || return 0
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_kill "$@" ;;

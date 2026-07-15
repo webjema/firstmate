@@ -125,6 +125,13 @@ META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
+# A detached task's meta has no window= (fm-detach.sh drops it, recording the
+# window under detached_window= instead), so fall back to that here. This both
+# lets a direct teardown still clean up a still-present detached window and, more
+# importantly, keeps T from being empty - an empty tmux -t kills the active
+# window (fm_backend_tmux_kill / docs/tmux-backend.md). The backend guards empty
+# regardless; this fallback is the correctness half of that defense in depth.
+[ -n "$T" ] || T=$(grep '^detached_window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
 if [ "$BACKEND" = orca ]; then

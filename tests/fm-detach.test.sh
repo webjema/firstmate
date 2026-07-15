@@ -20,6 +20,7 @@
 #   (f) reclaim once the window is gone      -> teardown runs, slot returned, meta purged
 #   (g) reclaim --force past a live agent    -> teardown runs, meta purged
 #   (h) reclaim refuses uncommitted work     -> exit 1, meta preserved (safety reused)
+#   (i) reclaim a detached meta with NO window= -> NO empty-target kill (self-destruct guard)
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -219,3 +220,55 @@ expect_code 1 "$CODE" "h: reclaim refuses dirty worktree"
 assert_present "$c/state/task-x1.meta" "h: meta preserved on refusal"
 assert_present "$c/wt" "h: worktree preserved on refusal"
 pass "h: reclaim reuses teardown's unlanded-work protection"
+
+# (i) reclaiming a detached meta with NO window= must issue NO empty-target kill.
+# This is the self-destruct guard: an empty tmux `-t` resolves to the session's
+# ACTIVE window (the firstmate coordinator's own tab), so `kill-window -t ""`
+# kills the coordinator. A detached meta carries detached_window= but no window=,
+# and teardown must reach the kill with a non-empty target (falling back to
+# detached_window=) or refuse the empty target - never `kill-window -t ""`.
+# Reproduced live twice; proven here with a recording fake tmux, never a live
+# empty kill. The augmented mock records every kill-window target so an empty one
+# ("kill:[]") is caught; it otherwise behaves like make_case's mock.
+c=$(make_case reclaim-no-empty-kill)
+cat > "$c/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+klog="${FM_MOCK_KILL_LOG:-/dev/null}"
+case "${1:-}" in
+  kill-window)
+    tgt=""; prev=""
+    for a in "$@"; do [ "$prev" = "-t" ] && tgt="$a"; prev="$a"; done
+    printf 'kill:[%s]\n' "$tgt" >> "$klog"
+    exit 0 ;;
+  list-panes)
+    [ "${FM_MOCK_WINDOW_EXISTS:-1}" = 1 ] && { echo "%1"; exit 0; }
+    exit 1 ;;
+  display-message)
+    fmt="${!#}"
+    case "$fmt" in
+      *pane_id*) echo "%1"; exit 0 ;;
+      *pane_current_command*)
+        [ "${FM_MOCK_WINDOW_EXISTS:-1}" = 1 ] || exit 0
+        printf '%s\n' "${FM_MOCK_PANE_CMD:-bash}"; exit 0 ;;
+    esac
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+SH
+chmod +x "$c/fakebin/tmux"
+# A detached-crew meta: detached_window= remembered, but window= dropped, exactly
+# as fm-detach.sh leaves it. The captain's window is already closed.
+fm_write_meta "$c/state/task-x1.meta" \
+  "detached=2026-07-15T00:00:00Z" \
+  "detached_window=firstmate:fm-task-x1" \
+  "worktree=$c/wt" \
+  "project=$c/project" \
+  "kind=ship" \
+  "mode=PR"
+: > "$c/state/killlog"
+run "$c" FM_MOCK_WINDOW_EXISTS=0 FM_MOCK_KILL_LOG="$c/state/killlog" -- --reclaim task-x1
+expect_code 0 "$CODE" "i: reclaim of a windowless detached task exits 0"
+assert_no_grep 'kill:[]' "$c/state/killlog" "i: NO empty-target kill-window issued (would kill the coordinator)"
+assert_grep 'kill:[' "$c/state/killlog" "i: the reclaim path did exercise the kill (guard is not vacuous)"
+assert_absent "$c/state/task-x1.meta" "i: meta purged by teardown once reclaimed"
+pass "i: reclaiming a detached task with no window= never issues an empty-target kill"
