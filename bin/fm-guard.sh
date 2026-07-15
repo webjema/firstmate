@@ -59,13 +59,16 @@ if [ -n "$tangle_branch" ]; then
   } >&2
 fi
 
-# Compute in-flight count and the human-readable beacon age via the shared
-# descriptive status (bin/fm-supervision-lib.sh). Only act with tasks in flight;
-# count them so the banner can say how much is riding on an absent watcher.
+# Compute the supervisable count and the human-readable beacon age via the shared
+# descriptive status (bin/fm-supervision-lib.sh). Only act when a task actually
+# demands a live watcher: FM_SUP_SUPERVISABLE excludes detached tasks (captain-
+# driven, no firstmate CI polling), so a home holding only detached work raises no
+# banner. The count also drives the banner text, so it says how much is riding on
+# an absent watcher.
 fm_supervision_status "$STATE" "$GRACE"
-in_flight=$FM_SUP_IN_FLIGHT
+supervisable=$FM_SUP_SUPERVISABLE
 beacon_desc=$FM_SUP_BEACON_DESC
-[ "$in_flight" -eq 0 ] && exit 0
+[ "$supervisable" -eq 0 ] && exit 0
 
 # Authoritative liveness: home-lock OWNERSHIP (bin/fm-wake-lib.sh's
 # fm_watcher_healthy), the SAME predicate bin/fm-turnend-guard.sh and the
@@ -106,7 +109,7 @@ if [ "$watcher_fresh" = false ]; then
   {
     printf '●%s\n' "$rule"
     printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-    printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+    printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s, grace %ss).\n' "$supervisable" "$beacon_desc" "$GRACE"
     if [ "$READ_ONLY" -eq 1 ]; then
       printf '●  This read-only session should report the lapse, not repair it.\n'
     else

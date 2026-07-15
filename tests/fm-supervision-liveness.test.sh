@@ -196,6 +196,41 @@ test_guard_tolerates_fresh_arming_marker() {
   pass "guard tolerates a fresh re-arm handoff and still surfaces a stale-marker lapse (consistent with the turn-end guard)"
 }
 
+# --- GUARD: the detached-vs-released banner distinction ----------------------
+
+test_guard_silent_in_detached_only_home() {
+  # A detached task is captain-driven with no firstmate supervision, so a home
+  # whose only task is detached demands no watcher: fm-guard.sh must raise NO
+  # watcher-down banner even with no live lock. Before the FM_SUP_SUPERVISABLE
+  # gate this false-alarmed on the raw recorded-task count.
+  local dir state err
+  dir=$(make_case guard-detached-only)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\nworktree=/wt/detached\ndetached=2026-07-15T12:00:00Z\ndetached_window=firstmate:fm-task\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"   # fresh beacon, NO live lock
+  FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE=300 FM_ARMING_GRACE=30 "$GUARD" 2> "$err" >/dev/null || fail "guard failed"
+  ! grep -F 'WATCHER DOWN' "$err" >/dev/null || fail "guard banner fired for a detached-only home (no watcher demanded): $(cat "$err")"
+  pass "fm-guard: no watcher-down banner when the only in-flight task is detached"
+}
+
+test_guard_banners_in_released_only_home() {
+  # A released task (crew gone, no window) still needs the watcher to poll its PR
+  # CI, so it stays supervisable: fm-guard.sh MUST surface the lapse when no
+  # watcher is live. Locks the detached-vs-released distinction on the banner path.
+  local dir state err
+  dir=$(make_case guard-released-only)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\nworktree=/wt/released\nreleased=2026-07-15T12:00:00Z\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"   # fresh beacon, NO live lock
+  FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE=300 FM_ARMING_GRACE=30 "$GUARD" 2> "$err" >/dev/null || fail "guard failed"
+  grep -F 'WATCHER DOWN' "$err" >/dev/null || fail "guard did not surface a lapse for a released (still-supervised) task: $(cat "$err")"
+  pass "fm-guard: still banners a watcher-down lapse when the only task is released (not detached)"
+}
+
 # --- THE REGRESSION: a live primary survives a foreign supervision run ------
 
 test_primary_watcher_survives_foreign_supervision_run() {
@@ -251,4 +286,6 @@ test_agent_predicate_down_on_fresh_beacon_no_lock
 test_agent_predicate_down_on_dead_lock
 test_agent_predicate_live_on_healthy_lock
 test_guard_tolerates_fresh_arming_marker
+test_guard_silent_in_detached_only_home
+test_guard_banners_in_released_only_home
 test_primary_watcher_survives_foreign_supervision_run

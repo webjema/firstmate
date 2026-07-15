@@ -111,8 +111,11 @@ fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
+# Gate on FM_SUP_SUPERVISABLE, not the raw recorded-task count: a detached task
+# is captain-driven with no firstmate supervision, so a home whose only tasks are
+# detached demands no live watcher and must be free to end a turn idle.
 fm_supervision_status "$STATE" "$GRACE"
-[ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
+[ "$FM_SUP_SUPERVISABLE" -gt 0 ] || exit 0
 fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
 
 # A re-arm actively in flight is not a blind turn. bin/fm-watch-arm.sh holds
@@ -136,7 +139,7 @@ rule='━━━━━━━━━━━━━━━━━━━━━━━━�
 {
   printf '●%s\n' "$rule"
   printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
-  printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+  printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SUPERVISABLE" "$FM_SUP_BEACON_DESC"
   printf '●  %s\n' "$REASON"
   printf '●%s\n' "$rule"
 } >&2

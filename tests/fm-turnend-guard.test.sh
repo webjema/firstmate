@@ -77,6 +77,59 @@ test_predicate_queue_pending_flag() {
   pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
 }
 
+# --- PREDICATE: FM_SUP_SUPERVISABLE (detached exclusion) --------------------
+# FM_SUP_IN_FLIGHT counts EVERY recorded task (human-facing context);
+# FM_SUP_SUPERVISABLE counts only tasks that DEMAND a live watcher = every meta
+# except a detached one. This is the detached-vs-released distinction the guards
+# gate on.
+
+test_predicate_attached_meta_is_supervisable() {
+  local state="$TMP_ROOT/pred-attached/state"
+  mkdir -p "$state"
+  printf 'project=x\nwindow=firstmate:fm-task1\n' > "$state/task1.meta"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "expected 1 in-flight, got $FM_SUP_IN_FLIGHT"
+  [ "$FM_SUP_SUPERVISABLE" -eq 1 ] || fail "an attached task must demand a watcher, got $FM_SUP_SUPERVISABLE"
+  pass "fm_supervision_status: a normal attached task counts as supervisable"
+}
+
+test_predicate_detached_meta_is_not_supervisable() {
+  local state="$TMP_ROOT/pred-detached/state"
+  mkdir -p "$state"
+  # A detached meta (bin/fm-detach.sh): window= dropped, detached= stamped. The
+  # captain drives this crew end to end; firstmate does zero supervision on it.
+  printf 'project=x\nworktree=/wt/detached\ndetached=2026-07-15T12:00:00Z\ndetached_window=firstmate:fm-task1\n' > "$state/task1.meta"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "detached task must still count as a recorded task, got $FM_SUP_IN_FLIGHT"
+  [ "$FM_SUP_SUPERVISABLE" -eq 0 ] || fail "a detached task must NOT demand a watcher, got $FM_SUP_SUPERVISABLE"
+  pass "fm_supervision_status: a detached task is recorded but not supervisable"
+}
+
+test_predicate_released_meta_is_supervisable() {
+  local state="$TMP_ROOT/pred-released/state"
+  mkdir -p "$state"
+  # A released meta (bin/fm-teardown.sh release-at-PR-open): window= dropped,
+  # released= stamped. The crew window is gone but firstmate STILL polls the PR's
+  # CI via the watcher, so it MUST stay supervisable - the distinction that keeps
+  # a later refactor from collapsing detached and released.
+  printf 'project=x\nworktree=/wt/released\nreleased=2026-07-15T12:00:00Z\n' > "$state/task1.meta"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "expected 1 in-flight, got $FM_SUP_IN_FLIGHT"
+  [ "$FM_SUP_SUPERVISABLE" -eq 1 ] || fail "a released task must STILL demand a watcher (PR CI poll), got $FM_SUP_SUPERVISABLE"
+  pass "fm_supervision_status: a released task stays supervisable (watcher still polls its PR CI)"
+}
+
+test_predicate_detached_does_not_mask_attached() {
+  local state="$TMP_ROOT/pred-mixed/state"
+  mkdir -p "$state"
+  printf 'project=x\ndetached=2026-07-15T12:00:00Z\n' > "$state/detached.meta"
+  printf 'project=y\nwindow=firstmate:fm-attached\n' > "$state/attached.meta"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 2 ] || fail "expected 2 recorded tasks, got $FM_SUP_IN_FLIGHT"
+  [ "$FM_SUP_SUPERVISABLE" -eq 1 ] || fail "only the attached task should be supervisable, got $FM_SUP_SUPERVISABLE"
+  pass "fm_supervision_status: a detached task alongside an attached one leaves the attached one supervisable"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -202,6 +255,34 @@ test_hook_silent_when_no_work_in_flight() {
   expect_code 0 "$status" "hook must exit 0 with no in-flight work"
   [ -z "$out" ] || fail "hook produced output with no in-flight work: $out"
   pass "fm-turnend-guard: silent no-op with nothing in flight"
+}
+
+# A home whose ONLY task is detached demands no live watcher (captain-driven, no
+# firstmate CI polling), so a genuinely-idle turn must end freely even with no
+# watcher armed. This is the false-positive the change fixes: it FAILS before the
+# change (the guard blocked on the raw recorded-task count) and PASSES after.
+test_hook_silent_in_detached_only_home() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-detached-only")
+  printf 'project=x\nworktree=/wt/detached\ndetached=2026-07-15T12:00:00Z\ndetached_window=firstmate:fm-task1\n' > "$dir/state/task1.meta"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "hook must NOT block when the only task is detached (no watcher demanded)"
+  [ -z "$out" ] || fail "hook produced output for a detached-only home: $out"
+  pass "fm-turnend-guard: silent no-op when the only in-flight task is detached"
+}
+
+# A released task (crew gone, no window) is NOT detached: firstmate still polls its
+# PR's CI via the watcher, so the guard MUST still fire when no watcher is live.
+# This locks the detached-vs-released distinction against a later refactor.
+test_hook_blocks_in_released_only_home() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-released-only")
+  printf 'project=x\nworktree=/wt/released\nreleased=2026-07-15T12:00:00Z\n' > "$dir/state/task1.meta"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must STILL block for a released task (watcher runs its PR CI poll)"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
+  pass "fm-turnend-guard: still blocks a blind turn when the only task is released (not detached)"
 }
 
 test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
@@ -909,7 +990,13 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
+test_predicate_attached_meta_is_supervisable
+test_predicate_detached_meta_is_not_supervisable
+test_predicate_released_meta_is_supervisable
+test_predicate_detached_does_not_mask_attached
 test_hook_silent_when_no_work_in_flight
+test_hook_silent_in_detached_only_home
+test_hook_blocks_in_released_only_home
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_when_arming_marker_is_fresh

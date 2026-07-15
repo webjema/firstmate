@@ -24,9 +24,10 @@ An unmarked checkout, or one with an invalid marker, falls through to the git-di
 That check keeps crewmate and scout worktrees inert because firstmate provisions them as linked git worktrees, where `git rev-parse --git-dir` differs from `git rev-parse --git-common-dir`.
 It also requires `AGENTS.md`, `bin/`, and the effective state directory to exist.
 
-For an in-scope primary checkout, it counts in-flight work from `state/*.meta`.
-If no task is in flight, it exits silently.
-If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
+For an in-scope primary checkout, it counts the work that DEMANDS a watcher from `state/*.meta` - `FM_SUP_SUPERVISABLE`, which is every meta except a detached one.
+A detached task (a `detached=` line, stamped by `bin/fm-detach.sh` when the captain takes a crew over end to end) is captain-driven with no firstmate supervision or CI polling, so it must not force a watcher to stay armed; a released task (`released=`, `bin/fm-teardown.sh`'s release-at-PR-open) still counts, because the watcher is what polls its PR's CI.
+If nothing demands a watcher, it exits silently.
+If supervisable work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
@@ -50,7 +51,7 @@ Three surfaces share that one predicate so they cannot disagree:
 - `bin/fm-turnend-guard.sh` - the blocking backstop above.
 - `bin/fm-guard.sh` - the pull-based advisory banner.
   It decides its watcher-down banner with `fm_watcher_healthy` (not beacon age) and applies the SAME `state/.watch.arming` tolerance as the turn-end guard, so a normal handoff is silent on both while a genuine lapse surfaces on both.
-  `bin/fm-supervision-lib.sh` supplies only the descriptive in-flight count and beacon-age text for its banner, never a liveness verdict.
+  `bin/fm-supervision-lib.sh` supplies only descriptive counts (`FM_SUP_IN_FLIGHT`, the total recorded tasks, and `FM_SUP_SUPERVISABLE`, those that demand a watcher) and beacon-age text for its banner, never a liveness verdict.
 - `bin/fm-supervision-live.sh` - the agent-callable check.
   Firstmate runs it instead of improvising (a process grep, a beacon-freshness read, or a payload-less turn-end-guard invocation all gave confident WRONG answers).
   It needs no hook payload: invoked directly it prints `watcher: live pid=<N> ...` (exit 0) or `watcher: DOWN ...` (exit 1).
