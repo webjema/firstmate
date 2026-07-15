@@ -30,8 +30,15 @@
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see AGENTS.md project management
 # and task lifecycle):
-#   PR          implement -> /code-review + /verify -> push + open PR via gh-axi (default);
-#               firstmate reviews the diff against the direction, watches CI, captain merges
+#   PR          implement -> /code-review + /verify -> push the branch, open NO PR ->
+#               report `review-ready: branch fm/<id> pushed, no PR` and STOP (default).
+#               Firstmate reviews the pushed branch against the direction; findings are
+#               fixed in place on the same branch and re-signalled `review-ready:`, and only
+#               an approval opens the PR (gh-axi) with `done: PR <url>`. The review gate sits
+#               BEFORE the PR because firstmate's review of a diff never needed a PR to exist,
+#               while a post-PR finding invalidates the crew's own review, its verify, its full
+#               suite run, and the PR's CI - the single largest source of rework measured in the
+#               fleet. The push still happens, so the work is durable against a box reboot.
 #   local-only  implement on branch, stop and report "ready in branch" (no push/PR);
 #               firstmate reviews, captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -244,6 +251,7 @@ case "$MODE" in
 This project ships **local-only**: no remote, no PR.
 
 1. Implement the change and commit it on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+   Run the tests your change AFFECTS as you go. Run the project's FULL suite EXACTLY ONCE, at the end, before step 6 - not after every edit.
 2. Run \`/code-review\` and address what it finds. Fix the real findings; a finding that is a human judgment call is not yours to decide - escalate it under rule 6.
 3. Run \`/verify\` to exercise the change end-to-end - drive the affected flow in the real app, not just the tests.
 4. Direction check: in one line, state how this change honors the Direction above. If it moves against the direction, stop and escalate under rule 6 instead of shipping it.
@@ -255,22 +263,28 @@ EOF
 )
     ;;
   *)  # PR (default)
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never open a PR before firstmate approves your branch (see Definition of done). Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
-This project ships by **pull request**, and you raise it yourself.
+This project ships by **pull request**, but the PR is the LAST step, not the first.
+Firstmate reviews your pushed branch BEFORE any PR exists, so its findings cost you a fix on the same branch - not a re-review, a re-run of CI, and a churned PR.
 
 1. Implement the change and commit it on your branch.
+   Run the tests your change AFFECTS as you go. Run the project's FULL suite EXACTLY ONCE, at the end, before step 6 - not after every edit. Re-running the whole suite per edit was the single biggest time sink measured in this fleet.
 2. Run \`/code-review\` and address what it finds.
    Fix the real findings yourself. A finding that turns on a human judgment call - a product choice, a destructive or irreversible action, a security trade-off - is NOT yours to decide: escalate it under rule 6 and stop.
 3. Run \`/verify\` to exercise the change end-to-end - drive the affected flow in the real app, not just the tests.
 4. Satisfy the project's quality hooks. They run automatically on commit and push (secret scan, lint, typecheck, tests). A blocked commit or push means the gate caught something real; fix the cause, never work around the gate.
 5. Direction check: in one line, state how this change honors the Direction above.
    If the task as specified would move AGAINST the direction, do not quietly implement it - escalate under rule 6.
-6. Push your branch and open a PR with \`gh-axi\`.
-7. Append \`done: PR {url}\` to the status file and stop.
+6. **Push your branch. Open NO PR.** The push makes your work durable; the PR would only make firstmate's review expensive to act on.
+   Append \`review-ready: branch fm/$ID pushed, no PR\` to the status file and STOP. Firstmate now reviews your diff against the direction.
+7. Firstmate replies with one of two things:
+   - **Findings.** Fix them IN PLACE on the same branch, push again, and append \`review-ready:\` again. Repeat until firstmate approves. No PR exists yet, so there is nothing to churn.
+   - **Approval.** Open the PR with \`gh-axi\`, append \`done: PR {url}\` to the status file, and stop.
 
-Do NOT merge the PR, and do not wait for CI yourself. Firstmate reviews your diff independently against the project's direction and watches CI; the captain merges.
+Do NOT merge the PR, and do not wait for CI yourself. Firstmate watches CI; the captain merges.
+Once the PR is open your work is on the remote, so firstmate releases your worktree at that point - finish step 7 and stop cleanly.
 EOF
 )
     ;;

@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 # Tests for the tracked Pi primary watcher extension and Pi secondmate wiring.
+#
+# Several cases wait for a side effect produced by a SPAWNED process (an arm child, the
+# turn-end guard) by polling `for (let i = 0; i < 250; i += 1)` at 20ms - a 5s ceiling.
+# Every one of those loops exits the instant the side effect lands, so the ceiling costs
+# nothing on a healthy box; it is a bound on how long the test is willing to call a slow
+# spawn a failure. It was 1s, which was enough only when this file had the box to itself:
+# under bin/fm-test.sh's parallel phase (and on a loaded CI runner) a spawn can take
+# longer than a second to produce its log, and the test failed for lack of patience
+# rather than for a real defect. If a spawn genuinely never runs, the loop still fails -
+# it just takes 5s to say so.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -121,7 +131,7 @@ if (!notification.includes("started Pi extension arm child")) {
   console.error(notification);
   process.exit(1);
 }
-for (let i = 0; i < 50 && !prompt; i += 1) {
+for (let i = 0; i < 250 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!prompt.includes("FIRSTMATE WATCHER WAKE")) {
@@ -139,7 +149,7 @@ if (!prompt.includes("watcher: healthy pid=1")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi extension must surface an external healthy watcher as an owned-wake failure"
+  expect_code 0 "$status" "Pi extension must surface an external healthy watcher as an owned-wake failure"$'\n'"$out"
   [ -z "$out" ] || fail "Pi external-healthy test printed output: $out"
   pass "Pi extension reports external healthy watcher output"
 }
@@ -188,7 +198,7 @@ if (result.details?.ok !== true || result.details?.message !== result.content[0]
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi custom tool must return Pi's AgentToolResult shape"
+  expect_code 0 "$status" "Pi custom tool must return Pi's AgentToolResult shape"$'\n'"$out"
   [ -z "$out" ] || fail "Pi tool-result test printed output: $out"
   pass "Pi custom tool returns text content and structured details"
 }
@@ -227,7 +237,7 @@ if (process.listenerCount("exit") !== before) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi cleanup fallback listener must install once and unregister on session shutdown"
+  expect_code 0 "$status" "Pi cleanup fallback listener must install once and unregister on session shutdown"$'\n'"$out"
   [ -z "$out" ] || fail "Pi listener-lifecycle test printed output: $out"
   pass "Pi process-exit cleanup listener has a bounded lifecycle"
 }
@@ -265,7 +275,7 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-exit", {}, undefined, undefined, {});
-for (let i = 0; i < 50 && !existsSync(process.env.FM_CHILD_PID_FILE); i += 1) {
+for (let i = 0; i < 250 && !existsSync(process.env.FM_CHILD_PID_FILE); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!existsSync(process.env.FM_CHILD_PID_FILE)) throw new Error("arm child did not start");
@@ -273,10 +283,10 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi process exit must run the watcher cleanup fallback"
+  expect_code 0 "$status" "Pi process exit must run the watcher cleanup fallback"$'\n'"$out"
   [ -z "$out" ] || fail "Pi process-exit cleanup test printed output: $out"
   i=0
-  while [ "$i" -lt 50 ] && [ ! -f "$cleanup_log" ]; do
+  while [ "$i" -lt 250 ] && [ ! -f "$cleanup_log" ]; do
     sleep 0.02
     i=$((i + 1))
   done
@@ -334,7 +344,7 @@ const hooks = await mod.FmPrimaryWatchArm({
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
-for (let i = 0; i < 50 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!existsSync(process.env.FM_ARM_LOG)) {
@@ -350,7 +360,7 @@ if (!text.includes(`home=${process.env.FM_HOME}`) || !text.includes(`root=${expe
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must use FM_HOME state outside the repo root"
+  expect_code 0 "$status" "OpenCode watch plugin must use FM_HOME state outside the repo root"$'\n'"$out"
   [ -z "$out" ] || fail "OpenCode effective-state test printed output: $out"
   pass "OpenCode watcher plugin uses the effective FM_HOME state"
 }
@@ -384,7 +394,7 @@ const hooks = await mod.FmPrimaryWatchArm({
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
-for (let i = 0; i < 50 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!existsSync(process.env.FM_ARM_LOG)) {
@@ -399,7 +409,7 @@ if (!text.includes("poll=7")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must source FM_HOME config outside the repo root"
+  expect_code 0 "$status" "OpenCode watch plugin must source FM_HOME config outside the repo root"$'\n'"$out"
   [ -z "$out" ] || fail "OpenCode effective-config test printed output: $out"
   pass "OpenCode watcher plugin sources the effective config"
 }
@@ -441,7 +451,7 @@ if (existsSync(process.env.FM_ARM_LOG)) {
 }
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await hooks.event(event);
-for (let i = 0; i < 50 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!existsSync(process.env.FM_ARM_LOG)) {
@@ -451,7 +461,7 @@ if (!existsSync(process.env.FM_ARM_LOG)) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must arm only when this session owns the fleet lock"
+  expect_code 0 "$status" "OpenCode watch plugin must arm only when this session owns the fleet lock"$'\n'"$out"
   [ -z "$out" ] || fail "OpenCode session-lock test printed output: $out"
   pass "OpenCode watcher plugin requires session lock ownership"
 }
@@ -498,7 +508,7 @@ if (existsSync(process.env.FM_ARM_LOG)) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch coordinator must keep primary scope checks in the shared arm path"
+  expect_code 0 "$status" "OpenCode watch coordinator must keep primary scope checks in the shared arm path"$'\n'"$out"
   [ -z "$out" ] || fail "OpenCode coordinator-scope test printed output: $out"
   pass "OpenCode watcher coordinator respects primary scope"
 }
@@ -526,7 +536,7 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompts = 0;
 const waitForPrompts = async (expected) => {
-  for (let i = 0; i < 50; i += 1) {
+  for (let i = 0; i < 250; i += 1) {
     if (prompts >= expected) return;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -554,7 +564,7 @@ await waitForPrompts(2);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must arm on the idle after a wake follow-up"
+  expect_code 0 "$status" "OpenCode watch plugin must arm on the idle after a wake follow-up"$'\n'"$out"
   [ -z "$out" ] || fail "OpenCode rearm test printed output: $out"
   pass "OpenCode watcher plugin rearms after a watcher wake"
 }
@@ -609,7 +619,7 @@ const guardHooks = await guardMod.FmPrimaryTurnendGuard({
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await guardHooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
-for (let i = 0; i < 50 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!existsSync(process.env.FM_ARM_LOG)) {
@@ -627,9 +637,47 @@ if (promptBody) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode turn-end guard must let the auto-arm plugin establish supervision first"
+  expect_code 0 "$status" "OpenCode turn-end guard must let the auto-arm plugin establish supervision first"$'\n'"$out"
   [ -z "$out" ] || fail "OpenCode coordination test printed output: $out"
   pass "OpenCode watcher plugin coordinates with the turn-end guard"
+}
+
+test_guard_hosts_survive_an_epipe_on_the_child_stdin_write() {
+  local opencode_guard pi_guard text
+
+  # ROOT CAUSE of a flake that failed ~1 run in 4 in bin/fm-test.sh's parallel phase and
+  # never serially. Both turn-end guard hosts spawn a child with a piped stdin and write
+  # an advisory payload to it. Both attach an "error" handler to the CHILD PROCESS - and
+  # neither attached one to the stdin STREAM. When the child exits before the write is
+  # dispatched (which a scheduler delay under load makes likely, and which is exactly what
+  # the parallel suite started doing), the write fails EPIPE, and an unhandled "error"
+  # event on a stream is a HARD PROCESS CRASH in Node:
+  #
+  #     node:events:487  throw er; // Unhandled 'error' event
+  #     Error: write EPIPE  at afterWriteDispatched (node:internal/stream_base_commons)
+  #
+  # That is a production hazard, not merely a test one: this path runs at every session
+  # idle, and the crash takes down the extension host that supervises the fleet. The write
+  # is advisory; the child's EXIT CODE carries the verdict, so the failed write is nothing
+  # to report and must simply not be fatal.
+  #
+  # This is asserted on the source (the idiom this file already uses) rather than by
+  # racing a real child: reproducing the EPIPE on demand means winning a scheduler race
+  # against Node's own write dispatch, which is precisely the nondeterminism being fixed.
+  # A behavioral version of this test passed with AND without the fix, so it proved
+  # nothing; this one fails without it.
+  opencode_guard="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  pi_guard="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
+
+  text=$(cat "$opencode_guard")
+  assert_contains "$text" 'child.stdin.on("error"' \
+    "OpenCode turn-end guard host crashes on EPIPE: no error handler on the child stdin stream"
+
+  text=$(cat "$pi_guard")
+  assert_contains "$text" 'child.stdin.on("error"' \
+    "Pi turn-end guard host crashes on EPIPE: no error handler on the child stdin stream"
+
+  pass "both turn-end guard hosts survive an EPIPE writing to a child that never reads stdin"
 }
 
 test_opencode_healthy_arm_output_does_not_suppress_guard() {
@@ -682,7 +730,7 @@ const guardHooks = await guardMod.FmPrimaryTurnendGuard({
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await guardHooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
-for (let i = 0; i < 50 && !existsSync(process.env.FM_GUARD_LOG); i += 1) {
+for (let i = 0; i < 250 && !existsSync(process.env.FM_GUARD_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!existsSync(process.env.FM_ARM_LOG)) {
@@ -704,7 +752,7 @@ if (!promptBody.includes("TURN WOULD END BLIND")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm"
+  expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm"$'\n'"$out"
   [ -z "$out" ] || fail "OpenCode external-healthy test printed output: $out"
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
@@ -722,4 +770,5 @@ test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_watch_arm_coordinates_with_turnend_guard
+test_guard_hosts_survive_an_epipe_on_the_child_stdin_write
 test_opencode_healthy_arm_output_does_not_suppress_guard

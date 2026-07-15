@@ -21,6 +21,15 @@ function runProcess(command, args, input = "") {
     });
     child.on("error", () => resolve({ code: 0, stdout: "", stderr: "" }));
     child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+    // The child's "error" handler above does NOT cover the stdin STREAM. If the child
+    // exits (or closes fd 0) before this input is dispatched, the write fails EPIPE, and
+    // an unhandled "error" event on a stream is a hard process crash in Node - it would
+    // take the whole plugin host down at session idle, which is exactly when the turn-end
+    // guard runs. Every spawn in this plugin goes through here, so this one listener
+    // covers the guard, the watcher arm, and git. The input is advisory and the child's
+    // EXIT CODE is what we act on, so a failed write is nothing to report: swallow it and
+    // let "close" deliver the verdict.
+    child.stdin.on("error", () => {});
     child.stdin.end(input);
   });
 }

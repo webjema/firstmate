@@ -238,20 +238,38 @@ unit_lock_initialization_grace() {
 }
 
 unit_signal_exits_with_lock_cleanup() {
-  local st marker child
+  local st marker started child
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-signal.XXXXXX")
   marker="$st/resumed"
+  started="$st/started"
+  # The stubbed start writes "$3" as its FIRST action, and that is what this test waits
+  # for before it signals.
+  #
+  # Waiting for the lock DIRECTORY instead would be a race, and was: fm_afk_launch_main
+  # calls fm_afk_launch_lock_acquire (which mkdirs the lock) and only THEN installs its
+  # EXIT/INT/TERM traps. A TERM delivered in the window between those two - after the
+  # lock exists, before a handler exists - is fatal by default and cleans nothing up, so
+  # the lock survives and the case fails while the product is behaving correctly. The
+  # window is real but tiny, so it stayed invisible until the suite began running tests
+  # in parallel and a scheduler delay stretched it. No amount of extra waiting closes
+  # it, because the lock dir is simply not evidence that the lifecycle is interruptible
+  # yet. fm_afk_launch_start runs only AFTER all three traps are installed, so its own
+  # first line is the earliest edge at which TERM is guaranteed to be the trap's.
+  # started_file is captured OUTSIDE the stub: inside a function, $3 is the FUNCTION's
+  # third argument (fm_afk_launch_start is called with none), not the script's.
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
-    fm_afk_launch_start() { sleep 30; }
+    started_file=$3
+    fm_afk_launch_start() { : > "$started_file"; sleep 30; }
     fm_afk_launch_main start
     : > "$2"
-  ' _ "$LAUNCH" "$marker" &
+  ' _ "$LAUNCH" "$marker" "$started" &
   child=$!
-  for _ in $(seq 1 40); do
-    [ -d "$st/state/.afk-launch.lock" ] && break
+  for _ in $(seq 1 200); do
+    [ -e "$started" ] && break
     sleep 0.05
   done
+  [ -e "$started" ] || fail "launcher signal: lifecycle never reached its start phase"
   kill -TERM "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true
   if [ ! -e "$marker" ] && [ ! -e "$st/state/.afk-launch.lock" ]; then

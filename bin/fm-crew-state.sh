@@ -95,10 +95,18 @@ map_log_state() {  # <line>
     echo paused
     return
   fi
-  case "$(status_line_verb "$1")" in
+  # Normalized, because status_normalize_verb owns the decoration/case rule and every
+  # other verb test in the fleet goes through it. A crew whose harness capitalized its
+  # verb is not in an "unknown" state.
+  case "$(status_normalize_verb "$(status_line_verb "$1")")" in
     working)        echo working ;;
     needs-decision) echo needs-decision ;;
     blocked)        echo blocked ;;
+    # A crew that has pushed and signalled review-ready is STOPPED ON PURPOSE, waiting for
+    # firstmate. Reporting it as `unknown` made AGENTS.md section 7 read it as a dead or
+    # wedged crew and route it to stuck-crewmate-recovery - which would interrupt or
+    # relaunch the very crew that is patiently waiting to be reviewed.
+    review-ready)   echo review-ready ;;
     done)           echo "done" ;;
     failed)         echo failed ;;
     *)              echo unknown ;;
