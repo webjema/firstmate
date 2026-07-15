@@ -132,16 +132,18 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
-# the given "session:window" target - the exact primitive
-# fm_backend_target_exists uses for a tmux endpoint liveness read.
+# make_fake_tmux <fakebin> <live-target>: list-panes succeeds only for the given
+# "session:window" target - the exact window-strict primitive
+# fm_backend_target_exists uses for a tmux endpoint liveness read (a gone window
+# fails with "can't find window"; see bin/fm-backend.sh). display-message keeps
+# the same live-only success for any other tmux read the path makes.
 make_fake_tmux() {
   local fakebin=$1 live=$2
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
 case "\${1:-}" in
-  display-message)
+  list-panes|display-message)
     target=""
     prev=""
     for a in "\$@"; do

@@ -104,6 +104,31 @@ The classifier deliberately reports `unknown` for `node`/`python`/`python3` rath
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
+## Window-existence probe
+
+`fm_backend_target_exists` (`bin/fm-backend.sh`) answers "does this recorded `session:window` target still exist?" - the read the reclaim idle-gate (`bin/fm-detach.sh`), recovery digests, and the session-start fleet digest all key off.
+It must be WINDOW-STRICT: a gone window has to read as "does not exist" even while its session lives on under a different active window, or a detached crew's closed window never triggers auto-reclaim of its worktree.
+
+`tmux display-message -p -t "$session:$window"` cannot be used for this: for a gone WINDOW it does NOT fail.
+It silently falls back to the session's currently ACTIVE window and returns that pane's id with exit 0, so a closed window reads as still present.
+`tmux list-panes -t "$session:$window"` is strict - it fails with `can't find window` for a gone window and never falls back - so it is the probe `fm_backend_target_exists` uses (the same window-strict listing `fm_backend_tmux_create_task` relies on).
+
+Verified empirically with real tmux 3.4 on Linux (Ubuntu 24.04.4 LTS, 6.17.0-1019-aws), 2026-07-15.
+A session `fmdoc` with two windows `testwin` and `other`; `other` made active; then `testwin` killed (the session lives on):
+
+```sh
+$ tmux kill-window -t fmdoc:testwin        # session lives on; "other" is now active
+$ tmux display-message -p -t fmdoc:testwin '#{pane_id} #{window_name}'; echo "exit=$?"
+%30 other
+exit=0
+$ tmux list-panes -t fmdoc:testwin; echo "exit=$?"
+can't find window: testwin
+exit=1
+```
+
+`display-message -t` resolved the gone `testwin` to the session's active window (`other`, `%30`) and returned exit 0 - the fallback that mistakes a closed window for a live one.
+`list-panes -t` reports `can't find window: testwin` with exit 1 - the correct "does not exist".
+
 ## Limitations
 
 The agent-liveness probe above has one known gap (`pi`'s generic `node` process name, see above).

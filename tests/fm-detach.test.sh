@@ -34,6 +34,14 @@ TMP_ROOT=$(fm_test_tmproot fm-detach-tests)
 # treehouse/tmux/gh. The tmux mock is env-driven: FM_MOCK_WINDOW_EXISTS toggles
 # whether the detached window still exists, FM_MOCK_PANE_CMD its foreground
 # command (claude => alive, bash => a done bare shell).
+#
+# The window-existence probe fm_backend_target_exists uses is `tmux list-panes`
+# (window-strict), so FM_MOCK_WINDOW_EXISTS gates list-panes here. display-message
+# deliberately does NOT gate on it for a pane_id read: real tmux never fails that
+# for a gone window - it falls back to the session's ACTIVE window and returns a
+# pane id with exit 0. Reproducing that fallback keeps the reclaim-when-gone cases
+# (f)/(h) a genuine before/after guard: the pre-fix primitive read pane_id via
+# display-message and so mistook a closed detached window for a still-open one.
 make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
@@ -47,12 +55,18 @@ SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
+  list-panes)
+    # fm_backend_target_exists's window-strict probe: a gone window fails
+    # ("can't find window"), a live one lists its pane.
+    [ "${FM_MOCK_WINDOW_EXISTS:-1}" = 1 ] && { echo "%1"; exit 0; }
+    exit 1 ;;
   display-message)
     fmt="${!#}"
     case "$fmt" in
       *pane_id*)
-        [ "${FM_MOCK_WINDOW_EXISTS:-1}" = 1 ] && { echo "%1"; exit 0; }
-        exit 1 ;;
+        # Faithful to real tmux: a pane_id read never fails for a gone window;
+        # it falls back to the session's active window and returns exit 0.
+        echo "%1"; exit 0 ;;
       *pane_current_command*)
         [ "${FM_MOCK_WINDOW_EXISTS:-1}" = 1 ] || exit 0
         printf '%s\n' "${FM_MOCK_PANE_CMD:-bash}"; exit 0 ;;

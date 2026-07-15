@@ -127,6 +127,35 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- fm_backend_target_exists: window-strict, rejects the active-window fallback
+#
+# `tmux display-message -t "$sess:$win"` does NOT fail when the WINDOW is gone:
+# it silently falls back to the session's ACTIVE window and returns that pane's
+# id with exit 0 (empirical record + tmux version in docs/tmux-backend.md
+# "Window-existence probe"). fm_backend_target_exists must be window-strict, so a
+# gone window reads as "does not exist" even while the session lives on under a
+# DIFFERENT active window. That strictness is what lets a detached crew's closed
+# window trigger auto-reclaim of its worktree.
+EXIST_WINDOW="fm-smoke-exist"
+EXIST_TARGET="$SESSION:$EXIST_WINDOW"
+fm_backend_tmux_create_task "$SESSION" "$EXIST_WINDOW" "$HOME" \
+  || fail "could not create the target-exists probe window"
+# Regression guard: a present window must read as existing.
+fm_backend_target_exists tmux "$EXIST_TARGET" \
+  || fail "fm_backend_target_exists: a present window must read as existing"
+# Make a DIFFERENT window ($WINDOW) active, so a gone-window probe on
+# $EXIST_TARGET would fall back to it under the old display-message primitive.
+tmux select-window -t "$TARGET" || fail "could not make the sibling window active"
+tmux kill-window -t "$EXIST_TARGET" || fail "could not kill the probe window"
+tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \
+  || fail "precondition: the session must live on under a different active window"
+# The window is gone though its session lives on: it must read as NOT existing.
+# This is the assertion that fails before the list-panes fix and passes after.
+if fm_backend_target_exists tmux "$EXIST_TARGET"; then
+  fail "fm_backend_target_exists: a gone window must NOT read as existing (active-window fallback leaked through)"
+fi
+pass "real tmux: fm_backend_target_exists is window-strict - present exists, gone does not, no active-window fallback"
+
 # --- kill ---------------------------------------------------------------------
 
 fm_backend_tmux_kill "$TARGET"

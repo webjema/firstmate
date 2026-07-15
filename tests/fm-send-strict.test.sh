@@ -46,6 +46,21 @@ case "${1:-}" in
     fi
     printf '%%1\n'
     exit 0 ;;
+  list-panes)
+    # fm_backend_target_exists's window-strict existence probe (bin/fm-backend.sh):
+    # a gone window fails with "can't find window", a live one lists its pane.
+    target=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) target=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ -n "${FM_FAKE_TMUX_DEAD_TARGET:-}" ] && [ "$target" = "$FM_FAKE_TMUX_DEAD_TARGET" ]; then
+      exit 1
+    fi
+    printf '%%1\n'
+    exit 0 ;;
   capture-pane)
     printf '\xe2\x94\x82 \xe2\x94\x82\n'
     exit 0 ;;
