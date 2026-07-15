@@ -180,6 +180,10 @@ The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, inv
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
+Detach hands a live crew to the captain without destroying it: [`bin/fm-detach.sh`](../bin/fm-detach.sh) drops `window=` from the meta and stamps `detached=` (with `detached_window=` for the later liveness probe), so the watcher's `recorded_windows()` and recovery stop tracking the task exactly as they skip a `released` one, while the tmux window and worktree stay alive for the captain.
+Reclaim is an idle gate in front of ordinary teardown: `--reclaim` returns the worktree only once the captain's session is done (window gone, or a bare shell per the `dead`-only agent-liveness probe), then delegates to `bin/fm-teardown.sh`, so the same landed-work safety protects any uncommitted or unlanded work the captain left behind.
+The crew-liveness state files that both release and detach clear have one owner in [`bin/fm-taskstate-lib.sh`](../bin/fm-taskstate-lib.sh).
+
 ## Optional X mode
 
 X mode is opt-in presence for the shared `@myfirstmate` bot.
