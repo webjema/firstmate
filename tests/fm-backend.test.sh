@@ -416,7 +416,7 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 # is now DELIBERATELY changed: fm-spawn drives the tmux backend to capture a
 # stable window id, pin the window name (automatic-rename/allow-rename off), and
 # target that id for the rename-critical spawn steps (robustness under a
-# captain's non-default tmux config). A byte-identical old-vs-new diff can no
+# user's non-default tmux config). A byte-identical old-vs-new diff can no
 # longer hold there by design. That intended sequence is now authoritatively and
 # comprehensively verified - via a recording fake-tmux - by
 # tests/fm-tangle-guard.test.sh ("fm-spawn: appends windows by session-colon,

@@ -9,7 +9,7 @@
 # Matrix (the poll is executed exactly as bin/fm-watch.sh runs it: `bash <check>`):
 #   (a) pr= and pr_head= are recorded into meta, and the check is armed
 #   (b) checks pending          -> SILENT (CI is still running)
-#   (c) checks green, unmerged  -> SILENT (waiting on the captain's merge)
+#   (c) checks green, unmerged  -> SILENT (waiting on the user's merge)
 #   (d) no checks reported      -> SILENT (nothing to fail)
 #   (e) a check FAILED          -> wakes with "checks failed"
 #   (f) the same failure again  -> SILENT (one wake per PR head, not every poll)

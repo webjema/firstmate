@@ -166,7 +166,7 @@ status_is_paused() {  # <status-line>
 # masks a still-open needs-decision. status_open_decisions is the ONE authoritative
 # statement of the contract that fixes this - a needs-decision/blocked line OPENS a
 # keyed decision, and ONLY an explicit resolution referencing that key CLOSES it; a
-# later unrelated terminal line never clears an open captain decision.
+# later unrelated terminal line never clears an open user decision.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
 # format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
@@ -221,7 +221,7 @@ EOF
 # Drop only the record for <key> that was opened by <verb>, leaving records opened by a
 # different verb under the same key intact. `done:` closes a review-ready and NOTHING
 # else: a crew that reports done while a needs-decision is still open must not have that
-# decision silently cleared - masking an open captain decision behind a later terminal
+# decision silently cleared - masking an open user decision behind a later terminal
 # line is the exact failure this whole section exists to prevent.
 _fm_decision_drop_verb() {  # <open-set> <key> <verb>
   local set=$1 key=$2 verb=$3 line out=''
@@ -566,7 +566,7 @@ signal_crew_absorbable() {  # <state> <file> ...
 # firstmate through the signal path and the open-decision fold.
 #
 # A child that has REPORTED - done: or failed: - is not live work: its task is over
-# and it is waiting on the captain's merge or on firstmate, neither of which its
+# and it is waiting on the user's merge or on firstmate, neither of which its
 # secondmate can hurry. Counting those metas would report a correctly-idle secondmate
 # as wedged the moment one of its tasks finished, which is exactly the "don't make
 # healthy idle secondmates noisy" constraint. A child with no status file yet has just

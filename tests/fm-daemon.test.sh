@@ -671,7 +671,7 @@ test_afk_turn_exemption() {
     && fail "bare /afk should not exit afk"
   should_exit_afk "$state" "/afk back in an hour" \
     && fail "/afk with args should not exit afk"
-  # a non-/afk skill invocation DOES exit (the captain is actively working)
+  # a non-/afk skill invocation DOES exit (the user is actively working)
   should_exit_afk "$state" "/bearings" \
     || fail "non-afk skill should exit afk"
   pass "/afk invocation is exempt from afk exit (no self-cancel)"
@@ -882,7 +882,7 @@ test_pane_input_pending_bordered_idle_not_pending() {
 
 test_pane_input_pending_bordered_with_text_is_pending() {
   # Guard against over-broadening: real unsubmitted text inside the box must
-  # still read as pending so the daemon defers (and the captain-return race is
+  # still read as pending so the daemon defers (and the user-return race is
   # still protected).
   local dir state fakebin capture
   dir=$(make_supercase pending-bordered-text)
@@ -1035,7 +1035,7 @@ test_max_defer_afk_inactive_does_not_flush_or_alarm() {
 
 # --- active wedge alert ------------------------------------------------------
 # These cover the 2026-07-10 overnight-incident fix: the max-defer wedge alarm's
-# ACTIVE alert channel must reach the captain even when the wedged pane and its
+# ACTIVE alert channel must reach the user even when the wedged pane and its
 # status-line are unreadable.
 #
 # NO test here EVER posts a real notification. Every notifier routes through

@@ -73,12 +73,12 @@ fm_backend_tmux_container_ensure() {
 # (session:window, matching how fm-spawn.sh composed its own $T). Prints the
 # created window's stable window id on stdout for the caller to target.
 #
-# Robustness (fm-spawn tmux window handling under a non-default captain config):
+# Robustness (fm-spawn tmux window handling under a non-default user config):
 #   - Capture a STABLE window id with -P -F '#{window_id}', and let tmux append
 #     at the next free index by targeting the session with a trailing colon
 #     ("$ses:"), so a non-default base-index (e.g. base-index 1) cannot collide.
 #   - PIN the window name by disabling automatic-rename and allow-rename on the
-#     new window: the captain's tmux may rename the window away from fm-<id> once
+#     new window: the user's tmux may rename the window away from fm-<id> once
 #     treehouse cd's into the worktree, which would break name-based targeting.
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.

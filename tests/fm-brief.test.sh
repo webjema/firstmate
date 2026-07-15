@@ -125,7 +125,7 @@ test_pr_dod_carries_the_review_contract() {
   assert_grep "never work around the gate" "$brief" "PR DOD lost the do-not-bypass-hooks rule"
   assert_grep "# Quality floor" "$brief" "ship brief lost the quality-floor section"
   assert_grep "fm-hooks-install.sh" "$brief" "quality floor does not point at the hook installer"
-  # A judgment call is the captain's, not the crew's, even mid-review.
+  # A judgment call is the user's, not the crew's, even mid-review.
   assert_grep "is NOT yours to decide" "$brief" "PR DOD lost the escalate-judgment-calls rule"
   pass "fm-brief.sh: the PR definition of done carries the full review contract"
 }

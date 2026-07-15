@@ -639,7 +639,7 @@ while :; do
     # waited on - warming takes minutes, and the watcher must not miss a wake
     # while it runs. It is a short-lived child of the watcher, not a new always-on
     # process. A failed warm logs and retires quietly; it can never break a spawn
-    # or wake the captain, so its exit status is deliberately ignored here.
+    # or wake the user, so its exit status is deliberately ignored here.
     # The overrides ride along explicitly: this watcher resolved STATE/CONFIG from
     # them, and they are plain shell vars here, not exported - so a home running on
     # an override would otherwise have its warmer write to a DIFFERENT state dir
@@ -691,7 +691,7 @@ EOF
     # -> advance the markers so it will not re-fire, log, and keep blocking without
     # enqueuing. signal_crew_absorbable is the only costly check (and only in its
     # second leg: a turn-end body that shows progress absorbs for free, with no pane
-    # probe), so the || ordering evaluates it ONLY for a non-afk, no-captain-verb
+    # probe), so the || ordering evaluates it ONLY for a non-afk, no-user-verb
     # signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files \

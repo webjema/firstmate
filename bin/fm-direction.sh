@@ -4,7 +4,7 @@
 # project must move with.
 # Direction files live at data/directions/<project>.md under the active firstmate
 # home. They are firstmate-private (data/ is gitignored), because business vision
-# and product strategy are the captain's, not the project's.
+# and product strategy are the user's, not the project's.
 # Usage: fm-direction.sh path  <project>   print the direction file's path
 #        fm-direction.sh show  <project>   print the file, or nothing when absent
 #        fm-direction.sh brief <project>   print the brief-ready "# Direction" block
@@ -36,7 +36,7 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 SOFT_WORDS=${FM_DIRECTION_SOFT_WORDS:-450}
 HARD_WORDS=${FM_DIRECTION_HARD_WORDS:-900}
 
-# The five headings a direction must carry. The first four are the captain's axes;
+# The five headings a direction must carry. The first four are the user's axes;
 # Standing decisions accumulates the resolved answers so a decision made once is
 # never re-litigated by the next crewmate.
 REQUIRED_HEADINGS=(
@@ -72,7 +72,7 @@ cmd_brief() {
     echo 'Use your best judgment, and if the task turns on a question of product intent, architecture, or quality posture that you cannot answer from the codebase, escalate it with `needs-decision:` rather than guessing.'
     return 0
   fi
-  echo "This is the standing direction for \`$project\`. It is the captain's, not yours to revise."
+  echo "This is the standing direction for \`$project\`. It is the user's, not yours to revise."
   echo
   # Drop the file's own H1 title; the brief supplies the heading.
   sed '/^# /d' "$f"
@@ -104,7 +104,7 @@ cmd_init() {
 {Test posture. What "good" means here. The non-negotiables, and the debt we knowingly accept.}
 
 ## Standing decisions
-{Dated one-liners. Grown over time from the captain's answers, so a decision made once is never re-litigated.}
+{Dated one-liners. Grown over time from the user's answers, so a decision made once is never re-litigated.}
 EOF
   echo "scaffolded: $f (replace every {...} placeholder)"
 }

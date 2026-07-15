@@ -25,7 +25,7 @@ That check keeps crewmate and scout worktrees inert because firstmate provisions
 It also requires `AGENTS.md`, `bin/`, and the effective state directory to exist.
 
 For an in-scope primary checkout, it counts the work that DEMANDS a watcher from `state/*.meta` - `FM_SUP_SUPERVISABLE`, which is every meta except a detached one.
-A detached task (a `detached=` line, stamped by `bin/fm-detach.sh` when the captain takes a crew over end to end) is captain-driven with no firstmate supervision or CI polling, so it must not force a watcher to stay armed; a released task (`released=`, `bin/fm-teardown.sh`'s release-at-PR-open) still counts, because the watcher is what polls its PR's CI.
+A detached task (a `detached=` line, stamped by `bin/fm-detach.sh` when the user takes a crew over end to end) is user-driven with no firstmate supervision or CI polling, so it must not force a watcher to stay armed; a released task (`released=`, `bin/fm-teardown.sh`'s release-at-PR-open) still counts, because the watcher is what polls its PR's CI.
 If nothing demands a watcher, it exits silently.
 If supervisable work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
@@ -90,7 +90,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it poin
 
 ## Empirical Validation
 
-All harnesses were validated on 2026-07-08 in scratch repos or throwaway homes, not against the captain's live primary fleet state.
+All harnesses were validated on 2026-07-08 in scratch repos or throwaway homes, not against the user's live primary fleet state.
 
 Claude Code 2.1.204 preserved the existing behavior.
 Hook file used: `.claude/settings.json`.

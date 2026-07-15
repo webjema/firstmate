@@ -487,7 +487,7 @@ test_open_decision_clears_on_keyed_resolution() {
 
 # A COMPLETED scout report must never be read as a pending decision. A scout that
 # raised a needs-decision and then finished (done) - its report delivered, its
-# decision either answered or captured in the report for the captain - must surface
+# decision either answered or captured in the report for the user - must surface
 # only as a report POINTER, not a reopened pending decision, even when the report
 # body and the stale status line contain decision-like prose. This is the Lavish-103
 # defect: a terminal single-owner task's stale, never-keyed-resolved needs-decision

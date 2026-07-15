@@ -1,4 +1,4 @@
-# Firstmate
+This file is your entire job description.
 
 ## 1. Identity and prime directives
 
@@ -37,7 +37,7 @@ Never add an agent name as co-author.
 Scripts always use their own `bin/`, but operational dirs come from `$FM_HOME`.
 Each secondmate gets its own persistent `FM_HOME`, isolating its state, backlog, projects, and session lock.
 
-- `data/` - personal fleet records, gitignored. `backlog.md`, `captain.md`, `learnings.md`, `projects.md`, `secondmates.md`, `directions/<project>.md`, and per-task `<id>/brief.md` and `<id>/report.md`.
+- `data/` - personal fleet records, gitignored. `backlog.md`, `user.md`, `learnings.md`, `projects.md`, `secondmates.md`, `directions/<project>.md`, and per-task `<id>/brief.md` and `<id>/report.md`.
 - `state/` - volatile runtime signals, gitignored. Per-task `<id>.status` (an append-only wake-EVENT log, never current-state truth) and `<id>.meta`, plus watcher and lock internals you never touch by hand.
 - `config/` - local, gitignored knobs. `docs/configuration.md` owns the full list.
 - `projects/` - cloned repos, gitignored, READ-ONLY for you.
@@ -51,7 +51,7 @@ The shell working directory persists between commands and a persistent top-level
 
 Run `bin/fm-session-start.sh`. One command, not a sequence.
 
-It acquires the session lock, runs bootstrap diagnostics, drains the durable wake queue, and prints a full context and fleet-state digest: `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/learnings.md`, every project's direction, `data/backlog.md`, every `state/<id>.meta`, bounded tails of every `state/<id>.status`, the `state/.afk` flag, and a cheap alive/dead read of each task's window.
+It acquires the session lock, runs bootstrap diagnostics, drains the durable wake queue, and prints a full context and fleet-state digest: `data/projects.md`, `data/secondmates.md`, `data/user.md`, `data/learnings.md`, every project's direction, `data/backlog.md`, every `state/<id>.meta`, bounded tails of every `state/<id>.status`, the `state/.afk` flag, and a cheap alive/dead read of each task's window.
 It closes by emitting the supervision operating block for the detected harness.
 
 **Everything in that digest is read exactly once, at session start.**
@@ -67,7 +67,7 @@ Never install anything the user has not approved in this session.
 Silence in the bootstrap section means all good: say nothing and move on.
 Otherwise load `bootstrap-diagnostics` and handle each line.
 
-An `ABSENT` `data/captain.md`, `data/learnings.md`, or `data/secondmates.md` is not a problem to fix; it means template defaults, nothing captured yet, and no registered secondmates.
+An `ABSENT` `data/user.md`, `data/learnings.md`, or `data/secondmates.md` is not a problem to fix; it means template defaults, nothing captured yet, and no registered secondmates.
 An `ABSENT` or wrong `data/projects.md` should be rebuilt from the clones under `projects/` before taking on work.
 
 ## 4. Recovery
@@ -162,7 +162,7 @@ Fleet and user-private knowledge - delivery mode, yolo posture, in-flight work, 
 | Kind of knowledge | Home |
 | --- | --- |
 | Where a project is going, and what good looks like there | `data/directions/<project>.md` |
-| User preferences and working style | `data/captain.md`, inspected then rewritten in place |
+| User preferences and working style | `data/user.md`, inspected then rewritten in place |
 | Project-intrinsic knowledge | that project's own `AGENTS.md`, via crewmate delivery |
 | Fleet-local operational facts and gotchas | `data/learnings.md`, inspected then rewritten in place |
 | Knowledge generalizable to every firstmate user | this file, shipped via PR |

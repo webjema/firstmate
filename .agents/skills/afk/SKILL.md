@@ -9,9 +9,9 @@ metadata:
 # afk
 
 Away-mode supervision. When invoked, `/afk` makes the daemon's token-saving
-tradeoff **consented** and **explicit**: the captain is stepping away, so the
+tradeoff **consented** and **explicit**: the user is stepping away, so the
 sub-supervisor may triage routine wakes in bash instead of waking firstmate's
-LLM for each one. Escalations still reach the captain, but as one pre-read,
+LLM for each one. Escalations still reach the user, but as one pre-read,
 batched digest rather than per-wake injections.
 
 ## What it does
@@ -29,17 +29,17 @@ batched digest rather than per-wake injections.
      `bin/fm-afk-launch.sh start-native`, then run
      `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
-     The launcher still owns lifecycle state and records the no-terminal mode, while the daemon inherits and auto-discovers the captain pane.
+     The launcher still owns lifecycle state and records the no-terminal mode, while the daemon inherits and auto-discovers the user pane.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
      Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
    - **Harness WITHOUT one** (e.g. pi): run `bin/fm-afk-launch.sh start`. It is
      the single owner of the daemon terminal: it creates a NON-VISIBLE tracked
      terminal for the current backend (a herdr dedicated `--no-focus` workspace,
-     a detached tmux session), records its exact id, and passes the captain pane
-     in as `FM_SUPERVISOR_TARGET` so the daemon injects into the captain, not its
-     own new pane. **Never manufacture a terminal by splitting the captain's
+     a detached tmux session), records its exact id, and passes the user pane
+     in as `FM_SUPERVISOR_TARGET` so the daemon injects into the user, not its
+     own new pane. **Never manufacture a terminal by splitting the user's
      active pane** (`herdr pane split`): a split co-tenants the tab and visibly
-     shrinks the captain's pane (docs/herdr-backend.md "Away-mode daemon terminal
+     shrinks the user's pane (docs/herdr-backend.md "Away-mode daemon terminal
      launch").
    Both paths share `bin/fm-afk-start.sh` as the daemon entry.
    The native path tells it that the launcher already prepared lifecycle state; the terminal-backed path lets the entry perform its existing state setup inside the new terminal.
@@ -50,14 +50,14 @@ batched digest rather than per-wake injections.
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.
 
-4. **Acknowledge** to the captain that away-mode is active.
-   The daemon will self-handle routine wakes, escalate captain-relevant events and bounded declared-external-wait rechecks, and let the captain exit by sending any real message.
+4. **Acknowledge** to the user that away-mode is active.
+   The daemon will self-handle routine wakes, escalate captain-relevant events and bounded declared-external-wait rechecks, and let the user exit by sending any real message.
 
 ## How to exit afk
 
 No `/back` is needed. The first genuine message is the return signal:
 
-- A message **without** the sentinel marker and **not** starting with `/afk` -> the captain is back.
+- A message **without** the sentinel marker and **not** starting with `/afk` -> the user is back.
   Run `bin/fm-afk-launch.sh stop`: it stops the daemon in the correct order - it SIGTERMs the daemon so its shutdown flush runs **while `state/.afk` is still present** (clearing the flag first makes that flush a no-op via the daemon's presence gate, stranding undelivered escalations), then closes the daemon's own terminal by exact id, then clears `state/.afk` last.
   Then flush one distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize any pending escalations from `state/.subsuper-escalations` and any `state/.subsuper-inject-wedged` marker), and resume full per-wake responsiveness through the emitted primary-harness supervision protocol from session start.
 - A message **with** the sentinel marker (`FM_INJECT_MARK`, ASCII 0x1f) -> it
@@ -65,14 +65,14 @@ No `/back` is needed. The first genuine message is the return signal:
 - Re-invoking `/afk` while already away -> stay afk (refresh the flag); this
   does **not** trigger an exit.
 
-Bias ambiguous cases toward exit: a present captain beats token savings, and
-a false exit is self-correcting (the captain re-runs `/afk`).
+Bias ambiguous cases toward exit: a present user beats token savings, and
+a false exit is self-correcting (the user re-runs `/afk`).
 
 ## Orthogonal to approval authority
 
 afk changes how aggressively firstmate surfaces things, **not who approves
 what**. "Away" never means "approves more." A PR ready for merge, a
-needs-decision finding, or anything destructive still waits for the captain's
+needs-decision finding, or anything destructive still waits for the user's
 explicit word - the daemon just batches the notification.
 
 ## Sentinel marker contract
@@ -98,7 +98,7 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   `pane_input_pending` remains the tested predicate for callers that only need to know whether real unsubmitted text is present, but it is insufficient for an injection-safety decision because it cannot distinguish `empty` from `unknown`.
 
 Either condition, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
-In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
+In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the user returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
@@ -157,7 +157,7 @@ Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
 immediate) and flushed as one single-line digest prefixed with the sentinel
 marker, carrying pre-read status summaries and a recommended action.
 The single-line format makes the submission unambiguous across harnesses, and
-the marker lets firstmate distinguish it from a real captain message.
+the marker lets firstmate distinguish it from a real user message.
 
 ## Injection hardening
 
@@ -166,7 +166,7 @@ the marker lets firstmate distinguish it from a real captain message.
   harness.
 - **Composer guard on the supervisor pane** - before injecting, the daemon checks `pane_is_busy` (harness busy footer means agent mid-turn) and reads `fm_backend_composer_state` directly.
   Only `empty` permits injection; `pending` protects half-typed or swallowed input, and `unknown` protects unreadable panes and bare dead-shell prompts.
-  Every other result preserves the buffer for retry, so the daemon never merges its digest into the captain's half-typed line or types it into a shell.
+  Every other result preserves the buffer for retry, so the daemon never merges its digest into the user's half-typed line or types it into a shell.
 - The shared composer classifier receives a candidate row only after the active backend performs its own capture and structural row recognition.
   tmux and herdr route their raw styled candidate rows through the shared `fm_composer_strip_ghost` extractor, which removes dim/faint and dark-TRUECOLOR ghost/placeholder text before classification.
   They read the composer shape from a separately ANSI-stripped plain row because a dark TRUECOLOR border can be stripped with ghost content.

@@ -58,7 +58,7 @@ test_ci_invokes_the_owner() {
 
 test_pins_an_explicit_version() {
   [ -n "$REQUIRED" ] || fail "fm-lint.sh --required-version printed nothing"
-  # The captain-agreed pin: adopt ShellCheck 0.11.0's rule set consistently,
+  # The user-agreed pin: adopt ShellCheck 0.11.0's rule set consistently,
   # which is also what drops the upstream-retired, false-positive-prone SC2015.
   assert_contains "$REQUIRED" "0.11.0" "fm-lint.sh must pin ShellCheck 0.11.0"
   pass "fm-lint.sh pins an explicit ShellCheck version ($REQUIRED)"

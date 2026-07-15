@@ -112,7 +112,7 @@ fi
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 # Gate on FM_SUP_SUPERVISABLE, not the raw recorded-task count: a detached task
-# is captain-driven with no firstmate supervision, so a home whose only tasks are
+# is user-driven with no firstmate supervision, so a home whose only tasks are
 # detached demands no live watcher and must be free to end a turn idle.
 fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_SUPERVISABLE" -gt 0 ] || exit 0

@@ -13,16 +13,16 @@ metadata:
 
 Handle each printed line as below, before dispatching work that depends on it.
 The line formats themselves are owned by `bin/fm-bootstrap.sh`'s header; this playbook owns the response.
-The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then install - never install anything the captain has not approved in this session - and no work is dispatched until the tools it needs are present and GitHub auth is good.
+The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then install - never install anything the user has not approved in this session - and no work is dispatched until the tools it needs are present and GitHub auth is good.
 
-- `MISSING: <tool> (install: <command>)` - list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
+- `MISSING: <tool> (install: <command>)` - list the missing tools to the user with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
   For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease`; treat it as an upgrade request.
   For `tasks-axi`, this also covers an installed build that fails the compatibility probe (`docs/configuration.md` "Backlog backend" owns the definition); `config/backlog-backend=manual` only suppresses the `TASKS_AXI: available` capability line, not this missing-tool report.
-- `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
+- `NEEDS_GH_AUTH` - ask the user to run `! gh auth login` (interactive; you cannot run it for them).
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
-- `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
+- `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the user asks.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - a benign one-off skip (offline, no origin, local-only); bootstrap continued, investigate only if it blocks work.
   A skip can also report the bounded fleet-refresh timeout (`FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT`, or a fleet-size-aware default with a 20 second floor); a timeout never blocks startup.
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.
@@ -44,11 +44,11 @@ The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then
   The line reports the evidence it found (uncommitted files, unpushed commits) precisely because that work may be worth saving - on 2026-07-14 exactly such a slot held a dead crew's work, and it was salvaged and shipped.
   Inspect the slot with the printed `git -C <path> status`.
   If it holds real work, dispatch a crewmate to recover it before anything else.
-  Only once the work is landed, or the captain has explicitly said to discard it, may the printed `treehouse destroy ... --include-unlanded --yes` be run - it is irreversible, so it needs the captain's word (`AGENTS.md` section 8: anything destructive reaches the captain).
-  A pool quietly shrinking is not urgent enough to interrupt the captain with on its own; fold it into the next natural reply, in outcome language ("one of the workspaces for <project> still has unsaved work in it from a crash").
+  Only once the work is landed, or the user has explicitly said to discard it, may the printed `treehouse destroy ... --include-unlanded --yes` be run - it is irreversible, so it needs the user's word (`AGENTS.md` section 8: anything destructive reaches the user).
+  A pool quietly shrinking is not urgent enough to interrupt the user with on its own; fold it into the next natural reply, in outcome language ("one of the workspaces for <project> still has unsaved work in it from a crash").
 - `POOL_SLOT: <project>: slot <name> is LEASED ... with no live warmer` / `is ORPHANED ...` - a slot reserved by a process that no longer exists, so the pool cannot hand it out.
   A stale warm lease holds no work: run the printed `treehouse return <path>` to release it.
   An orphaned slot may still hold a dead crew's work: inspect it with the printed command and treat it exactly like the DIRTY case above.
 - `POOL_BUDGET: <project>: <reason>` - preventive workspace warming has STOPPED for that project because it hit its disk budget or treehouse's `max_trees`, and it will stay stopped until something changes; crews will pay the slow cold-install path again (`bin/fm-pool-warm.sh` owns the policy).
-  This is a capacity decision for the captain, so relay it in outcome language with the numbers the line carries ("<project>'s workspaces are using X GB of a Y GB budget, so I've stopped adding more - I can raise the budget or clear out old ones").
+  This is a capacity decision for the user, so relay it in outcome language with the numbers the line carries ("<project>'s workspaces are using X GB of a Y GB budget, so I've stopped adding more - I can raise the budget or clear out old ones").
   Raising the budget means `FM_POOL_DISK_BUDGET_GB` or `config/pool-disk-budget-gb` (`docs/configuration.md`); reclaiming a slot means resolving a POOL_SLOT line above.

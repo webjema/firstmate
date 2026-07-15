@@ -115,7 +115,7 @@ test_check_flags_stub_and_missing_heading() {
   assert_contains "$out" 'DIRECTION_STUB' "check: flags unfilled placeholders"
 
   # A direction missing a required axis is invalid, and that is a hard failure:
-  # a brief built from it would silently omit an axis the captain named.
+  # a brief built from it would silently omit an axis the user named.
   write_direction "$home" acme '# acme - Direction
 
 ## Business vision

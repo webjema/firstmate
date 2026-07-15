@@ -5,7 +5,7 @@
 # producing ONE ordered digest, so a session starts in one or two turns
 # instead of the six-plus separate reads the old docs required: run
 # fm-bootstrap.sh, then separately read data/projects.md, every project's
-# direction file, data/secondmates.md, data/captain.md, data/learnings.md,
+# direction file, data/secondmates.md, data/user.md, data/learnings.md,
 # then run fm-lock.sh, fm-wake-drain.sh,
 # then read data/backlog.md, every state/*.meta, and every state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
@@ -34,7 +34,7 @@
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
 #   4. context digest - data/projects.md, every project's direction file under
-#                       data/directions/, data/secondmates.md, data/captain.md,
+#                       data/directions/, data/secondmates.md, data/user.md,
 #                       data/learnings.md: read-only, always safe, always runs.
 #   5. fleet digest   - data/backlog.md, every state/*.meta, a bounded
 #                       state/*.status tail, state/.afk, and a cheap
@@ -94,7 +94,7 @@ subsection() { printf '\n%s\n%s\n' "$1" "$SUBRULE"; }
 
 # print_file_or_absent <path> <label>: full contents under a labeled
 # subsection, or an explicit ABSENT marker. Absence is semantically
-# meaningful for every one of these files (captain.md absent = template
+# meaningful for every one of these files (user.md absent = template
 # defaults, projects.md absent = rebuild from clones, etc. - AGENTS.md
 # section 3) and must never be confused with an empty-but-present file, so
 # the two cases print differently.
@@ -118,7 +118,7 @@ print_file_or_absent() {
 # context rather than behind a separate read; the word cap enforced by
 # fm-direction.sh is what keeps that affordable. A project with no direction file
 # prints ABSENT under the same convention as the other context files: absence is
-# meaningful - it means firstmate should draft one with the captain.
+# meaningful - it means firstmate should draft one with the user.
 print_directions() {
   local proj name path found=0
   for proj in "$PROJECTS"/*; do
@@ -257,7 +257,7 @@ section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_directions
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-print_file_or_absent "$DATA/captain.md" "data/captain.md"
+print_file_or_absent "$DATA/user.md" "data/user.md"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
 # --- 5. fleet-state digest ---------------------------------------------
@@ -347,7 +347,7 @@ EOF
 fi
 cat <<'EOF'
 The digest above is complete for this session start. Do NOT re-read
-data/projects.md, data/directions/*.md, data/secondmates.md, data/captain.md,
+data/projects.md, data/directions/*.md, data/secondmates.md, data/user.md,
 data/learnings.md, data/backlog.md, or state/*.meta now - they were just
 printed in full.
 Do NOT bulk-read state/*.status now either: their bounded tails were just

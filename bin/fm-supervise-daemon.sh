@@ -24,7 +24,7 @@
 # FM_INJECT_MARK (ASCII unit separator, 0x1f) — a byte a human would never type
 # at the start of a message. Firstmate's contract: a message that starts with
 # the marker is an internal escalation (stay afk); a message without it means
-# the captain is back (exit afk, flush catch-up, resume per-wake responsiveness).
+# the user is back (exit afk, flush catch-up, resume per-wake responsiveness).
 # The marker and the busy-guard solve the same problem — the daemon and the
 # human share one input channel — so they live together under /afk.
 #
@@ -153,7 +153,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # Supervisor-pane discovery (FM_SUPERVISOR_TARGET_DEFAULT,
 # FM_SUPERVISOR_BACKEND_DEFAULT, discover_supervisor_target,
 # discover_supervisor_backend). Shared with the script-owned away launcher
-# (bin/fm-afk-launch.sh) so the captain-pane resolution has exactly one owner.
+# (bin/fm-afk-launch.sh) so the user-pane resolution has exactly one owner.
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_DAEMON_DIR/fm-supervisor-target-lib.sh"
 
@@ -194,7 +194,7 @@ LOG_KEEP_LINES_DEFAULT=2000
 # The in-band sentinel: ASCII unit separator (0x1f). Invisible and untypable on
 # a normal keyboard, so no real user message starts with it. Every daemon
 # injection is prefixed with this byte; firstmate treats a leading marker as an
-# internal escalation (stay afk) and its absence as "captain is back" (exit afk).
+# internal escalation (stay afk) and its absence as "user is back" (exit afk).
 # Portable across harnesses: it travels with the message text, independent of
 # any harness-level typed-vs-injected distinction.
 FM_INJECT_MARK=$'\x1f'
@@ -245,9 +245,9 @@ afk_exit() {  # <state>
 #   afk inactive            -> 1 (nothing to exit)
 #   message has marker      -> 1 (internal escalation; stay afk)
 #   message is /afk command -> 1 (re-entering/extending afk; stay afk)
-#   anything else           -> 0 (captain is back; exit afk)
+#   anything else           -> 0 (user is back; exit afk)
 # Bias toward exit: only the marker and an explicit /afk invocation keep afk
-# alive. A false exit is self-correcting (the captain re-runs /afk).
+# alive. A false exit is self-correcting (the user re-runs /afk).
 should_exit_afk() {  # <state> <message-text>
   local state=$1 msg=$2
   afk_active "$state" || return 1
@@ -260,7 +260,7 @@ should_exit_afk() {  # <state> <message-text>
 
 # message_is_injection: 0 if the given message text starts with the sentinel
 # marker (a daemon escalation), 1 otherwise (a real user message). Firstmate's
-# afk-exit contract uses this: marker present -> stay afk; absent -> captain is
+# afk-exit contract uses this: marker present -> stay afk; absent -> user is
 # back. Bias ambiguous cases toward exit (a false exit is self-correcting).
 message_is_injection() {  # <message-text>
   local msg=$1
@@ -274,7 +274,7 @@ message_is_injection() {  # <message-text>
 # strip_injection_marker: remove the leading sentinel marker (if present) so the
 # digest text is clean for classification/relay. The afk-exit contract keys off
 # the marker's PRESENCE; once detected, the marker byte should not appear in the
-# distilled content firstmate relays to the captain or feeds back to classifiers.
+# distilled content firstmate relays to the user or feeds back to classifiers.
 strip_injection_marker() {  # <message-text>
   local msg=$1
   printf '%s' "${msg#"$FM_INJECT_MARK"}"
@@ -292,7 +292,7 @@ _collapse_newlines() {  # <text>
 # discover_supervisor_target / discover_supervisor_backend are owned by
 # bin/fm-supervisor-target-lib.sh (sourced above). fm_super_main below calls
 # them exactly as before; the away launcher reuses the identical resolution to
-# pass the captain pane in as FM_SUPERVISOR_TARGET.
+# pass the user pane in as FM_SUPERVISOR_TARGET.
 
 # --- classification helpers (PURE: no side effects, testable) ---------------
 # last_status_line, status_is_captain_relevant, window_to_task, and
@@ -606,7 +606,7 @@ escalate_flush() {  # <state>
 # surfaces until the next fleet action (that night, 20 escalations sat buffered
 # for 8.5h). These helpers add a configurable active alert that does not depend
 # on any pane or its status-line: an OS-level macOS notification, or a
-# captain-supplied command (push to a phone, etc.).
+# user-supplied command (push to a phone, etc.).
 # Every channel is best-effort - a missing or failing channel logs and is
 # skipped, never crashing the daemon loop - and the durable marker plus the tmux
 # flash stay exactly as before.
@@ -621,7 +621,7 @@ escalate_flush() {  # <state>
 #   command:<cmd>    run <cmd> via `sh -c`, summary on $1 and on stdin
 # An absent config means auto, i.e. default-ON on macOS: the alarm's whole
 # purpose is to never be silent, so the reachable OS channel fires unless the
-# captain explicitly disables it.
+# user explicitly disables it.
 
 # Print the configured channel directives, one per line. FM_WEDGE_ALARM_CHANNEL
 # wins (a single directive); else each non-empty, non-comment line of
@@ -647,8 +647,8 @@ wedge_alarm_configured_channels() {
 }
 
 # Resolve the platform's default OS-level channel for `auto`. macOS reaches the
-# captain via an osascript Notification Center banner; other platforms have no
-# built-in OS channel (the captain wires a command: directive), so this prints
+# user via an osascript Notification Center banner; other platforms have no
+# built-in OS channel (the user wires a command: directive), so this prints
 # nothing and wedge_alarm_notify logs that the marker is the only signal.
 wedge_alarm_platform_default() {
   case "$(uname)" in
@@ -704,7 +704,7 @@ wedge_alarm_stop_active_notifier() {
 # The single execution seam for every configured notifier channel.
 # FM_WEDGE_ALARM_EXEC, when set, REPLACES the real notifier: the resolved channel
 # name and summary are handed to that command instead of ever invoking osascript
-# or a captain-supplied command. This is the one injection point the test harness forces to a recorder
+# or a user-supplied command. This is the one injection point the test harness forces to a recorder
 # so no test can post a real desktop notification - the library-mode guard at the
 # foot of this file defaults it to "discard" whenever the daemon is SOURCED
 # rather than executed, which is the only way a test reaches these functions. The
@@ -745,8 +745,8 @@ wedge_alarm_via_osascript() {  # <summary>
   return 1
 }
 
-# Run a captain-supplied command with the summary on $1 and on stdin, so an
-# alert can reach a phone/pager (ntfy, Slack, SMS) even when the captain is away
+# Run a user-supplied command with the summary on $1 and on stdin, so an
+# alert can reach a phone/pager (ntfy, Slack, SMS) even when the user is away
 # from the machine entirely. Best-effort: logs and returns 1 on failure.
 wedge_alarm_via_command() {  # <cmd> <summary>
   local cmd=$1 summary=$2 rc
@@ -846,7 +846,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
   fi
   # Backend-independent active alert. Unlike the tmux flash above (skipped on
-  # every non-tmux backend), this can reach the captain even when every pane and
+  # every non-tmux backend), this can reach the user even when every pane and
   # its backend status-line is unreadable - the gap the 2026-07-10 overnight
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.

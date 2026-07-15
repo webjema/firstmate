@@ -22,7 +22,7 @@
 # IT NEVER DISCARDS ANYTHING. A dirty slot may hold a dead crew's unlanded work -
 # today's did, and it was salvaged and shipped. So this DETECTS and REPORTS, with
 # the evidence (uncommitted file count, unpushed commits) and the exact commands.
-# Reclaiming is the captain's decision, never a sweep. This is the same
+# Reclaiming is the user's decision, never a sweep. This is the same
 # fail-closed posture bin/fm-teardown.sh takes toward unlanded work, for the same
 # reason: the cost of a wrong "discard" is unrecoverable, the cost of a wrong
 # "report" is one line of output.
@@ -47,7 +47,7 @@ TREEHOUSE_ROOT="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
 # shellcheck source=bin/fm-pool-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-pool-lib.sh"
 
-# Evidence for the captain's reclaim decision. Deliberately READ-ONLY, and
+# Evidence for the user's reclaim decision. Deliberately READ-ONLY, and
 # deliberately honest when it cannot tell: an unreadable worktree reports no
 # evidence rather than a reassuring "clean".
 slot_evidence() {  # <slot-path>
@@ -116,7 +116,7 @@ report_project() {  # <project-real-path>
 
   # A blocked warm (disk budget, max_trees) is a capacity fact raised by
   # fm-pool-warm.sh and surfaced HERE, at session start - never as a mid-flight
-  # wake. The captain decides; firstmate does not silently fill the disk.
+  # wake. The user decides; firstmate does not silently fill the disk.
   #
   # Self-healing: the warmer only clears its own sentinel while it is still warming
   # that project, so a pool that has since freed up - the task finished, a slot was
