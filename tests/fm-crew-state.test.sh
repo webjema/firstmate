@@ -285,6 +285,33 @@ test_dead_window_ignores_stale_status_log() {
   pass "a dead endpoint ignores the stale status log"
 }
 
+# review-ready is the ONE terminal verb that means "stopped ON PURPOSE, branch pushed,
+# parked and waiting on firstmate's review". Its window genuinely can vanish while the
+# crew is by-design alive-but-parked on the remote, so a missing window is EXPECTED for
+# it. It must therefore be read from the log even when the endpoint is gone - unlike
+# every other verb, which stays unknown for a vanished crew (test above). Reporting a
+# parked review-ready crew as unknown made AGENTS.md section 7 route it to
+# stuck-crewmate-recovery, interrupting the very crew waiting to be reviewed.
+test_dead_window_still_reads_review_ready() {
+  reset_fakes
+  local d; d=$(new_case dead-window-review-ready)
+  make_repo_on_branch "$d/wt" fm/feat-rr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rr.meta" "window=fm:fm-feat-rr" "worktree=$d/wt" "kind=ship"
+  printf 'review-ready: branch fm/feat-rr pushed, no PR\n' > "$d/state/feat-rr.status"
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-rr)
+  assert_contains "$out" "state: review-ready" "a parked review-ready crew whose window is gone must read review-ready"
+  assert_contains "$out" "source: status-log" "the review-ready state comes from the log, the endpoint being gone"
+  assert_not_contains "$out" "state: unknown" "a gone review-ready crew must never read unknown (bogus wedge recovery)"
+  # The guard does not widen: swap in a non-review-ready terminal verb, same gone
+  # window, and it must fall back to unknown - only review-ready relaxes the guard.
+  printf 'blocked: waiting on a token\n' > "$d/state/feat-rr.status"
+  out=$(run_crew_state "$d" feat-rr)
+  assert_contains "$out" "state: unknown" "a gone crew whose last line is blocked (not review-ready) stays unknown"
+  pass "a gone endpoint reads review-ready from the log, but no other verb (dead-crew guard preserved)"
+}
+
 test_no_backend_target_recorded() {
   reset_fakes
   local d; d=$(new_case no-target)
@@ -387,6 +414,7 @@ test_idle_pane_custom_paused_verb
 test_idle_secondmate_resolved_event_not_state
 test_secondmate_skips_the_busy_check
 test_dead_window_ignores_stale_status_log
+test_dead_window_still_reads_review_ready
 test_no_backend_target_recorded
 test_torn_down_worktree
 test_missing_meta
