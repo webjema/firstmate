@@ -716,6 +716,30 @@ add_sm_worktree() {
   } > "$w/home/state/$id.meta"
 }
 
+# Arm a genuinely-healthy watcher lock in <state> for <fm-home>, backed by a live
+# sleeper, and echo the sleeper pid so the caller can kill it. fm-config-push.sh
+# runs fm-guard.sh as an advisory check, and fm-guard now decides liveness by
+# home-lock OWNERSHIP (an orphaned beacon no longer masks a missing watcher), so a
+# fixture that represents a healthy primary must record a real lock, not just a
+# beacon. watcher-path is $ROOT/bin/fm-watch.sh - the path fm-guard computes.
+arm_healthy_watcher_lock() {  # <state-dir> <fm-home> -> echoes sleeper pid
+  local state=$1 home=$2 sleeper watch_path
+  # Redirect the sleeper's stdout/stderr: this function's pid is captured via
+  # $(...), and a background job that inherits the command-substitution pipe would
+  # block the substitution until the sleeper exits (60s), killing the very liveness
+  # the lock is supposed to represent.
+  sleep 60 >/dev/null 2>&1 &
+  sleeper=$!
+  watch_path="$(cd "$ROOT/bin" && pwd)/fm-watch.sh"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$sleeper" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$watch_path" > "$state/.watch.lock/watcher-path"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$sleeper" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  printf '%s\n' "$sleeper"
+}
+
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
@@ -889,7 +913,7 @@ test_bootstrap_sweep_surfaces_config_propagation_failure() {
 }
 
 test_config_push_propagates_reports_without_ff_or_nudge() {
-  local w c1 sm_real old_head out err status out2 tmp
+  local w c1 sm_real old_head out err status out2 tmp watcher_pid
   w=$(new_world config-push-basic)
   c1=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$c1"
@@ -898,6 +922,9 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   tmp="$w/home/state/sm.meta.tmp"
   grep -v '^home=' "$w/home/state/sm.meta" > "$tmp"
   mv "$tmp" "$w/home/state/sm.meta"
+  # A healthy primary with in-flight work has a live watcher; record one so
+  # fm-config-push's advisory fm-guard stays silent (this test asserts no stderr).
+  watcher_pid=$(arm_healthy_watcher_lock "$w/home/state" "$w/home")
 
   printf 'v2\n' > "$w/main/AGENTS.md"
   git -C "$w/main" add AGENTS.md
@@ -935,6 +962,8 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "idempotent config push did not report crew-harness as unchanged"
   assert_contains "$out2" "backlog-backend: unchanged" \
     "idempotent config push did not report backlog-backend as unchanged"
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
   pass "B12 config-push propagates via shared live discovery, reports items, and does not fast-forward or nudge"
 }
 

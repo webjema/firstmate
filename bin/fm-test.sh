@@ -78,6 +78,7 @@ cd "$ROOT" || exit 1
 # trains everyone to re-run until green, which is exactly how a real failure gets waved through.
 #
 #   fm-watcher-lock.test.sh - waits for a live watcher to self-evict after a lock takeover
+#   fm-supervision-liveness.test.sh - backgrounds a real watcher+daemon and asserts a foreign-home run does not evict the primary
 #   fm-watch-checkpoint.test.sh - waits for the watcher child to release .watch.lock
 #   fm-watch-triage.test.sh - asserts wake classification within bounded poll windows
 #   fm-silent-holes.test.sh - waits on a live watcher for wakes that must NOT be absorbed
@@ -125,6 +126,7 @@ cd "$ROOT" || exit 1
 # convenient.
 FM_TEST_SERIAL_ONLY=${FM_TEST_SERIAL_ONLY:-"\
 fm-watcher-lock.test.sh \
+fm-supervision-liveness.test.sh \
 fm-watch-checkpoint.test.sh \
 fm-watch-triage.test.sh \
 fm-silent-holes.test.sh \

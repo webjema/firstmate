@@ -59,15 +59,34 @@ if [ -n "$tangle_branch" ]; then
   } >&2
 fi
 
-# Compute in-flight count and watcher-beacon freshness via the shared
-# grace-based predicate (bin/fm-supervision-lib.sh). Only act with tasks in
-# flight; count them so the banner can say how much is riding on an absent
-# watcher.
+# Compute in-flight count and the human-readable beacon age via the shared
+# descriptive status (bin/fm-supervision-lib.sh). Only act with tasks in flight;
+# count them so the banner can say how much is riding on an absent watcher.
 fm_supervision_status "$STATE" "$GRACE"
 in_flight=$FM_SUP_IN_FLIGHT
-watcher_fresh=$FM_SUP_WATCHER_FRESH
 beacon_desc=$FM_SUP_BEACON_DESC
 [ "$in_flight" -eq 0 ] && exit 0
+
+# Authoritative liveness: home-lock OWNERSHIP (bin/fm-wake-lib.sh's
+# fm_watcher_healthy), the SAME predicate bin/fm-turnend-guard.sh and the
+# agent-facing bin/fm-supervision-live.sh use, so no two supervision surfaces can
+# disagree. A fresh beacon alone is NOT proof of a live watcher: an orphaned
+# watcher keeps state/.last-watcher-beat warm while holding no lock, and reading
+# that as "healthy" was the confident-but-wrong signal this guard used to trust.
+WATCH="$SCRIPT_DIR/fm-watch.sh"
+if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+  watcher_fresh=true
+elif [ -e "$STATE/.watch.arming" ] \
+  && [ "$(fm_path_age "$STATE/.watch.arming")" -lt "${FM_ARMING_GRACE:-30}" ]; then
+  # A re-arm is actively in flight (the normal watcher handoff between a watcher
+  # exiting to deliver a wake and its replacement claiming the lock). bin/fm-watch-arm.sh
+  # holds state/.watch.arming for the arm's whole life; tolerate a FRESH marker so a
+  # handoff does not read as a supervision lapse - the SAME tolerance
+  # bin/fm-turnend-guard.sh applies, so the two guards stay consistent.
+  watcher_fresh=true
+else
+  watcher_fresh=false
+fi
 
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
 
@@ -87,7 +106,7 @@ if [ "$watcher_fresh" = false ]; then
   {
     printf '●%s\n' "$rule"
     printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-    printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+    printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
     if [ "$READ_ONLY" -eq 1 ]; then
       printf '●  This read-only session should report the lapse, not repair it.\n'
     else

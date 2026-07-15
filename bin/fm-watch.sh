@@ -566,6 +566,19 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
+# Daemon-leak containment: refuse to take a home lock that belongs to a DIFFERENT
+# firstmate checkout than the one this watcher was launched from. Without this, a
+# watcher started from a crew worktree whose $FM_HOME resolves to the real home
+# (no FM_STATE_OVERRIDE) would seize the real home's .watch.lock and evict the
+# primary's watcher - a crewmate merely running the test suite could silently
+# switch off supervision of the whole fleet. See fm-wake-lib.sh's
+# fm_home_lock_is_foreign for the exact predicate; FM_STATE_OVERRIDE (every test)
+# and a watcher run from its own home both pass it.
+if fm_home_lock_is_foreign "$WATCH_PATH" "$FM_HOME" "${FM_STATE_OVERRIDE:-}"; then
+  echo "watcher: refusing foreign home lock - FM_HOME=$FM_HOME has its own checkout ($FM_HOME/bin/fm-watch.sh), not this watcher ($WATCH_PATH). Run the watcher from that home, or set FM_STATE_OVERRIDE for an isolated run." >&2
+  exit 3
+fi
+
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then

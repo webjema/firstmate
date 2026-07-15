@@ -1204,7 +1204,10 @@ trim_log() {
 # ============================================================================
 
 fm_super_main() {
-  local STATE
+  local STATE ORIG_STATE_OVERRIDE
+  # Snapshot the override as it was INVOKED, before the source below sets it, so
+  # the foreign-home containment check reads the genuine invocation value.
+  ORIG_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-}"
   STATE="$(_state_root)"
   mkdir -p "$STATE"
 
@@ -1212,6 +1215,18 @@ fm_super_main() {
   # Export FM_STATE_OVERRIDE so the lib resolves the same state dir.
   # shellcheck source=bin/fm-wake-lib.sh
   FM_STATE_OVERRIDE="$STATE" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
+
+  # Daemon-leak containment: refuse to take the daemon lock (and, through the
+  # watcher child it launches, the watch lock) in a home that belongs to a
+  # DIFFERENT firstmate checkout than this daemon's own. This is the same hazard
+  # class as the watcher's guard: a daemon started from a crew worktree with
+  # $FM_HOME pointing at the real home would take over the real home's
+  # supervision. fm_home_lock_is_foreign exempts FM_STATE_OVERRIDE (tests) and a
+  # daemon run from its own home.
+  if fm_home_lock_is_foreign "$FM_DAEMON_DIR/fm-watch.sh" "$FM_HOME" "$ORIG_STATE_OVERRIDE"; then
+    echo "error: fm-supervise-daemon refusing foreign home - FM_HOME=$FM_HOME has its own checkout, not this daemon's ($FM_DAEMON_DIR/..). Run the daemon from that home, or set FM_STATE_OVERRIDE for an isolated run." >&2
+    exit 3
+  fi
 
   local WATCH="$FM_DAEMON_DIR/fm-watch.sh"
   local LOG="$STATE/.supervise-daemon.log"
