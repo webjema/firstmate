@@ -2,8 +2,11 @@
 # Behavior tests for the primary turn-end supervision guard (docs/turnend-guard.md).
 #
 # Two layers:
-#   PREDICATE  - bin/fm-supervision-lib.sh, the shared beacon/status computation
-#                used by fm-guard.sh and by the hook's banner details.
+#   PREDICATE  - bin/fm-supervision-lib.sh, the DESCRIPTIVE status (in-flight
+#                count, beacon age, queue state) used for the hook's banner
+#                details. Beacon freshness here is descriptive text only, NOT a
+#                liveness verdict - the verdict is fm_watcher_healthy (home-lock
+#                ownership), exercised by the HOOK layer below.
 #   HOOK       - bin/fm-turnend-guard.sh, the shared primary hook predicate that
 #                scopes in-flight work to the PRIMARY checkout only and requires
 #                a live, identity-matched watcher lock plus a fresh beacon.
@@ -26,22 +29,20 @@ REQUIRED_REASON='resume supervision with bin/fm-watch-arm.sh as its own Claude C
 test_predicate_healthy_no_inflight() {
   local state="$TMP_ROOT/pred-empty/state"
   mkdir -p "$state"
-  if fm_supervision_unhealthy "$state" 300; then
-    fail "predicate reported unhealthy with zero in-flight tasks"
-  fi
+  fm_supervision_status "$state" 300
   [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "expected zero in-flight, got $FM_SUP_IN_FLIGHT"
-  pass "fm_supervision_unhealthy: false with no state/*.meta at all"
+  pass "fm_supervision_status: zero in-flight with no state/*.meta at all"
 }
 
 test_predicate_unhealthy_no_beacon() {
   local state="$TMP_ROOT/pred-nobeat/state"
   mkdir -p "$state"
   : > "$state/task1.meta"
-  fm_supervision_unhealthy "$state" 300 || fail "predicate did not fire: in-flight task, beacon never seen"
+  fm_supervision_status "$state" 300
   [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "expected 1 in-flight, got $FM_SUP_IN_FLIGHT"
   [ "$FM_SUP_WATCHER_FRESH" = false ] || fail "beacon absent must not read as fresh"
   [ "$FM_SUP_BEACON_DESC" = never ] || fail "beacon description should be 'never', got $FM_SUP_BEACON_DESC"
-  pass "fm_supervision_unhealthy: true with in-flight task and no beacon ever"
+  pass "fm_supervision_status: in-flight task and no beacon ever reads as not-fresh, never"
 }
 
 test_predicate_unhealthy_stale_beacon() {
@@ -49,9 +50,10 @@ test_predicate_unhealthy_stale_beacon() {
   mkdir -p "$state"
   : > "$state/task1.meta"
   touch -t 202001010000 "$state/.last-watcher-beat"
-  fm_supervision_unhealthy "$state" 300 || fail "predicate did not fire: in-flight task, beacon far outside grace"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "expected 1 in-flight, got $FM_SUP_IN_FLIGHT"
   [ "$FM_SUP_WATCHER_FRESH" = false ] || fail "an ancient beacon must not read as fresh"
-  pass "fm_supervision_unhealthy: true with in-flight task and a beacon far outside the grace window"
+  pass "fm_supervision_status: an ancient beacon reads as not-fresh"
 }
 
 test_predicate_healthy_fresh_beacon() {
@@ -59,11 +61,9 @@ test_predicate_healthy_fresh_beacon() {
   mkdir -p "$state"
   : > "$state/task1.meta"
   touch "$state/.last-watcher-beat"
-  if fm_supervision_unhealthy "$state" 300; then
-    fail "predicate fired despite a fresh beacon"
-  fi
+  fm_supervision_status "$state" 300
   [ "$FM_SUP_WATCHER_FRESH" = true ] || fail "a beacon touched just now must read as fresh"
-  pass "fm_supervision_unhealthy: false with in-flight task and a fresh beacon"
+  pass "fm_supervision_status: a beacon touched just now reads as fresh (descriptive age band only)"
 }
 
 test_predicate_queue_pending_flag() {

@@ -291,7 +291,7 @@ Every wake carries its own evidence after the `|`: the task, the watcher's absor
 
 When a wake reports a merged PR for a project this home also has cloned, run `bin/fm-fleet-sync.sh <project>` so the clone never sits stale.
 
-**Guards.** `bin/fm-guard.sh` prints a bordered banner when tasks are in flight but wakes are pending or the watcher's beacon is stale, and a second banner when a crewmate has branched in the primary checkout instead of its own worktree (the worktree tangle). The guarded operation still runs; the banner is a warning. If it says wakes are pending, drain them before anything else. `bin/fm-turnend-guard.sh` is the structural backstop that blocks a blind turn end; `docs/turnend-guard.md` owns its mechanics.
+**Guards.** `bin/fm-guard.sh` prints a bordered banner when tasks are in flight but wakes are pending or no live watcher holds this home's lock, and a second banner when a crewmate has branched in the primary checkout instead of its own worktree (the worktree tangle). The guarded operation still runs; the banner is a warning. If it says wakes are pending, drain them before anything else. `bin/fm-turnend-guard.sh` is the structural backstop that blocks a blind turn end; `docs/turnend-guard.md` owns its mechanics. To check supervision liveness directly, run `bin/fm-supervision-live.sh` - the one authoritative, home-lock-ownership predicate the guards share; never trust a process grep or a beacon-freshness read, which lie when a watcher is orphaned.
 
 Token discipline: prefer `bin/fm-crew-state.sh <id>` for state, default peeks to 40 lines, never stream a pane repeatedly through yourself, and batch what you tell the captain.
 The context-% in a peek is not actionable crew health; ignore it.

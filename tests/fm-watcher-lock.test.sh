@@ -148,17 +148,42 @@ test_guard_warnings() {
   queue_line=$(grep -n 'queued wakes pending - drain them' "$err" | head -1 | cut -d: -f1)
   [ "$banner_line" -lt "$queue_line" ] || fail "queued-wakes warning printed before the no-watcher banner"
 
-  # (2) fresh watcher, empty queue -> silence.
+  # (2) a genuinely live watcher LOCK (not just a fresh beacon), empty queue ->
+  # silence. The guard's liveness verdict is home-lock OWNERSHIP now, so a fresh
+  # beacon alone must NOT read as healthy - this case proves the honest predicate
+  # stays silent only for a real lock holder.
+  local sleeper watch_path
   dir=$(make_case guard-fresh)
   state="$dir/state"
   err="$dir/guard.err"
   printf 'project=x\n' > "$state/task.meta"
+  sleep 60 &
+  sleeper=$!
+  watch_path="$(cd "$ROOT/bin" && pwd)/fm-watch.sh"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$sleeper" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$watch_path" > "$state/.watch.lock/watcher-path"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$sleeper" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
-  # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
+  # Non-git FM_ROOT keeps the worktree-tangle check inert so "live watcher ->
   # total silence" stays a pure assertion about watcher state.
-  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  [ ! -s "$err" ] || fail "guard warned with a fresh watcher and no queued wakes: $(cat "$err")"
-  pass "guard banner leads when down with pending wakes (re-arm-after-drain) and stays silent when fresh"
+  FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+  [ ! -s "$err" ] || fail "guard warned with a live watcher lock and no queued wakes: $(cat "$err")"
+
+  # (3) a FRESH BEACON with NO live lock (an orphaned watcher that kept the beacon
+  # warm while holding no lock) must read as DOWN, not healthy - the exact
+  # confident-but-wrong signal this change kills.
+  dir=$(make_case guard-orphan-beacon)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+  FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard trusted a fresh beacon with no live lock as healthy"
+  pass "guard banner leads when down with pending wakes, silent for a live lock, and DOWN for a fresh-beacon orphan"
 }
 
 test_lock_single_winner_under_concurrency() {

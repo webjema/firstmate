@@ -39,7 +39,30 @@ A re-arm actively in flight is not a blind turn, and the guard tolerates it expl
 `bin/fm-watch-arm.sh` holds `state/.watch.arming` for as long as an arm process is alive - the startup handoff between a watcher exiting to deliver a wake and its replacement claiming the lock - and clears it on every exit path via an `EXIT` trap.
 When the health check fails but that marker is present and fresh within `FM_ARMING_GRACE` (default 30 seconds), the guard exits 0 instead of blocking, so a normal watcher handoff does not render as a turn-end error.
 The bound means a `SIGKILL`-orphaned marker cannot mask a genuinely dead watcher beyond that window, and a stale or absent marker still blocks, so a turn that ends with no re-arm in flight - the real blind-turn case - still fires.
-This tolerance lives only in the turn-end guard: `bin/fm-guard.sh`'s pull-based banner keys on beacon age alone, so it is already silent during a handoff, and `fm_watcher_healthy` itself stays a pure liveness predicate that the arm wrapper relies on to confirm its own watcher.
+`fm_watcher_healthy` itself stays a pure liveness predicate that the arm wrapper relies on to confirm its own watcher; the `state/.watch.arming` tolerance is layered on top of it by the guards, never inside it.
+
+## One authoritative liveness answer
+
+"Is a live watcher supervising THIS home?" has exactly one answer: `fm_watcher_healthy` (home-lock ownership), never beacon freshness.
+An orphaned watcher keeps `state/.last-watcher-beat` warm while holding no lock, so a beacon read lies; ownership of the home lock is the truth.
+Three surfaces share that one predicate so they cannot disagree:
+
+- `bin/fm-turnend-guard.sh` - the blocking backstop above.
+- `bin/fm-guard.sh` - the pull-based advisory banner.
+  It decides its watcher-down banner with `fm_watcher_healthy` (not beacon age) and applies the SAME `state/.watch.arming` tolerance as the turn-end guard, so a normal handoff is silent on both while a genuine lapse surfaces on both.
+  `bin/fm-supervision-lib.sh` supplies only the descriptive in-flight count and beacon-age text for its banner, never a liveness verdict.
+- `bin/fm-supervision-live.sh` - the agent-callable check.
+  Firstmate runs it instead of improvising (a process grep, a beacon-freshness read, or a payload-less turn-end-guard invocation all gave confident WRONG answers).
+  It needs no hook payload: invoked directly it prints `watcher: live pid=<N> ...` (exit 0) or `watcher: DOWN ...` (exit 1).
+  It reports what the home is supervising and how, so it extends cleanly to future supervision classes (e.g. a custody-only detached task with no per-wake watcher).
+
+## Daemon-leak containment
+
+A watcher or daemon resolves its state dir as `${FM_STATE_OVERRIDE:-$FM_HOME/state}`.
+Without a guard, a watcher/daemon launched from a crew worktree whose `$FM_HOME` resolves to the real home (no `FM_STATE_OVERRIDE`) would seize the real home's `.watch.lock` and evict the primary's watcher through the singleton self-eviction path - a crewmate merely running the test suite could silently switch off supervision of the whole fleet.
+`bin/fm-watch.sh` and `bin/fm-supervise-daemon.sh` therefore refuse (exit 3) a home lock whose `$FM_HOME` is a DIFFERENT firstmate checkout than the one they were launched from, decided by `fm_home_lock_is_foreign` in `bin/fm-wake-lib.sh`: with no `FM_STATE_OVERRIDE`, `$FM_HOME/bin/fm-watch.sh` must be this process's own script (canonical path).
+An explicit `FM_STATE_OVERRIDE` (every test) and a watcher/daemon run from its own home both pass, so isolated runs and the real primary are unaffected.
+`tests/fm-supervision-liveness.test.sh` reproduces the eviction vector and proves a live primary watcher survives a watcher+daemon run launched from a foreign checkout.
 
 ## Harness Integrations
 

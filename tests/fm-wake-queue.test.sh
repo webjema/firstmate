@@ -213,20 +213,37 @@ test_drain_dedupes_obvious_duplicates() {
 # when work is in flight with no live watcher, and stay silent right after a
 # normal fire (a fresh beacon within grace), so it never false-alarms every wake.
 test_drain_asserts_watcher_liveness() {
-  local dir state err
+  local dir state err sleeper watch_path
   dir=$(make_case drain-liveness)
   state="$dir/state"
   err="$dir/drain.err"
   printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || fail "drain failed while asserting liveness"
   grep -F 'WATCHER DOWN' "$err" >/dev/null || fail "drain did not surface the watcher-down banner with work in flight and no live watcher"
+  # A fresh beacon over NO live lock (an orphaned watcher) must STILL read as down:
+  # ownership of the home lock, not beacon freshness, is the liveness truth.
   : > "$err"
   touch "$state/.last-watcher-beat"
-  FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" || fail "drain failed with a fresh beacon"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" || fail "drain failed with a fresh beacon"
+  grep -F 'WATCHER DOWN' "$err" >/dev/null || fail "drain trusted a fresh beacon with no live lock as a live watcher"
+  # A genuinely live, identity-matched watcher lock with a fresh beacon -> silence.
+  : > "$err"
+  sleep 60 &
+  sleeper=$!
+  watch_path="$(cd "$ROOT/bin" && pwd)/fm-watch.sh"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$sleeper" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$watch_path" > "$state/.watch.lock/watcher-path"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$sleeper" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" || fail "drain failed with a live watcher lock"
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
   if grep -F 'WATCHER DOWN' "$err" >/dev/null; then
-    fail "drain false-alarmed right after a normal fire (fresh beacon within grace)"
+    fail "drain false-alarmed with a live, identity-matched watcher lock and fresh beacon"
   fi
-  pass "drain asserts watcher liveness: warns on a lapse, stays silent right after a fire"
+  pass "drain asserts watcher liveness: warns on a lapse, down for a fresh-beacon orphan, silent for a live lock"
 }
 
 test_concurrent_append_and_drain

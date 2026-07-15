@@ -79,6 +79,30 @@ fm_watcher_healthy() {
   return 0
 }
 
+# fm_home_lock_is_foreign <my-watch-path> <fm-home> <state-override>
+# The daemon-leak containment predicate. Returns 0 (TRUE: this process must
+# REFUSE the home lock) when, with NO explicit state override in effect, $FM_HOME
+# is a DIFFERENT firstmate checkout than the one this process was launched from -
+# i.e. $FM_HOME carries its OWN bin/fm-watch.sh that is not this process's own
+# script. That is the exact shape of a watcher/daemon started from a crew worktree
+# whose $FM_HOME resolves to the real home: it would seize the real home's
+# .watch.lock and evict the primary's watcher through the singleton self-eviction
+# path. A watcher/daemon whose $FM_HOME is its OWN checkout (primary, secondmate),
+# a plain state-only home with no checkout (an isolated test home), or an explicit
+# FM_STATE_OVERRIDE (state deliberately redirected, as every test does) is NOT
+# foreign. Ownership is decided on the canonical (physical) path, so a symlinked
+# checkout still matches itself.
+fm_home_lock_is_foreign() {
+  local mine=$1 home=$2 override=${3:-} home_watch rp_home rp_mine
+  [ -z "$override" ] || return 1
+  [ -n "$home" ] || return 1
+  home_watch="$home/bin/fm-watch.sh"
+  [ -e "$home_watch" ] || return 1
+  rp_home=$(fm_lock_abs_path "$home_watch") || return 1
+  rp_mine=$(fm_lock_abs_path "$mine") || return 1
+  [ "$rp_home" != "$rp_mine" ]
+}
+
 fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \
