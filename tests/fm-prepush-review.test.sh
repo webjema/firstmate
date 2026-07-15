@@ -197,24 +197,55 @@ test_review_ready_opens_a_durable_decision_until_the_pr_exists() {
   pass "review-ready opens a durable decision that only the crew's own done: PR closes"
 }
 
+# A review-ready crew's terminal genuinely can vanish while the crew is by-design
+# parked on the remote waiting for firstmate (it did, to PR #5's own crew). When the
+# window is GONE, fm-crew-state.sh must still read review-ready from the log - that is
+# the one terminal verb meaning "stopped ON PURPOSE, waiting on firstmate", so a
+# missing window is EXPECTED for it, not a dead-crew fault. Reporting `unknown` instead
+# is what AGENTS.md section 7 reads as a dead or wedged crew and routes to
+# stuck-crewmate-recovery, interrupting or relaunching the very crew patiently waiting.
+#
+# This is exercised HERMETICALLY with a fake `tmux` that always reports the window
+# missing (the same fake-driver pattern as tests/fm-crew-state.test.sh). Probing the
+# REAL tmux is what made this environment-dependent before: `tmux display-message -t`
+# loose-resolves to exit 0 for ANY target when a client is attached (a crew's own pane,
+# 8-core dev box), so the target-gone branch was never taken there, yet on CI with no
+# attached client the same probe fails and the branch IS taken. The fake forces the
+# gone branch on every box, so this test proves the fix rather than the environment.
+crew_state_with_missing_window() {  # <case-dir> <id> -> stdout of fm-crew-state.sh
+  local dir=$1 id=$2 fb="$1/fakebin"
+  mkdir -p "$fb"
+  # A `tmux` that always fails: the window is unconditionally gone.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fb/tmux"
+  chmod +x "$fb/tmux"
+  PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/state" \
+    "$ROOT/bin/fm-crew-state.sh" "$id" 2>&1 || true
+}
+
 test_crew_state_knows_review_ready_and_does_not_call_it_unknown() {
   local dir out
   dir="$TMP_ROOT/crew-state"
   mkdir -p "$dir/state"
-  printf 'review-ready: branch fm/task-x1 pushed, no PR\n' > "$dir/state/task-x1.status"
   fm_write_meta "$dir/state/task-x1.meta" \
     "window=fm-task-x1" "worktree=$dir" "project=$dir"
 
-  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/state" \
-    "$ROOT/bin/fm-crew-state.sh" task-x1 2>&1 || true)
-
-  # `unknown` is what AGENTS.md section 7 reads as a dead or wedged crew, and it routes
-  # there to stuck-crewmate-recovery - interrupting or relaunching the very crew that is
-  # patiently waiting to be reviewed.
+  # A parked review-ready crew whose window is gone still reads review-ready.
+  printf 'review-ready: branch fm/task-x1 pushed, no PR\n' > "$dir/state/task-x1.status"
+  out=$(crew_state_with_missing_window "$dir" task-x1)
   assert_contains "$out" 'review-ready' "fm-crew-state.sh does not know the review-ready verb"
   assert_not_contains "$out" 'state: unknown' \
     "a review-ready crew reported as unknown would be treated as wedged and interrupted"
-  pass "fm-crew-state.sh reports review-ready instead of unknown (no bogus wedge recovery)"
+
+  # ...but the dead-crew guard must NOT widen: a genuinely gone crew whose last line is
+  # any OTHER verb stays unknown, so a stale log is never trusted for a vanished crew.
+  printf 'working: implementing\n' > "$dir/state/task-x1.status"
+  out=$(crew_state_with_missing_window "$dir" task-x1)
+  assert_contains "$out" 'state: unknown' \
+    "a gone crew whose last line is not review-ready must stay unknown (dead-crew guard)"
+  assert_not_contains "$out" 'review-ready' \
+    "review-ready must be the ONLY verb read from the log when the window is gone"
+
+  pass "fm-crew-state.sh reports review-ready (not unknown) for a parked crew whose window is gone, but no other verb"
 }
 
 test_review_ready_is_captain_relevant

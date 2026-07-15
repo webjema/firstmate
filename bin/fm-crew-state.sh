@@ -21,7 +21,10 @@
 #   2. Missing meta or torn-down worktree: report unknown · none.
 #   3. No recorded backend target, or a target that is gone: report unknown · none
 #      rather than trusting a possibly-stale status log for a crew that is no
-#      longer there.
+#      longer there - with ONE exception: a last status line of `review-ready`
+#      means the crew stopped ON PURPOSE and is parked waiting for firstmate, so a
+#      missing window is EXPECTED, and it is read as review-ready from the log. No
+#      other terminal verb relaxes this dead-crew guard.
 #   4. A busy endpoint signature is POSITIVE evidence the crew is working, and
 #      outranks the log: a crew mid-turn or mid-tool-call reports working even
 #      when its last status line is an old needs-decision/blocked it has since
@@ -167,10 +170,27 @@ crew_pane_is_busy() {  # <target>
 }
 
 # --- endpoint first, then the log ------------------------------------------
-# A dead/unreadable target means the crew is gone: report unknown rather than
-# trusting a possibly-stale status log as the current state.
-[ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
-pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
+# A dead/unreadable backend target normally means the crew is GONE, so report
+# unknown rather than trust a possibly-stale status log as the current state.
+#
+# The ONE exception is review-ready. It is the single verb that means "stopped ON
+# PURPOSE - branch pushed, parked, waiting on firstmate's review", so a missing
+# window is EXPECTED for such a crew, not a dead-crew fault. A review-ready crew's
+# terminal genuinely can vanish (its harness exited, the pane was torn down) while
+# the crew is by-design alive-but-parked on the remote. Reading review-ready from
+# the log when the target is gone is what keeps that finished-and-waiting crew from
+# being misread as `unknown` and routed to stuck-crewmate-recovery (AGENTS.md
+# section 7), which would interrupt or relaunch the very crew that is patiently
+# waiting. Every OTHER terminal verb still obeys the dead-crew guard: a stale
+# working/needs-decision/blocked/paused/done/failed from a vanished crew stays
+# unknown, because only review-ready means "deliberately parked on firstmate".
+if [ -z "$BACKEND_TARGET" ] || ! pane_readable "$BACKEND_TARGET"; then
+  if [ "$(map_log_state "$LOG_LINE")" = review-ready ]; then
+    emit review-ready status-log "$(status_line_note "$LOG_LINE")"
+  fi
+  [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
+  emit unknown none "backend target gone: $BACKEND_TARGET"
+fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
