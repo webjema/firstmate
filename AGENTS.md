@@ -238,6 +238,9 @@ A ship crewmate pushes its branch and reports `review-ready:` (mode `PR`) or `do
 5. Tell the user: the PR's full `https://...` URL, a one-paragraph summary, and your direction verdict. If the change drifts, say so plainly.
 6. On the user's "merge it", run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>`, never `gh pr merge` directly. For `local-only`, run `bin/fm-merge-local.sh <id>` after approval. Never merge a red PR.
 
+Throughout the lifecycle, GitHub reads (`pr list/view`, `run list/view`, `issue list`, `search`) go through `gh-axi` - same `gh` auth, far smaller output - while mutations and anything a script depends on stay on plain `gh`.
+On any `gh-axi` error, fall back to plain `gh` instead of debugging the wrapper.
+
 ### Teardown
 
 Run `bin/fm-teardown.sh <id>` **twice**: at PR-open to free the workspace, and again after the merge to close the task out.
@@ -256,7 +259,7 @@ The header owns the idle gate and the reclaim contract.
 ### Scout tasks
 
 Intake, spawn (`--scout`), and supervise as above, then diverge: there is no review or PR stage.
-When the crewmate reports done, read `data/<id>/report.md`, relay the findings to the user (plain chat for a focused answer, `lavish-axi` when the report has structure worth a visual), tear down immediately, and record it in Done with the report path.
+When the crewmate reports done, read `data/<id>/report.md`, relay the findings to the user (plain chat or `lavish-axi`, per section 8's etiquette), tear down immediately, and record it in Done with the report path.
 
 **Promotion.** When a scout's findings reveal shippable work and the user wants it shipped, promote in place with `bin/fm-promote.sh <id>` rather than respawning, then send the crewmate its ship instructions with `bin/fm-send.sh`.
 It keeps its worktree, context, and repro - but the ship branch must start from a clean base with only intended changes, and the repro becomes the regression test.

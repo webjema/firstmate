@@ -76,17 +76,17 @@ case "${1:-}" in
   *) exit 0 ;;
 esac
 SH
+  # gh-axi is a tripwire (bin/ scripts must never call the read wrapper);
+  # the gh mock reports no PR for the branch and fails any PR view.
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
-case "${1:-} ${2:-}" in
-  "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ; exit 0 ;;
-  "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
-esac
-exit 0
+echo "error: bin/ scripts must not call gh-axi (per-agent read convenience, not a script dependency)" >&2
+exit 127
 SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
+  "pr list") exit 0 ;;
   "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
 esac
 exit 0
