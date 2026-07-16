@@ -30,16 +30,28 @@ SOCKET="start-hybrid-smoke-$$"
 # shellcheck disable=SC2329
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
-  fm_test_cleanup
+  if [ -n "${TESTROOT:-}" ]; then
+    # Dying pane shells may still flush exit-time files into the scratch HOME;
+    # settle and retry so the root never outlives the test.
+    rm -rf "$TESTROOT" 2>/dev/null
+    [ -e "$TESTROOT" ] && { sleep 1; rm -rf "$TESTROOT"; }
+  fi
 }
-trap cleanup_all EXIT
 
+# fm_test_tmproot registers its cleanup inside the command-substitution
+# subshell (see fm-backend.test.sh), so the parent must recreate the root and
+# remove it itself in its own EXIT trap.
 TESTROOT=$(fm_test_tmproot start-hybrid)
+mkdir -p "$TESTROOT"
+trap cleanup_all EXIT
 fm_git_identity
 
 # --- scratch HOME: primary checkout, firstmate dir, stub worktrees -----------
 
 export HOME="$TESTROOT/home"
+# Keep the scratch panes' interactive bashes from writing exit-time history
+# into the scratch HOME (it races cleanup's rm -rf).
+export HISTFILE=/dev/null
 mkdir -p "$HOME/tools/firstmate" "$HOME/projects"
 
 # Seed repo plays origin: c1, then (after the worktrees clone it) c2 on master.
