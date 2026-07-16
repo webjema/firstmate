@@ -5,30 +5,32 @@
 #
 # Why this exists: the normal trigger for running fm-pr-check.sh is the crew's
 # `done: PR <url>` line at PR-ready. A merge performed by hand-running
-# `gh-axi pr merge` - the common shape of a yolo-authorized merge, especially on a
+# `gh pr merge` - the common shape of a yolo-authorized merge, especially on a
 # repo with no PR CI at all - can skip the recording step entirely. Teardown then
 # has nothing to look up for a squash-merge-then-delete-branch flow and
 # false-refuses provably landed work.
 # This script makes recording part of the merge itself, so it cannot be skipped
 # by omission. Use it for every PR merge (user-requested or yolo-authorized),
-# in place of calling `gh-axi pr merge` directly.
+# in place of calling `gh pr merge` directly.
 #
-# gh-axi pr merge expects a PR number and --repo <owner>/<repo>; it does not
-# parse a full https://github.com/<owner>/<repo>/pull/<n> URL. This script
-# parses the URL and invokes gh-axi in the form it accepts.
+# The merge is a mutation, so it runs on plain gh, never the gh-axi read wrapper.
+# The PR URL is parsed to a number plus --repo <owner>/<repo> before anything is
+# recorded: the strict parse rejects malformed or unsafe URLs up front, and
+# pinning --repo from the URL keeps extra args from redirecting the merge.
 #
 # Merge method: defaults to --squash when the caller passes none of --squash,
-# --merge, --rebase, or --method after the optional -- separator. An explicit
+# --merge, or --rebase after the optional -- separator. An explicit
 # caller method is never overridden.
-# Extra args must not include --repo or -R because the repo is parsed from the
-# PR URL.
+# Extra args go verbatim to gh pr merge, so they must be flags gh accepts:
+# --method[=x] (a wrapper-ism gh has no flag for) is rejected up front, as are
+# --repo and -R because the repo is parsed from the PR URL.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh pr merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ID=${1:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]}
-URL=${2:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]}
+ID=${1:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh pr merge args>]}
+URL=${2:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh pr merge args>]}
 shift 2
 [ "${1:-}" = "--" ] && shift
 
@@ -42,10 +44,23 @@ caller_has_merge_method() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --squash|--merge|--rebase|--method|--method=*) return 0 ;;
+      --squash|--merge|--rebase) return 0 ;;
     esac
   done
   return 1
+}
+
+reject_method_flags() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --method|--method=*)
+        echo "error: gh pr merge takes --squash, --merge, or --rebase, not --method (got: $arg)" >&2
+        return 1
+        ;;
+    esac
+  done
+  return 0
 }
 
 parse_pr_url() {
@@ -77,6 +92,7 @@ reject_repo_overrides() {
 
 parse_pr_url "$URL" || exit 1
 reject_repo_overrides "$@" || exit 1
+reject_method_flags "$@" || exit 1
 
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || { echo "error: fm-pr-check did not record pr=$URL in $META; refusing to merge" >&2; exit 1; }
@@ -86,4 +102,4 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"
+gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"

@@ -34,7 +34,7 @@
 #               report `review-ready: branch fm/<id> pushed, no PR` and STOP (default).
 #               Firstmate reviews the pushed branch against the direction; findings are
 #               fixed in place on the same branch and re-signalled `review-ready:`, and only
-#               an approval opens the PR (gh-axi) with `done: PR <url>`. The review gate sits
+#               an approval opens the PR (plain gh) with `done: PR <url>`. The review gate sits
 #               BEFORE the PR because firstmate's review of a diff never needed a PR to exist,
 #               while a post-PR finding invalidates the crew's own review, its verify, its full
 #               suite run, and the PR's CI - the single largest source of rework measured in the
@@ -210,7 +210,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use \`gh-axi\` for GitHub reads (\`pr list/view\`, \`run list/view\`, \`issue list\`, \`search\`) - same \`gh\` auth, far smaller output - and plain \`gh\` for mutations (\`pr create\`, pushes) and anything scripts or CI depend on.
+   On any \`gh-axi\` error, fall back to plain \`gh\` instead of debugging the wrapper.
+   Use chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -281,7 +283,7 @@ Firstmate reviews your pushed branch BEFORE any PR exists, so its findings cost 
    Append \`review-ready: branch fm/$ID pushed, no PR\` to the status file and STOP. Firstmate now reviews your diff against the direction.
 7. Firstmate replies with one of two things:
    - **Findings.** Fix them IN PLACE on the same branch, push again, and append \`review-ready:\` again. Repeat until firstmate approves. No PR exists yet, so there is nothing to churn.
-   - **Approval.** Open the PR with \`gh-axi\`, append \`done: PR {url}\` to the status file, and stop.
+   - **Approval.** Open the PR with plain \`gh\` (\`gh pr create\`), append \`done: PR {url}\` to the status file, and stop.
 
 Do NOT merge the PR, and do not wait for CI yourself. Firstmate watches CI; the user merges.
 Once the PR is open your work is on the remote, so firstmate releases your worktree at that point - finish step 7 and stop cleanly.
@@ -311,7 +313,9 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use \`gh-axi\` for GitHub reads (\`pr list/view\`, \`run list/view\`, \`issue list\`, \`search\`) - same \`gh\` auth, far smaller output - and plain \`gh\` for mutations (\`pr create\`, pushes) and anything scripts or CI depend on.
+   On any \`gh-axi\` error, fall back to plain \`gh\` instead of debugging the wrapper.
+   Use chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

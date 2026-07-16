@@ -130,6 +130,41 @@ test_pr_dod_carries_the_review_contract() {
   pass "fm-brief.sh: the PR definition of done carries the full review contract"
 }
 
+# The GitHub tooling rule: gh-axi is for reads only, mutations (the PR open
+# above all) go through plain gh, and a gh-axi error falls back to gh instead
+# of being debugged. Crews never address the user, so no crew brief may point
+# them at lavish-axi - review surfaces are firstmate's job.
+test_briefs_carry_the_github_tooling_split() {
+  local home ship_brief scout_brief brief
+  home="$TMP_ROOT/gh-split-home"
+  write_registry "$home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ghsplit-c1 pr-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ghsplit-c2 pr-proj --scout >/dev/null 2>&1
+  ship_brief="$home/data/brief-ghsplit-c1/brief.md"
+  scout_brief="$home/data/brief-ghsplit-c2/brief.md"
+
+  for brief in "$ship_brief" "$scout_brief"; do
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'Use `gh-axi` for GitHub reads' "$brief" \
+      "brief lost the gh-axi reads-only rule: $brief"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'plain `gh` for mutations' "$brief" \
+      "brief lost the mutations-on-plain-gh rule: $brief"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'fall back to plain `gh` instead of debugging the wrapper' "$brief" \
+      "brief lost the gh-axi error fallback rule: $brief"
+    assert_no_grep 'lavish-axi' "$brief" \
+      "crew brief points the crew at lavish-axi, but crews never address the user: $brief"
+  done
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep 'Open the PR with plain `gh` (`gh pr create`)' "$ship_brief" \
+    "PR DOD does not open the PR with plain gh"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_no_grep 'Open the PR with `gh-axi`' "$ship_brief" \
+    "PR DOD still opens the PR with gh-axi"
+  pass "fm-brief.sh: briefs carry the gh-axi read/write split and open PRs with plain gh"
+}
+
 # The direction contract. This is what makes even a one-line bug fix get judged
 # against the project's architecture and quality posture.
 test_direction_is_injected_into_ship_and_scout() {
@@ -318,6 +353,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_legacy_mode_token_maps_to_pr
 test_pr_dod_carries_the_review_contract
+test_briefs_carry_the_github_tooling_split
 test_direction_is_injected_into_ship_and_scout
 test_absent_direction_is_explicit_not_silent
 test_ship_project_memory_wording

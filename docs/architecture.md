@@ -175,8 +175,8 @@ It is summary-first: the default prints the base, the stat, and a per-file size 
 Nothing is ever silently truncated - the summary states that the body was elided and the exact command that produces it - because a partial diff read as complete is worse than an expensive one.
 Reviewing the PR head rather than the local branch matters because the crew's own fix rounds and any CI-fix rounds push commits the local worktree need not hold.
 Firstmate learns CI state itself: `bin/fm-pr-check.sh` arms `state/<id>.check.sh`, which reads the PR's merge state and check rollup from GitHub and wakes firstmate only when a check has failed or the PR is merged, staying silent while checks run or sit green and unmerged.
-PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
-The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state.
+PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh pr merge`.
+The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 

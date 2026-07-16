@@ -123,7 +123,8 @@ It installs those tools only after you say go.
 Required tools come in two parts: a universal toolchain every home needs, and the backend delta owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`.
 The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, gh-axi, chrome-devtools-axi, lavish-axi, and compatible tasks-axi per "Backlog backend" above.
 This section is the single owner of that universal toolchain list; the backend guide's prerequisites point here and add only backend-specific tools.
-In that list, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi backs backlog mutations.
+In that list, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub reads, browser, and rich-review operations, and tasks-axi backs backlog mutations.
+GitHub mutations and every `bin/` script stay on plain gh, because gh-axi is a per-agent read convenience and never a script dependency.
 The backend delta is `tmux` itself plus the `treehouse` worktree provider, and the `treehouse` durable-lease upgrade check runs against the installed binary.
 `tasks-axi` is a required bootstrap tool, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap also prints `TASKS_AXI: available` and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
