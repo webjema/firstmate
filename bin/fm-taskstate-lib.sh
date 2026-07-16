@@ -4,7 +4,8 @@
 # worktree clear exactly the same set and cannot drift apart:
 #
 #   1. bin/fm-teardown.sh's release_supervision_state - PR-open workspace release,
-#      which drops window= and keeps the CI/merge watch.
+#      which drops window=, disowns the returned worktree (worktree= becomes
+#      released_worktree=), and keeps the CI/merge watch.
 #   2. bin/fm-detach.sh - hands a live crew to the user, which drops window=
 #      and keeps the worktree for later reclaim.
 #

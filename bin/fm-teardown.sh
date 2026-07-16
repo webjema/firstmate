@@ -14,12 +14,21 @@
 #                     so a PR going red is still reported and the merge still wakes the
 #                     fleet sync) and state/<id>.meta (bin/fm-pr-merge.sh refuses to merge
 #                     without it). The meta's window= line is dropped, so a crewless task
-#                     never reads as a dead crew to recovery or the watcher's window sweep.
+#                     never reads as a dead crew to recovery or the watcher's window sweep,
+#                     and its worktree= line is renamed to released_worktree=: the slot is
+#                     back in the pool and may be re-leased to ANOTHER live task, so the
+#                     released meta must never advertise the path as its own.
 #   otherwise      -> FULL TEARDOWN. Purges every state file, syncs the clone. This is what
 #                     the second run (after the merge) does, and what a scout, a secondmate,
 #                     a local-only task, a no-PR task, and --force always do.
+#                     On a released= meta the second run touches NO worktree at all - no
+#                     safety inspection, no branch drop, no pool return - because the task
+#                     stopped owning one at phase-1 (metas released before the worktree
+#                     rename, which still carry a raw stale worktree=, are treated the
+#                     same). It only purges the surviving supervision state.
 # The safety checks are identical in both phases and are not relaxed by either: nothing is
-# released until the work is LANDED as defined below.
+# released until the work is LANDED as defined below, and a task that still owns its
+# worktree (never released) gets the full checks in every phase.
 #
 # THE TRADE-OFF, stated plainly: releasing at PR-open means that if CI fails, or the user
 # wants changes once the PR is open, there is no crew left and the fix costs a fresh spawn.
@@ -124,6 +133,15 @@ FORCE=${2:-}
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
+# A released= meta means phase-1 already returned the workspace to the pool, which
+# may have re-leased the SAME slot path to a different live task since. Any worktree
+# pointer still in such a meta is stale by definition: phase-2 must never inspect,
+# refuse on, or return a worktree this task no longer owns (re-leased-and-dirty gave
+# a spurious refusal; re-leased-and-clean would RETURN another task's live lease).
+# release_supervision_state renames worktree= to released_worktree= for exactly this
+# reason; blanking WT here covers metas released before that rename existed.
+RELEASED_AT=$(grep '^released=' "$META" | tail -1 | cut -d= -f2- || true)
+[ -z "$RELEASED_AT" ] || WT=
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 # A detached task's meta has no window= (fm-detach.sh drops it, recording the
 # window under detached_window= instead), so fall back to that here. This both
@@ -376,7 +394,12 @@ pr_is_still_open() {
 release_supervision_state() {
   local tmp
   tmp=$(mktemp "$STATE/.$ID.meta.XXXXXX") || return 1
-  grep -v '^window=' "$META" > "$tmp"
+  # window= goes so the crewless task never reads as a dead crew. worktree= is
+  # renamed to released_worktree= because the return above handed the slot back
+  # to the pool, which may re-lease the same path to another live task: a
+  # released meta must never advertise a worktree as its own, or phase-2 (and
+  # any other consumer) would inspect - or worse, return - another task's lease.
+  sed -e '/^window=/d' -e 's/^worktree=/released_worktree=/' "$META" > "$tmp"
   printf 'released=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$tmp"
   mv "$tmp" "$META"
   # Everything the crew-liveness machinery keys on goes; the PR watch and the merge
@@ -1041,7 +1064,10 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+# Both Orca workspace blocks are skipped for a released meta: phase-1 already
+# removed the Orca worktree, so phase-2 has nothing to verify or remove, and
+# re-removing by the recorded id could destroy a recycled worktree.
+if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ] && [ -z "$RELEASED_AT" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
     echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
@@ -1066,7 +1092,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
+if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ] && [ -z "$RELEASED_AT" ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
@@ -1120,6 +1146,14 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 
 if pr_is_still_open; then
+  # A re-run on an already-released task with the PR still open has nothing to do:
+  # the workspace is gone and the supervision state is already in release shape.
+  # Rewriting the meta again would only stack duplicate released= stamps.
+  if [ -n "$RELEASED_AT" ]; then
+    echo "teardown $ID: workspace already released ($RELEASED_AT); PR $PR_URL is still open."
+    echo "  Run bin/fm-teardown.sh $ID again once the PR merges to close the task out."
+    exit 0
+  fi
   release_supervision_state
   echo "teardown $ID: WORKSPACE RELEASED (window $T, worktree $WT); PR $PR_URL is still open."
   echo "  Kept state/$ID.meta (bin/fm-pr-merge.sh refuses to merge without it) and"
@@ -1133,5 +1167,9 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
-echo "teardown $ID complete (window $T, worktree $WT)"
+if [ -n "$RELEASED_AT" ]; then
+  echo "teardown $ID complete (workspace was already released at PR-open, $RELEASED_AT)"
+else
+  echo "teardown $ID complete (window $T, worktree $WT)"
+fi
 backlog_refresh_reminder

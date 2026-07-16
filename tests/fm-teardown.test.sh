@@ -19,6 +19,9 @@
 #     git index.lock that blocks teardown. The return path retries on the lock
 #     error signature (even if the lock self-clears mid-check), then only removes a
 #     provably stale lock before re-running safety checks.
+#   - teardown-stale-worktree: a released meta kept its worktree= pointer after
+#     phase-1 returned the slot to the pool, so the post-merge second run inspected
+#     (and could have RETURNED) a slot the pool had re-leased to another live task.
 #
 # Matrix:
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
@@ -40,6 +43,14 @@
 #   (q) PR mode + NO pr= recorded, PR discovered by branch   -> ALLOW  (yolo/no-CI merge)
 #   (q2) PR mode + pushed branch + PR OPEN, not merged       -> ALLOW  (teardown at PR-open)
 #   (q3) PR mode + PR OPEN but a local commit never pushed   -> REFUSE (guard not weakened)
+#
+# And the released-meta phase-2 contract (teardown-stale-worktree): phase-1 disowns the
+# returned worktree (worktree= becomes released_worktree=), so the post-merge second run
+# never inspects, refuses on, or returns a pool slot that may since be another task's.
+#   (q4) released + slot re-leased and DIRTY                 -> ALLOW, slot untouched
+#   (q5) released + slot re-leased and CLEAN                 -> ALLOW, no second return
+#   (q6) pre-rename released meta w/ raw stale worktree=     -> ALLOW, slot untouched
+#   (q7) released + PR still open, teardown re-run           -> no-op, slot untouched
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -710,6 +721,14 @@ test_pr_open_releases_workspace_but_keeps_the_ci_watch_and_merge_state() {
   # No window: a crewless task that still advertises a pane reads as a DEAD crew to
   # recovery and to the watcher's window sweep, and firstmate would try to respawn it.
   assert_no_grep 'window=' "$meta" "pr-open-release: released meta still advertises a window"
+  # No worktree either: the slot is back in the pool and may be re-leased to another
+  # live task, so the released meta must DISOWN the path (worktree= becomes
+  # released_worktree=), or the second teardown would inspect - or return - a slot
+  # this task no longer owns.
+  ! grep -q '^worktree=' "$meta" \
+    || fail "pr-open-release: released meta still claims the returned worktree as its own"
+  assert_grep "released_worktree=$case_dir/wt" "$meta" \
+    "pr-open-release: released meta lost the audit-trail pointer to the returned slot"
   pass "at PR-open the workspace is released while the CI watch and the merge state survive"
 }
 
@@ -770,6 +789,178 @@ test_second_teardown_after_the_merge_purges_the_state() {
   assert_absent "$case_dir/state/task-x1.check.sh" "post-merge purge: CI poll should be gone once merged"
   assert_absent "$case_dir/state/task-x1.ci-seen" "post-merge purge: ci-seen should be gone once merged"
   pass "the second teardown, after the merge, purges the supervision state for real"
+}
+
+# --- released meta + re-leased pool slot (teardown-stale-worktree, 2026-07-16) ---
+#
+# Phase-1 returns the slot to the pool, and the pool may re-lease the SAME path to a
+# DIFFERENT live task before the PR merges. A released meta that still advertised the
+# path sent phase-2's safety checks and return against the OTHER task's lease:
+# re-leased-and-dirty spuriously refused the close-out (the live incident), and
+# re-leased-and-CLEAN silently detached/deleted the new crew's branch and returned its
+# live lease to the pool - two crews sharing one worktree, the strictly worse case.
+
+# Log every treehouse invocation so a test can prove phase-2 never returned a slot
+# the task no longer owns. Args: case_dir
+add_logging_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# Phase-1 release for a pushed branch with an open PR, then simulate the pool
+# re-leasing the same slot path to a different live task: a new crew starts its own
+# branch there. The logging treehouse mock leaves the directory in place, which is
+# exactly the re-lease shape - same path, different owner. Args: case_dir
+release_then_relet_slot_to_other_task() {
+  local case_dir=$1
+  write_meta "$case_dir" PR ship
+  wt_commit_file "$case_dir" feature.txt shipped "the crew's change"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_gh_pr_open "$case_dir"
+  append_pr_meta_url "$case_dir"
+  arm_ci_poll "$case_dir"
+  add_logging_treehouse "$case_dir"
+  run_teardown "$case_dir" > /dev/null 2>&1 || return 1
+  git -C "$case_dir/wt" checkout -q -b fm/other-task
+}
+
+treehouse_return_count() {
+  local case_dir=$1
+  [ -f "$case_dir/treehouse.log" ] || { printf '0'; return 0; }
+  wc -l < "$case_dir/treehouse.log" | tr -d ' '
+}
+
+test_released_then_relet_dirty_slot_phase2_purges_without_touching_it() {
+  local case_dir rc
+  case_dir=$(make_case released-relet-dirty)
+  release_then_relet_slot_to_other_task "$case_dir" \
+    || fail "released-relet-dirty: phase-1 release did not succeed"
+  # The other crew is mid-work: uncommitted changes sit in the re-leased slot. The
+  # live incident: phase-2 read the released meta's stale worktree pointer, ran the
+  # landed-work checks against the OTHER task's work, and refused the close-out.
+  printf 'wip\n' > "$case_dir/wt/other-crew.txt"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/project" rev-parse origin/fm/task-x1)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "released-relet-dirty: phase-2 must close out; the dirty slot is not this task's to refuse on"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "released-relet-dirty: phase-2 refused on another task's in-progress work"
+  assert_absent "$case_dir/state/task-x1.meta" "released-relet-dirty: meta should be purged once merged"
+  assert_absent "$case_dir/state/task-x1.check.sh" "released-relet-dirty: CI poll should be purged once merged"
+  # And the slot was not touched: the other crew's work and branch are intact.
+  assert_present "$case_dir/wt/other-crew.txt" \
+    "released-relet-dirty: phase-2 destroyed the other crew's uncommitted work"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = fm/other-task ] \
+    || fail "released-relet-dirty: phase-2 moved the other crew's checked-out branch"
+  [ "$(treehouse_return_count "$case_dir")" = 1 ] \
+    || fail "released-relet-dirty: phase-2 ran a treehouse return against a slot it no longer owns"
+  pass "phase-2 after release closes out cleanly while a re-leased dirty slot is left alone (the incident)"
+}
+
+test_released_then_relet_clean_slot_phase2_never_returns_the_other_lease() {
+  local case_dir rc
+  case_dir=$(make_case released-relet-clean)
+  release_then_relet_slot_to_other_task "$case_dir" \
+    || fail "released-relet-clean: phase-1 release did not succeed"
+  # The strictly worse failure mode: the re-leased slot happens to be CLEAN (a crew
+  # just spawned, or between operations), so the old safety checks PASS and phase-2
+  # would detach HEAD, delete the new crew's branch, and return the live lease to
+  # the pool - which can then lease it a THIRD time. No refusal, no error, lost work.
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/project" rev-parse origin/fm/task-x1)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "released-relet-clean: phase-2 must still close the task out"
+  assert_absent "$case_dir/state/task-x1.meta" "released-relet-clean: meta should be purged once merged"
+  # The wrong return LOOKS like a clean pass, so assert on the slot itself: the new
+  # crew's branch must survive, still checked out, and no second return may be logged.
+  git -C "$case_dir/wt" show-ref --verify --quiet refs/heads/fm/other-task \
+    || fail "released-relet-clean: phase-2 deleted the other crew's branch (the silent wrong return)"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = fm/other-task ] \
+    || fail "released-relet-clean: phase-2 detached the other crew's checked-out branch"
+  [ "$(treehouse_return_count "$case_dir")" = 1 ] \
+    || fail "released-relet-clean: phase-2 returned another task's live lease to the pool"
+  pass "phase-2 after release never returns a re-leased slot even when it looks clean (missed-refusal case)"
+}
+
+test_legacy_released_meta_with_raw_stale_worktree_is_not_inspected() {
+  local case_dir rc
+  case_dir=$(make_case released-legacy-meta)
+  # A meta released BEFORE the worktree rename existed: released= stamped, window=
+  # gone, but the raw worktree= pointer still present (the exact on-disk shape the
+  # incident found). The slot meanwhile holds another task's genuinely unlanded
+  # work - an unpushed commit plus a dirty file - which must be neither refused on
+  # nor touched.
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=PR" \
+    "pr=https://github.com/example/repo/pull/7" \
+    "released=2026-07-15T00:00:00Z"
+  arm_ci_poll "$case_dir"
+  add_logging_treehouse "$case_dir"
+  wt_commit_file "$case_dir" other.txt unlanded "the other crew's unpushed commit"
+  printf 'wip\n' > "$case_dir/wt/other-wip.txt"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "released-legacy: phase-2 must close out despite the stale raw worktree pointer"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "released-legacy: phase-2 inspected a worktree the released task no longer owns"
+  assert_absent "$case_dir/state/task-x1.meta" "released-legacy: meta should be purged once merged"
+  assert_present "$case_dir/wt/other-wip.txt" "released-legacy: phase-2 destroyed the slot's uncommitted work"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = fm/task-x1 ] \
+    || fail "released-legacy: phase-2 moved the slot's checked-out branch"
+  [ "$(treehouse_return_count "$case_dir")" = 0 ] \
+    || fail "released-legacy: phase-2 ran a treehouse return it had no lease for"
+  pass "a pre-rename released meta with a raw stale worktree= is closed out without touching the slot"
+}
+
+test_released_rerun_with_open_pr_is_a_safe_noop() {
+  local case_dir rc meta
+  case_dir=$(make_case released-rerun-open)
+  release_then_relet_slot_to_other_task "$case_dir" \
+    || fail "released-rerun-open: phase-1 release did not succeed"
+  printf 'wip\n' > "$case_dir/wt/other-crew.txt"
+  # PR still open (the gh mock from phase-1 setup still reports OPEN): re-running
+  # teardown early must neither inspect the re-leased slot nor rewrite the meta.
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  meta="$case_dir/state/task-x1.meta"
+
+  expect_code 0 "$rc" "released-rerun-open: re-running teardown on a released task with the PR open must succeed"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "released-rerun-open: rerun refused on another task's in-progress work"
+  assert_present "$meta" "released-rerun-open: rerun purged the meta while the PR is still open"
+  assert_present "$case_dir/state/task-x1.check.sh" "released-rerun-open: rerun dropped the CI poll"
+  [ "$(grep -c '^released=' "$meta")" = 1 ] \
+    || fail "released-rerun-open: rerun stacked a duplicate released= stamp"
+  assert_present "$case_dir/wt/other-crew.txt" \
+    "released-rerun-open: rerun destroyed the other crew's uncommitted work"
+  [ "$(treehouse_return_count "$case_dir")" = 1 ] \
+    || fail "released-rerun-open: rerun returned a slot the task no longer owns"
+  pass "re-running teardown on a released task with the PR still open is a safe no-op"
 }
 
 test_pr_open_with_unpushed_commit_still_refuses() {
@@ -1424,6 +1615,10 @@ test_pr_mode_truly_unpushed_refuses
 test_pr_open_releases_workspace_but_keeps_the_ci_watch_and_merge_state
 test_merge_still_works_after_the_workspace_is_released
 test_second_teardown_after_the_merge_purges_the_state
+test_released_then_relet_dirty_slot_phase2_purges_without_touching_it
+test_released_then_relet_clean_slot_phase2_never_returns_the_other_lease
+test_legacy_released_meta_with_raw_stale_worktree_is_not_inspected
+test_released_rerun_with_open_pr_is_a_safe_noop
 test_pr_open_with_unpushed_commit_still_refuses
 test_local_only_force_overrides_unpushed
 test_squash_merged_branch_deleted_allows
