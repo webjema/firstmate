@@ -642,6 +642,86 @@ test_busy_guard_defers_when_supervisor_busy() {
   pass "busy-guard defers injection when supervisor pane is busy"
 }
 
+# --- max-defer force escape --------------------------------------------------
+# The force flush (escalate_flush <state> 1 -> inject_msg force mode) is the
+# bounded escape that ends an indefinite "never went idle" wedge: it bypasses the
+# busy guard and the empty-composer REQUIREMENT (safe in afk - no human is typing)
+# so a lingering busy footer or a misread composer can no longer strand a digest
+# forever, while still refusing a genuinely `pending` composer so real unsubmitted
+# text is never clobbered.
+
+test_force_flush_bypasses_busy_guard() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase force-busy)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"
+  # A busy footer sits on the pane (the "never went idle" wedge): the STRICT
+  # flush must defer, the FORCE flush must deliver anyway.
+  printf 'esc to interrupt\n' > "$capture"
+  escalate_add "$state" "needs-decision: pick A"
+  afk_enter "$state"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    escalate_flush "$state"; then
+    fail "strict flush should defer on a busy pane"
+  fi
+  [ -s "$sent" ] && fail "strict flush injected into a busy pane"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    escalate_flush "$state" 1 \
+    || fail "force flush did not deliver through the busy guard"
+  grep -F 'needs-decision: pick A' "$sent" >/dev/null || fail "force flush did not send the digest"
+  grep -F '[ENTER]' "$sent" >/dev/null || fail "force flush did not submit the digest"
+  [ -s "$state/.subsuper-escalations" ] && fail "force flush did not clear the buffer after delivery"
+  pass "force flush bypasses the busy guard and delivers the digest"
+}
+
+test_force_flush_refuses_pending_composer() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase force-pending)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"
+  # Real unsubmitted text on the cursor line (a returning user's keystrokes, or a
+  # swallowed prior injection): force must NOT type over it.
+  printf 'half a message the user is typing\n' > "$capture"
+  escalate_add "$state" "needs-decision: pick B"
+  afk_enter "$state"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    escalate_flush "$state" 1; then
+    fail "force flush delivered into a pending composer (must refuse)"
+  fi
+  [ -s "$sent" ] && fail "force flush typed over a human's pending text"
+  [ -s "$state/.subsuper-escalations" ] || fail "force flush lost the buffer while refusing a pending composer"
+  grep -F 'half a message the user is typing' "$capture" >/dev/null \
+    || fail "force flush changed the pending composer content"
+  pass "force flush refuses a pending composer without typing"
+}
+
+test_housekeeping_max_defer_forces_after_strict_fails() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase maxdefer-force)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"
+  # Busy pane + a digest buffered past max-defer: the strict flush cannot deliver,
+  # so housekeeping's max-defer escape must FORCE it rather than wedge/alarm.
+  printf 'esc to interrupt\n' > "$capture"
+  escalate_add "$state" "done: PR https://x/y/pull/9"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
+  grep -F 'done: PR https://x/y/pull/9' "$sent" >/dev/null \
+    || fail "max-defer escape did not force-deliver the digest through a busy pane"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after a forced max-defer delivery"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge alarm fired even though the force escape delivered"
+  pass "max-defer escape force-delivers when the strict flush stays blocked"
+}
+
 test_marker_detection() {
   # message_is_injection: marker present -> injection; absent -> real message
   message_is_injection "${FM_INJECT_MARK}Supervisor escalate: done" \
@@ -1456,6 +1536,9 @@ test_signal_escalate_marks_seen_no_catchall_refire
 test_collapse_newlines_pure
 test_afk_absent_daemon_does_not_inject
 test_busy_guard_defers_when_supervisor_busy
+test_force_flush_bypasses_busy_guard
+test_force_flush_refuses_pending_composer
+test_housekeeping_max_defer_forces_after_strict_fails
 test_marker_detection
 test_afk_turn_exemption
 test_should_exit_afk_when_afk_inactive
