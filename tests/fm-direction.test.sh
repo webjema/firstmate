@@ -181,6 +181,52 @@ test_list_reports_projects() {
   pass "list reports each project's direction status"
 }
 
+# (e) add-decision: the reliable, validated write path for a resolved decision
+# that the automatic capture flow uses instead of hand-editing the capped file.
+
+test_add_decision_prepends_dated_line_newest_first() {
+  local home out
+  home=$(make_home add_decision)
+  write_direction "$home" acme "$VALID_BODY"
+  FM_DIRECTION_DATE=2026-07-20 run_direction "$home" add-decision acme \
+    "supplier state has exactly one source of truth" >/dev/null \
+    || fail "add-decision on a valid direction should succeed"
+  out=$(run_direction "$home" show acme)
+  # Newest-first: the just-added line sits directly under the heading, above the
+  # pre-existing dated decision.
+  printf '%s\n' "$out" | awk '
+    /^## Standing decisions/ { seen = 1; next }
+    seen == 1 { print; exit }
+  ' | grep -qxF -- "- 2026-07-20 supplier state has exactly one source of truth" \
+    || fail "add-decision did not prepend the dated line under the heading"
+  printf '%s\n' "$out" | grep -qF -- "- 2026-07-13 Alpha may lag prod by one release." \
+    || fail "add-decision dropped a pre-existing standing decision"
+  pass "add-decision prepends a dated one-liner newest-first"
+}
+
+test_add_decision_drops_scaffold_placeholder() {
+  local home
+  home=$(make_home add_decision_stub)
+  run_direction "$home" init acme >/dev/null
+  FM_DIRECTION_DATE=2026-07-21 run_direction "$home" add-decision acme "first real decision" >/dev/null || true
+  # The scaffold's "{Dated one-liners...}" placeholder under Standing decisions
+  # must be gone once a real decision lands there.
+  run_direction "$home" show acme | awk '/^## Standing decisions/{p=1;next} p' \
+    | grep -qF "Dated one-liners" \
+    && fail "add-decision left the scaffold placeholder in Standing decisions"
+  run_direction "$home" show acme | grep -qF -- "- 2026-07-21 first real decision" \
+    || fail "add-decision did not record the first real decision"
+  pass "add-decision drops the scaffold placeholder on the first real decision"
+}
+
+test_add_decision_requires_existing_direction() {
+  local home rc=0
+  home=$(make_home add_decision_absent)
+  run_direction "$home" add-decision acme "some decision" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "add-decision must refuse when no direction file exists"
+  pass "add-decision refuses a project with no direction on file"
+}
+
 test_brief_on_missing_direction_is_explicit
 test_brief_injects_body_and_contract
 test_init_scaffolds_and_refuses_overwrite
@@ -188,3 +234,6 @@ test_check_flags_stub_and_missing_heading
 test_check_hard_fails_past_word_cap
 test_check_reports_missing_direction_without_failing
 test_list_reports_projects
+test_add_decision_prepends_dated_line_newest_first
+test_add_decision_drops_scaffold_placeholder
+test_add_decision_requires_existing_direction

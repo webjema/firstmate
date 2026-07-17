@@ -11,6 +11,15 @@
 #        fm-direction.sh init  <project>   scaffold a template (refuses to overwrite)
 #        fm-direction.sh check [<project>] validate; exits non-zero on a hard problem
 #        fm-direction.sh list             list every project and whether it has one
+#        fm-direction.sh add-decision <project> <text>
+#              append a dated one-liner under "## Standing decisions", drop the
+#              scaffold placeholder if still present, then validate. This is the
+#              reliable, word-cap-checked write path for a resolved decision so the
+#              automatic capture flow never hand-edits the capped file. It exits
+#              non-zero (after writing) if the file is now over the hard word cap,
+#              so the caller knows to curate; an axis-level shift (a change to the
+#              business/architecture/infrastructure/quality direction itself) is a
+#              judgment rewrite of that axis, not an add-decision append.
 # Why a word cap: the brief block is injected verbatim into EVERY brief for that
 # project, ship and scout alike, so it is paid for on every dispatch. A direction
 # that grows into a design doc stops being read. check warns past
@@ -170,6 +179,43 @@ cmd_list() {
   done
 }
 
+# Append a dated one-liner under "## Standing decisions". Newest-first (right
+# after the heading), so the freshest resolved decision is what a reader sees
+# first. A fresh scaffold's "{...}" placeholder line is dropped on the first real
+# decision. The date is date +%F, overridable with FM_DIRECTION_DATE for tests.
+cmd_add_decision() {
+  project=$1; shift
+  text="$*"
+  [ -n "$text" ] || die "add-decision needs decision text"
+  f=$(file_for "$project")
+  [ -f "$f" ] || die "no direction on file for '$project' (run: fm-direction.sh init '$project' and author it first)"
+  grep -qxF '## Standing decisions' "$f" \
+    || die "direction for '$project' has no '## Standing decisions' heading"
+  # Collapse any newlines the caller passed: a standing decision is one line.
+  text=$(printf '%s' "$text" | tr '\n' ' ')
+  today=${FM_DIRECTION_DATE:-$(date +%F)}
+  line="- $today $text"
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-direction.XXXXXX") || die "mktemp failed"
+  awk -v new="$line" '
+    BEGIN { armed = 0 }
+    {
+      if ($0 == "## Standing decisions") { print; print new; armed = 1; next }
+      if (armed == 1) {
+        if ($0 ~ /^[[:space:]]*$/) { print; next }        # keep blank lines, keep scanning
+        armed = 0
+        if ($0 ~ /^[[:space:]]*\{.*\}[[:space:]]*$/) next  # drop the scaffold placeholder
+      }
+      print
+    }
+  ' "$f" > "$tmp" || { rm -f "$tmp"; die "failed to rewrite $f"; }
+  mv -f "$tmp" "$f"
+  echo "recorded: $line"
+  # Validate after writing. A soft-cap warning is informational; a hard-cap
+  # failure returns non-zero so the caller curates, but the decision is kept.
+  check_one "$project" || return 1
+  return 0
+}
+
 case "${1:-}" in
   -h|--help|'') usage; exit 0 ;;
 esac
@@ -184,5 +230,6 @@ case "$ACTION" in
   init)  [ "$#" -ge 1 ] || die "init needs a project"; cmd_init "$1" ;;
   check) cmd_check "${1:-}" ;;
   list)  cmd_list ;;
+  add-decision) [ "$#" -ge 2 ] || die "add-decision needs a project and text"; cmd_add_decision "$@" ;;
   *)     die "unknown action '$ACTION' (see --help)" ;;
 esac
