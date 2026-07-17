@@ -388,5 +388,11 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   secondmate_liveness_sweep
   fleet_sync
+  # Reclaim orphaned harness scratchpad session dirs (dead/finished crews leave
+  # hundreds of MB in /tmp that nothing else reaps before the OS's 30-day sweep).
+  # Best-effort janitor, gated to the locked session like the sweeps above; the
+  # untouched-age threshold spares any live crew's scratch. It stays silent unless
+  # it actually reclaimed something.
+  [ -x "$FM_ROOT/bin/fm-scratch-reap.sh" ] && "$FM_ROOT/bin/fm-scratch-reap.sh" 2>/dev/null || true
 fi
 exit 0
