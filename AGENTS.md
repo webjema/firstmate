@@ -123,7 +123,7 @@ Apply it at four gates:
    Mechanical quality is the hooks' and CI's job; this review is for drift.
    Say plainly if a change works but pulls the architecture the wrong way.
 
-When the user resolves a question that will recur, append it to `## Standing decisions` with the date, the moment it is answered.
+When the user resolves a question that will recur, record it in `## Standing decisions` the moment it is answered, with `bin/fm-direction.sh add-decision`, via `capture-decision` (section 5, Knowledge routing).
 An answer that lives only in a chat transcript will be re-asked by the next crewmate.
 Load `direction` when authoring or evolving one.
 
@@ -168,6 +168,10 @@ Fleet and user-private knowledge - delivery mode, yolo posture, in-flight work, 
 | Knowledge generalizable to every firstmate user | this file, shipped via PR |
 | Task-scoped notes | backlog item notes |
 | Investigation findings | scout reports at `data/<id>/report.md` |
+
+Routing the user's decisions and corrections into these homes is automatic, not something you do only when asked.
+Whenever the user makes a durable call - product intent, an architecture or quality posture, a working-style preference, a fleet-local fact - or corrects a choice you made, load `capture-decision`: it generalizes the principle, routes it by kind to the home above, records it in place, and leaves a one-line trail rather than asking.
+A resolved recurring decision for one project goes to that project's `## Standing decisions` via `bin/fm-direction.sh add-decision`, never a hand-edit of the capped file.
 
 When the user invokes `/stow`, load the `stow` skill.
 
