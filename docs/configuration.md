@@ -231,6 +231,11 @@ FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash th
 FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher crash
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
+# mission mode envelope (bin/fm-mission.sh); the single outer tripwire per mission
+FM_MISSION_MAX_TASKS=15            # default max tasks in a mission plan before a runaway-plan pause; per-mission overridable with `new --max-tasks`
+FM_MISSION_MAX_SPEND=50            # default max mission spend in USD before a pause; per-mission overridable with `new --max-spend`
+FM_MISSION_MAX_HOURS=12            # default max mission wall-clock hours before a pause; per-mission overridable with `new --max-hours`
+FM_MISSION_SUFFIX=                 # internal/test override for the random id suffix minted by `fm-mission.sh new`
 ```
 
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.
