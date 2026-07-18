@@ -41,6 +41,15 @@
 #            record a task as a member of the mission's DAG, with its blocked-by
 #            edges as a readable snapshot; drops the scaffold placeholder. Idempotent
 #            per task-id: re-adding a task-id rewrites that one line.
+#        fm-mission.sh tasks <id>          print the mission's member task-ids, one
+#            per line (the DAG roster). The dispatcher intersects this with the
+#            `tasks-axi ready` frontier to decide what to spawn next; this script
+#            deliberately does not read tasks-axi state itself.
+#        fm-mission.sh set-rollup <id> [--file <path>]
+#            replace the Completion rollup section body from <path> or stdin. The
+#            live rollup (tasks landed / total) is computed by the mission
+#            supervisor from tasks-axi state and written here, so the file owner
+#            stays the sole writer.
 #
 # Envelope defaults are conservative so an early trip is cheap; they are per-mission
 # overridable at `new` and env-overridable (FM_MISSION_MAX_TASKS, FM_MISSION_MAX_SPEND,
@@ -266,6 +275,47 @@ cmd_add_task() {
   echo "recorded task in DAG: $line"
 }
 
+cmd_tasks() {
+  id=$1
+  f=$(file_for "$id")
+  [ -f "$f" ] || die "no mission on file for '$id' (run: fm-mission.sh new ...)"
+  # Print the first token of each "- <task-id> ..." line inside the Task DAG
+  # section: the membership roster, nothing more. Skips the scaffold placeholder.
+  awk '
+    /^## Task DAG/ { indag = 1; next }
+    indag && /^## / { indag = 0 }
+    indag && /^- / {
+      line = substr($0, 3)
+      sub(/[ \t].*$/, "", line)
+      if (line != "") print line
+    }
+  ' "$f"
+}
+
+cmd_set_rollup() {
+  id=$1; shift
+  src=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --file) src=${2:?--file needs a path}; shift 2 ;;
+      --*)    die "unknown flag '$1' (see --help)" ;;
+      *)      die "unexpected argument '$1'" ;;
+    esac
+  done
+  f=$(file_for "$id")
+  [ -f "$f" ] || die "no mission on file for '$id' (run: fm-mission.sh new ...)"
+  grep -qxF '## Completion rollup' "$f" || die "mission '$id' has no '## Completion rollup' heading"
+  if [ -n "$src" ]; then
+    [ -f "$src" ] || die "rollup file not found: $src"
+    body=$(cat "$src")
+  else
+    body=$(cat)
+  fi
+  [ -n "$body" ] || die "set-rollup needs non-empty text (from --file or stdin)"
+  replace_section "$f" '## Completion rollup' "$body"
+  echo "rollup set: $f"
+}
+
 # Validate one mission. Prints diagnostics; returns 1 on a hard failure.
 check_one() {
   id=$1
@@ -352,5 +402,7 @@ case "$ACTION" in
   check)        cmd_check "${1:-}" ;;
   set-criteria) [ "$#" -ge 1 ] || die "set-criteria needs a mission id"; cmd_set_criteria "$@" ;;
   add-task)     [ "$#" -ge 2 ] || die "add-task needs a mission id and a task-id"; cmd_add_task "$@" ;;
+  tasks)        [ "$#" -ge 1 ] || die "tasks needs a mission id"; cmd_tasks "$1" ;;
+  set-rollup)   [ "$#" -ge 1 ] || die "set-rollup needs a mission id"; cmd_set_rollup "$@" ;;
   *)            die "unknown action '$ACTION' (see --help)" ;;
 esac
