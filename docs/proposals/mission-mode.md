@@ -35,6 +35,8 @@ A bounded hard-stop set always pauses and escalates as a batched digest rather t
 ### Mission
 
 A mission is the goal container that firstmate lacks today.
+It is started conversationally with the `/mission` skill, which drives the `bin/fm-mission.sh` engine that owns the mission-file contract, the same way `/direction` sits over `bin/fm-direction.sh`.
+Its id is a kebab slug with a random suffix, exactly like a task id.
 It lives at `data/missions/<id>.md` under the active firstmate home, gitignored like the rest of `data/`, because a goal and its acceptance criteria are the captain's, not the project's.
 It carries:
 
@@ -63,6 +65,8 @@ The envelope adds exactly one outer absolute tripwire per mission, to catch a ru
 - a total-spend ceiling;
 - a wall-clock ceiling.
 
+The defaults are conservative so an early trip is cheap: 15 total tasks, roughly $50 total spend, and 12 hours wall-clock.
+They are per-mission overridable at start (for example `--max-tasks 40`) and can be raised at the pause when a trip asks.
 Any trip pauses the mission and escalates a batched digest.
 Per-task ceilings (review-fix rounds, relaunches) live at the task level and are separate from the mission envelope.
 
@@ -71,7 +75,10 @@ Per-task ceilings (review-fix rounds, relaunches) live at the task level and are
 1. No goal or epic container.
    Closed by the Mission object in section 3.
 2. No decomposition producer.
-   Closed by the judged planning pass: a decomposition step followed by an independent plan-vs-direction judge that must pass before any crew ships.
+   Closed by the judged planning pass: a decomposition step that also drafts the whole-goal acceptance criteria from the captain's goal, followed by an independent plan-vs-direction judge that must pass before any crew ships.
+   The captain edits and approves the drafted criteria and plan at a confirm step before anything runs.
+   The judge is a separate spawned agent with a fresh, clean context: it sees the plan, the direction, and the criteria, but not the decomposer's reasoning, so it cannot rubber-stamp the decomposer's assumptions.
+   A different harness is not required; the independence comes from the clean context, and a cross-harness judge can be added later if a real blind spot appears.
 3. No auto-dispatcher.
    Closed by a dispatch loop that reads `tasks-axi ready`, spawns each dispatchable task, and on each `check: merged` wake spawns the now-unblocked dependents.
 4. Confidently-wrong work is undetectable.
@@ -157,11 +164,12 @@ Phase 1 delivers the Mission object and the judged decomposition, and nothing do
 
 In scope for Phase 1:
 
-- a mission file format at `data/missions/<id>.md` and a script that owns its scaffold, read, and validation, in the shape of `bin/fm-direction.sh` (one owner for the contract, header owns the mechanics);
-- a decomposition step that turns a goal into a set of tasks with blocked-by edges and a mission file;
-- an independent plan-vs-direction judge that critiques the decomposition against the project direction and the whole-goal acceptance criteria, and must pass before any crew ships;
+- `bin/fm-mission.sh`, the engine that owns the `data/missions/<id>.md` format, mints the mission id, and owns scaffold, read, validation, and rollup, in the shape of `bin/fm-direction.sh` (one owner for the contract, header owns the mechanics);
+- a `/mission` skill that is the chat entry point and drives `bin/fm-mission.sh`, drafting the acceptance criteria and plan and showing them to the captain for edit and approval;
+- a decomposition step that turns a goal into a set of tasks with blocked-by edges, drafts the whole-goal acceptance criteria, and writes the mission file;
+- an independent plan-vs-direction judge, a separate agent with fresh context, that critiques the decomposition against the project direction and the drafted acceptance criteria and must pass before any crew ships;
 - colocated tests under `tests/` named `<subject>.test.sh`, extending the existing runner pattern;
-- a one-line-trigger addition to `AGENTS.md` pointing at a mission-mode skill or doc for the detail, kept to the size discipline.
+- a one-line-trigger addition to `AGENTS.md` for the `/mission` skill, kept to the size discipline, with detail routed to the skill and this doc.
 
 Explicitly out of scope for Phase 1:
 
@@ -171,9 +179,11 @@ Explicitly out of scope for Phase 1:
 
 Phase 1 still routes every resulting PR to the captain through the normal review-and-merge flow.
 
-## 10. Open questions for the captain
+## 10. Resolved decisions
 
-- Mission id shape and where a mission is started from: a new `bin/fm-mission.sh start "<goal>"`, or an extension of an existing entry point.
-- Whether the whole-goal acceptance criteria are captain-authored at mission start, or drafted by the decomposition step and confirmed by the captain.
-- Default envelope values for the outer tripwire (total tasks, total spend, wall-clock), and whether they are per-mission overridable.
-- Which harness runs the plan-vs-direction judge, and whether it must differ from the harness that produced the decomposition to keep the critique independent.
+These four were open at proposal time and resolved with the captain on 2026-07-18.
+
+- Entry point and id: a mission is started conversationally with a `/mission` skill that drives a `bin/fm-mission.sh` engine; the mission id is a kebab slug with a random suffix, like a task id.
+- Acceptance criteria: the decomposition step drafts testable whole-goal acceptance criteria from the captain's goal, and the captain edits and approves them at a confirm step before anything runs.
+- Envelope: conservative, per-mission overridable defaults of 15 total tasks, roughly $50 total spend, and 12 hours wall-clock, raisable at start or at a trip.
+- Judge independence: the plan-vs-direction judge is a separate spawned agent with a fresh, clean context (plan, direction, and criteria only, not the decomposer's reasoning); the same harness is acceptable, and a cross-harness judge is a later option, not a requirement.
