@@ -139,6 +139,36 @@ test_add_task_records_edges_and_is_idempotent() {
   pass "add-task records edges, is idempotent per task-id, and list counts members"
 }
 
+# (d2) tasks + set-rollup: the boundary-respecting dispatcher surface ----------
+test_tasks_prints_roster_ids_only() {
+  local home out
+  home=$(make_home roster)
+  FM_MISSION_SUFFIX=k3 run_mission "$home" new "a goal" --id ros-id >/dev/null
+  # A fresh mission's roster is empty (only the scaffold placeholder).
+  [ -z "$(run_mission "$home" tasks ros-id)" ] || fail "tasks: an unplanned roster must be empty"
+
+  run_mission "$home" add-task ros-id root-a1 >/dev/null
+  run_mission "$home" add-task ros-id dep-b2 --blocked-by root-a1 >/dev/null
+  out=$(run_mission "$home" tasks ros-id)
+  # One id per line, first token only - never the blocked-by edge ids.
+  [ "$out" = "root-a1
+dep-b2" ] || fail "tasks: must print member ids one per line, got: $out"
+  pass "tasks prints the DAG roster ids, one per line, edges excluded"
+}
+
+test_set_rollup_replaces_last_section() {
+  local home out
+  home=$(make_home rollup)
+  FM_MISSION_SUFFIX=k3 run_mission "$home" new "a goal" --id rol-id >/dev/null
+  printf '2 of 3 tasks landed; 1 in flight.' | run_mission "$home" set-rollup rol-id >/dev/null
+  out=$(run_mission "$home" show rol-id)
+  assert_contains "$out" '2 of 3 tasks landed; 1 in flight.' "set-rollup: writes the live rollup"
+  assert_not_contains "$out" 'Not yet tracked' "set-rollup: drops the scaffold sentinel"
+  # It must only touch the last section, leaving the envelope intact above it.
+  assert_contains "$out" 'max-tasks: 15' "set-rollup: leaves the envelope intact"
+  pass "set-rollup replaces the Completion rollup section"
+}
+
 # (e) ------------------------------------------------------------------------
 test_check_soft_notes_stub_then_passes_clean() {
   local home out rc
@@ -219,6 +249,8 @@ test_new_validates_and_overrides_envelope
 test_set_criteria_replaces_body_and_drops_placeholder
 test_set_criteria_requires_existing_mission
 test_add_task_records_edges_and_is_idempotent
+test_tasks_prints_roster_ids_only
+test_set_rollup_replaces_last_section
 test_check_soft_notes_stub_then_passes_clean
 test_check_hard_fails_broken_mission
 test_check_reports_missing_without_failing

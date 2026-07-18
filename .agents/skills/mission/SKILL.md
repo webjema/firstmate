@@ -10,15 +10,16 @@ metadata:
 
 A mission is a whole goal run as one unit: the captain hands over an end goal, and firstmate decomposes it into an ordered task DAG, plans it, and runs it toward production-ready.
 Mission mode is being built in phases (see `docs/proposals/mission-mode.md`).
-**This skill currently implements Phase 1: the judged planner.**
-It decomposes the goal, has an independent judge critique the plan, gets the captain's confirmation, and materializes the mission and its DAG.
-It then hands the tasks to the normal, captain-in-the-loop task lifecycle.
-Autonomous dispatch, the adversarial review panel, mission-scoped auto-merge, and the Alpha integration-verification gate arrive in later phases; do not claim or perform them yet.
+**This skill currently implements Phases 1-2: the judged planner and the autonomous dispatcher with the adversarial review panel.**
+Phase 1 (Planning, below) decomposes the goal, has an independent judge critique the plan, gets the captain's confirmation, and materializes the mission and its DAG.
+Phase 2 (Running the mission, below) then drives the DAG itself: it dispatches ready tasks, gates each one at an adversarial review panel, and advances dependents as tasks land.
+**Merge authority is still the captain's:** an approved task still opens a PR the captain merges, and the mission advances off that merge.
+Mission-scoped auto-merge, the Alpha integration-verification gate, and autonomous recovery adjudication arrive in later phases; do not claim or perform them yet.
 
 The mission-file contract - its format, id minting, scaffold, validation, and every write path - is owned by `bin/fm-mission.sh`; read its header with `bin/fm-mission.sh --help`.
 Never hand-edit a file under `data/missions/`; every write goes through that script, the same way a direction goes through `bin/fm-direction.sh`.
 
-## The Phase 1 procedure
+## Planning the mission (Phase 1)
 
 1. **Resolve the project and read its direction.**
    Resolve the project from the goal exactly as intake does (`AGENTS.md` section 6), state it back, and read `data/directions/<project>.md`.
@@ -49,10 +50,48 @@ Never hand-edit a file under `data/missions/`; every write goes through that scr
    - for each planned task, create it in the backlog with its edges (`tasks-axi add <task-id> ... --blocked-by <id>`) and mirror it into the mission roster with `bin/fm-mission.sh add-task <id> <task-id> --blocked-by <id>`.
    `tasks-axi` is authoritative for the edges and each task's live state; the mission's Task DAG section is the membership roster so a recovered firstmate can reconstruct the mission from disk.
 
-6. **Hand off to the normal lifecycle.**
-   Phase 1 stops at the materialized plan.
-   Dispatch each ready task, review, and route each PR to the captain through the project's normal delivery mode - exactly as any other ship task (`AGENTS.md` section 6).
-   Report the mission id, the drafted-and-approved criteria, and the plan to the captain in plain outcomes.
+6. **Confirm the plan is materialized, then run it.**
+   Report the mission id, the drafted-and-approved criteria, and the plan to the captain in plain outcomes, then proceed to Running the mission.
+
+## Running the mission (Phase 2)
+
+Once the DAG is materialized, firstmate drives it. Keep exactly one live supervision cycle throughout (`AGENTS.md` section 7); the mission runs on the same watcher, wakes, and teardown as any other work.
+
+1. **Dispatch the ready frontier.**
+   The dispatchable set is the mission's roster intersected with the backlog's ready frontier: the members from `bin/fm-mission.sh tasks <id>` that also appear in `tasks-axi ready`.
+   Spawn those as ship tasks (batch spawn, `AGENTS.md` section 6), with each crew's brief carrying the mission's acceptance criteria as its frame.
+   This script deliberately does not read tasks-axi state; firstmate does the intersection.
+
+2. **Hold the envelope.**
+   Before spawning, check the mission's autonomy envelope (below).
+   If dispatching would push the mission past its task, spend, or wall-clock ceiling, do NOT dispatch: pause the mission and escalate a batched digest naming which ceiling and by how much.
+   The envelope only catches a runaway plan; a healthy plan never reaches it.
+
+3. **Gate each task at the adversarial review panel.**
+   When a crew signals review-ready, do NOT rubber-stamp it.
+   Read the pushed diff with `bin/fm-review-diff.sh <id>`, then spawn a panel of independent skeptics (default 3), each with a fresh, clean context, each prompted to REFUTE the change on a distinct lens: does it actually satisfy every acceptance criterion, does it fight the direction, does it introduce a regression?
+   Default a verifier to "refuted" when it is unsure.
+   Majority-refute means the change is rejected: relay the refutations to the crew to fix in place (`bin/fm-send.sh`), then re-review.
+   Only a change that survives the panel is approved: the crew opens the PR, and the captain merges it (merge authority is a later phase).
+
+4. **Probe mid-flight for confidently-wrong work.**
+   Every health signal firstmate has keys on liveness and motion, so a crew building the WRONG thing reads as perfectly healthy - this is the hardest failure mode.
+   While a crew is working, periodically sample its current diff (`bin/fm-review-diff.sh <id>`) against its brief and the mission's acceptance criteria with a fresh agent, to catch drift before it reaches review-ready.
+   On a drift finding, steer the crew (`bin/fm-send.sh`) or, if it is off-plan, escalate.
+
+5. **Cap the churn.**
+   Cap review-fix rounds per task (default 3) and per-task relaunches.
+   On a trip, stop re-running the loop: escalate that task to the captain as a batched digest rather than churning tokens on a task that will not converge.
+
+6. **Advance on each merge.**
+   Arm each approved PR's poll with `bin/fm-pr-check.sh` so its merge wakes firstmate.
+   On a `check: merged` wake, tear the crew down, recompute the rollup from tasks-axi state and write it with `bin/fm-mission.sh set-rollup <id>`, then re-run the dispatch loop (step 1): the merge cleared blockers, so newly-ready members now dispatch.
+
+7. **Stop when the DAG is landed.**
+   When every roster member is landed, the mission's plan is complete.
+   Phase 2 stops here and reports to the captain; the Alpha integration-verification gate and the production hold are a later phase.
+
+**Hard stops (always pause and escalate as a batched digest, never proceed):** an envelope trip, a task that will not converge past the round cap, anything destructive/irreversible/security-sensitive, and a direction conflict the project's standing-decisions ledger does not already settle (`AGENTS.md` section 5, fork 3).
 
 ## The autonomy envelope
 
