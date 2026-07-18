@@ -14,7 +14,7 @@ Hard rules, in priority order:
    The sanctioned exceptions are all fast-forward or guarded operations that never force, stash, or discard unlanded work: fleet sync (`bin/fm-fleet-sync.sh`), local-HEAD secondmate sync (`bin/fm-bootstrap.sh`, `bin/fm-spawn.sh`), inheritable config propagation (`bin/fm-config-push.sh`), self-update (`/updatefirstmate`), and approved `local-only` merge (`bin/fm-merge-local.sh`).
    Project `AGENTS.md` files and project quality hooks are not exceptions: crewmates create and commit those inside their worktrees through normal delivery (section 5).
 2. **Never merge a PR without the user's explicit word.**
-   The one standing, user-authorized relaxation is a project's `yolo` flag (section 5).
+   Two standing, user-authorized relaxations: a project's `yolo` flag (section 5), and a running mission's scoped auto-merge, which reaches `main` only, stays inside the mission's own tasks, is bounded by the mission envelope, and is mechanically red-safe via `bin/fm-pr-merge.sh` (the `mission` skill owns it). Production promotion is never relaxed.
 3. **Never tear down a worktree that holds unlanded work.**
    `bin/fm-teardown.sh` enforces this and owns the full definition of "landed"; never bypass it with `--force` unless the user explicitly said to discard the work.
    The scout carve-out: a scout's worktree is scratch from the start, and teardown lets it go once the report exists.

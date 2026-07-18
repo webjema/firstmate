@@ -56,8 +56,13 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi"
 }
 
-# gh mock recording every invocation to a log file and answering headRefOid
-# for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# gh mock recording every invocation to a log file. It answers two distinct
+# `pr view` reads: fm-pr-check.sh's headRefOid-only lookup (returns the head sha),
+# and the CI-rollup gate's state,headRefOid,statusCheckRollup read (returns the
+# "<state> <head> <verdict>" line the -q query would produce, with the verdict
+# driven by FM_TEST_CI_VERDICT so a case can make the PR green or red). The rollup
+# branch is matched first because its --json list also contains headRefOid.
+# Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
   add_gh_axi_tripwire "$case_dir"
@@ -67,6 +72,7 @@ printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *statusCheckRollup*) printf 'OPEN %s %s\n' '$head' "\${FM_TEST_CI_VERDICT:-pass}" ; exit 0 ;;
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
@@ -300,6 +306,61 @@ test_method_flag_rejected_before_recording() {
   pass "fm-pr-merge rejects --method before recording state (gh has no such flag)"
 }
 
+# (i) the gap-6 gate: a definitively red PR is refused before gh pr merge is called.
+test_red_ci_refuses_merge() {
+  local case_dir rc
+  case_dir=$(make_case red-ci)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  : > "$case_dir/gh.log"
+
+  set +e
+  FM_TEST_CI_VERDICT=fail run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "red-ci: fm-pr-merge must refuse a PR with failing checks"
+  assert_grep 'failing CI checks' "$case_dir/stderr" "red-ci: refusal did not name the red checks"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "red-ci: gh pr merge was invoked despite red checks"
+  # The gate runs after recording, so the pr= reference is still there for teardown.
+  assert_grep 'pr=https://github.com/example/repo/pull/31' "$case_dir/state/task-x1.meta" \
+    "red-ci: pr= should still be recorded before the red refusal"
+  pass "fm-pr-merge refuses to merge a red PR before calling gh pr merge"
+}
+
+# (j) --no-ci-check bypasses the gate for a deliberate override.
+test_no_ci_check_bypasses_red_gate() {
+  local case_dir
+  case_dir=$(make_case no-ci-check)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh.log"
+
+  FM_TEST_CI_VERDICT=fail run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/33 --no-ci-check \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "no-ci-check: bypass should let the merge proceed"
+
+  grep -qxF 'pr merge 33 --repo example/repo --squash' "$case_dir/gh.log" \
+    || fail "no-ci-check: gh pr merge was not invoked despite the bypass"
+  pass "fm-pr-merge --no-ci-check bypasses the red-PR gate"
+}
+
+# (k) a green PR merges normally through the gate.
+test_green_ci_merges() {
+  local case_dir
+  case_dir=$(make_case green-ci)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  : > "$case_dir/gh.log"
+
+  FM_TEST_CI_VERDICT=pass run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/35 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "green-ci: a green PR should merge"
+
+  grep -qxF 'pr merge 35 --repo example/repo --squash' "$case_dir/gh.log" \
+    || fail "green-ci: gh pr merge was not invoked for a green PR"
+  pass "fm-pr-merge merges a green PR through the CI gate"
+}
+
 test_parses_pr_url_for_gh() {
   local case_dir
   case_dir=$(make_case url-parsing)
@@ -324,4 +385,7 @@ test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_flag_rejected_before_recording
+test_red_ci_refuses_merge
+test_no_ci_check_bypasses_red_gate
+test_green_ci_merges
 test_parses_pr_url_for_gh
