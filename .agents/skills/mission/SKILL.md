@@ -10,11 +10,12 @@ metadata:
 
 A mission is a whole goal run as one unit: the captain hands over an end goal, and firstmate decomposes it into an ordered task DAG, plans it, and runs it toward production-ready.
 Mission mode is being built in phases (see `docs/proposals/mission-mode.md`).
-**This skill currently implements Phases 1-2: the judged planner and the autonomous dispatcher with the adversarial review panel.**
+**This skill currently implements Phases 1-3: the judged planner, the autonomous dispatcher with the adversarial review panel, and mission-scoped auto-merge under the envelope.**
 Phase 1 (Planning, below) decomposes the goal, has an independent judge critique the plan, gets the captain's confirmation, and materializes the mission and its DAG.
 Phase 2 (Running the mission, below) then drives the DAG itself: it dispatches ready tasks, gates each one at an adversarial review panel, and advances dependents as tasks land.
-**Merge authority is still the captain's:** an approved task still opens a PR the captain merges, and the mission advances off that merge.
-Mission-scoped auto-merge, the Alpha integration-verification gate, and autonomous recovery adjudication arrive in later phases; do not claim or perform them yet.
+Phase 3 grants merge authority: a task that survives the review panel and goes green on CI is **merged to `main` by the mission itself**, bounded by the envelope and mechanically red-safe (`bin/fm-pr-merge.sh` refuses a red PR).
+**Production is always a human hard-stop:** the mission merges to `main` and (in a later phase) deploys to Alpha, but never promotes to production - that stays the captain's.
+The Alpha integration-verification gate and autonomous recovery adjudication arrive in a later phase; do not claim or perform them yet.
 
 The mission-file contract - its format, id minting, scaffold, validation, and every write path - is owned by `bin/fm-mission.sh`; read its header with `bin/fm-mission.sh --help`.
 Never hand-edit a file under `data/missions/`; every write goes through that script, the same way a direction goes through `bin/fm-direction.sh`.
@@ -72,7 +73,7 @@ Once the DAG is materialized, firstmate drives it. Keep exactly one live supervi
    Read the pushed diff with `bin/fm-review-diff.sh <id>`, then spawn a panel of independent skeptics (default 3), each with a fresh, clean context, each prompted to REFUTE the change on a distinct lens: does it actually satisfy every acceptance criterion, does it fight the direction, does it introduce a regression?
    Default a verifier to "refuted" when it is unsure.
    Majority-refute means the change is rejected: relay the refutations to the crew to fix in place (`bin/fm-send.sh`), then re-review.
-   Only a change that survives the panel is approved: the crew opens the PR, and the captain merges it (merge authority is a later phase).
+   Only a change that survives the panel is approved: the crew opens the PR, and the mission proceeds to auto-merge it (next step).
 
 4. **Probe mid-flight for confidently-wrong work.**
    Every health signal firstmate has keys on liveness and motion, so a crew building the WRONG thing reads as perfectly healthy - this is the hardest failure mode.
@@ -83,15 +84,19 @@ Once the DAG is materialized, firstmate drives it. Keep exactly one live supervi
    Cap review-fix rounds per task (default 3) and per-task relaunches.
    On a trip, stop re-running the loop: escalate that task to the captain as a batched digest rather than churning tokens on a task that will not converge.
 
-6. **Advance on each merge.**
-   Arm each approved PR's poll with `bin/fm-pr-check.sh` so its merge wakes firstmate.
-   On a `check: merged` wake, tear the crew down, recompute the rollup from tasks-axi state and write it with `bin/fm-mission.sh set-rollup <id>`, then re-run the dispatch loop (step 1): the merge cleared blockers, so newly-ready members now dispatch.
+6. **Auto-merge when green, then advance.**
+   Arm each approved PR's poll with `bin/fm-pr-check.sh` so its CI result wakes firstmate.
+   When the poll reports the PR green (checks passed, waiting on merge), merge it with `bin/fm-pr-merge.sh <id> <pr-url>` - never `gh pr merge` directly.
+   The merge is mechanically red-safe: `fm-pr-merge.sh` reads the CI rollup and refuses a red PR, so a mission can never land failing work; a checks-failed wake instead routes the task back through the fix loop and the round cap.
+   Post a one-line "merged <full PR URL>" FYI so the captain keeps a trail, exactly as a yolo merge does (`AGENTS.md` section 5).
+   On the resulting `check: merged` wake, tear the crew down, recompute the rollup from tasks-axi state and write it with `bin/fm-mission.sh set-rollup <id>`, then re-run the dispatch loop (step 1): the merge cleared blockers, so newly-ready members now dispatch.
 
 7. **Stop when the DAG is landed.**
    When every roster member is landed, the mission's plan is complete.
-   Phase 2 stops here and reports to the captain; the Alpha integration-verification gate and the production hold are a later phase.
+   Report to the captain and stop; the Alpha deploy, the integration-verification gate, and the held production promotion are a later phase.
 
-**Hard stops (always pause and escalate as a batched digest, never proceed):** an envelope trip, a task that will not converge past the round cap, anything destructive/irreversible/security-sensitive, and a direction conflict the project's standing-decisions ledger does not already settle (`AGENTS.md` section 5, fork 3).
+**Hard stops (always pause and escalate as a batched digest, never proceed):** a production deploy or promotion, an envelope trip, a task that will not converge past the round cap, anything else destructive/irreversible/security-sensitive, and a direction conflict the project's standing-decisions ledger does not already settle (`AGENTS.md` section 5, fork 3).
+Mission auto-merge reaches `main` only; it never merges outside the mission's own tasks, and it never promotes to production.
 
 ## The autonomy envelope
 
