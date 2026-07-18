@@ -206,6 +206,7 @@ Keep `local-only` work with the main firstmate.
 - **Ship** (the default): the deliverable is a change to the project, shipped through its delivery mode.
 - **Scout:** the deliverable is knowledge - an investigation, a plan, a repro, an audit - ending in a report at `data/<id>/report.md`, never a PR.
   When the user asks "what's wrong", "how would we", or "find out why", dispatch a scout instead of digging yourself.
+- **Mission:** the user invokes `/mission` or hands over a whole multi-task goal to run end to end as one unit; load the `mission` skill, which decomposes it into a judged task DAG under a container at `data/missions/<id>.md`.
 
 **Then classify readiness:**
 
