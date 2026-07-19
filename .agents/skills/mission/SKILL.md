@@ -9,14 +9,14 @@ metadata:
 # mission
 
 A mission is a whole goal run as one unit: the captain hands over an end goal, and firstmate decomposes it into an ordered task DAG, plans it, and runs it toward production-ready.
-Mission mode is being built in phases (see `docs/proposals/mission-mode.md`).
-**This skill currently implements Phases 1-3: the judged planner, the autonomous dispatcher with the adversarial review panel, and mission-scoped auto-merge under the envelope.**
+The design rationale is in `docs/proposals/mission-mode.md`.
+**This skill implements the full mission-mode arc:** the judged planner, the autonomous dispatcher with the adversarial review panel, mission-scoped auto-merge under the envelope, autonomous recovery, and the Alpha integration-verification gate.
 Phase 1 (Planning, below) decomposes the goal, has an independent judge critique the plan, gets the captain's confirmation, and materializes the mission and its DAG.
 Phase 2 (Running the mission, below) then drives the DAG itself: it dispatches ready tasks, gates each one at an adversarial review panel, and advances dependents as tasks land.
-Phase 3 grants merge authority: a task that survives the review panel and goes green on CI is **merged to `main` by the mission itself**, bounded by the envelope and mechanically red-safe (`bin/fm-pr-merge.sh` refuses a red PR).
-**Production is always a human hard-stop:** the mission merges to `main` and (in a later phase) deploys to Alpha, but never promotes to production - that stays the captain's.
+Merge authority is the mission's: a task that survives the review panel and goes green on CI is **merged to `main` by the mission itself**, bounded by the envelope and mechanically red-safe (`bin/fm-pr-merge.sh` refuses a red PR).
+When the DAG is landed, the mission deploys to Alpha and verifies the whole goal against the live deploy (Alpha verification, below).
 A stuck task recovers autonomously under a hard cap rather than dead-ending at the captain (`stuck-crewmate-recovery`, Autonomous adjudication).
-The Alpha deploy and its integration-verification gate arrive in a later phase; do not claim or perform them yet.
+**Production is always a human hard-stop:** the mission reaches `main` and a verified Alpha deploy, and stops there holding the production promotion for the captain - it never promotes to production.
 
 The mission-file contract - its format, id minting, scaffold, validation, and every write path - is owned by `bin/fm-mission.sh`; read its header with `bin/fm-mission.sh --help`.
 Never hand-edit a file under `data/missions/`; every write goes through that script, the same way a direction goes through `bin/fm-direction.sh`.
@@ -92,9 +92,26 @@ Once the DAG is materialized, firstmate drives it. Keep exactly one live supervi
    Post a one-line "merged <full PR URL>" FYI so the captain keeps a trail, exactly as a yolo merge does (`AGENTS.md` section 5).
    On the resulting `check: merged` wake, tear the crew down, recompute the rollup from tasks-axi state and write it with `bin/fm-mission.sh set-rollup <id>`, then re-run the dispatch loop (step 1): the merge cleared blockers, so newly-ready members now dispatch.
 
-7. **Stop when the DAG is landed.**
-   When every roster member is landed, the mission's plan is complete.
-   Report to the captain and stop; the Alpha deploy, the integration-verification gate, and the held production promotion are a later phase.
+7. **When the DAG is landed, run the Alpha gate.**
+   When every roster member is landed, the plan is complete on `main` - proceed to Alpha verification.
+
+## Alpha verification (Phase 4)
+
+This is the production-readiness step: the whole goal is verified against a live Alpha deploy, and only then does the mission stop, holding the production promotion for the captain.
+
+1. **Deploy to Alpha.**
+   Read the project's deploy command with `bin/fm-direction.sh alpha-deploy <project>`.
+   If it exits non-zero (no `Alpha deploy:` line under the project's Infrastructure direction), pause and ask the captain to add one - `Alpha deploy: <command>` - or to deploy manually; never guess a deploy.
+   Otherwise run that command. A failed deploy is a hard stop: escalate with the output.
+
+2. **Verify the whole goal against the live deploy.**
+   Spawn a fresh agent that checks the mission's whole-goal acceptance criteria against the running Alpha deploy - the live app, its URL, its integration or smoke suite - not against the merged diffs.
+   This is the "production-ready testing" the plan was judged for; the merged code is not trusted until it is verified running.
+
+3. **Stop at the production hold.**
+   If verification passes, the mission is done: report to the captain that the goal is verified on Alpha and that the production promotion is held for them.
+   If it fails, escalate with the failing criteria; do not retry a deploy blindly, and never promote to production.
+   Production promotion is never performed autonomously - it is the human hard-stop that ends every mission.
 
 **Hard stops (always pause and escalate as a batched digest, never proceed):** a production deploy or promotion, an envelope trip, a task that will not converge past the round cap, anything else destructive/irreversible/security-sensitive, and a direction conflict the project's standing-decisions ledger does not already settle (`AGENTS.md` section 5, fork 3).
 Mission auto-merge reaches `main` only; it never merges outside the mission's own tasks, and it never promotes to production.

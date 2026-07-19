@@ -11,6 +11,12 @@
 #        fm-direction.sh init  <project>   scaffold a template (refuses to overwrite)
 #        fm-direction.sh check [<project>] validate; exits non-zero on a hard problem
 #        fm-direction.sh list             list every project and whether it has one
+#        fm-direction.sh alpha-deploy <project>
+#              print the project's Alpha deploy command, taken from an
+#              "Alpha deploy: <command>" line under "## Infrastructure direction".
+#              Exits non-zero with no output when the project has no direction or no
+#              such line, so a mission's Alpha gate can pause and ask rather than
+#              guess a deploy. Alpha only - production promotion is never automated.
 #        fm-direction.sh add-decision <project> <text>
 #              append a dated one-liner under "## Standing decisions", drop the
 #              scaffold placeholder if still present, then validate. This is the
@@ -92,6 +98,28 @@ cmd_brief() {
   echo 'A bug fix that patches a symptom in a way the architecture direction is trying to eliminate is exactly such a conflict.'
 }
 
+# Extract the project's Alpha deploy command from an "Alpha deploy: <command>" line
+# under "## Infrastructure direction". Prints the command, or exits 1 with no output
+# when the direction or the line is absent, so a mission's Alpha gate treats a
+# missing deploy as "pause and ask", never as a silent no-op.
+cmd_alpha_deploy() {
+  project=$1
+  f=$(file_for "$project")
+  [ -f "$f" ] || return 1
+  cmd=$(awk '
+    /^## Infrastructure direction/ { ininfra = 1; next }
+    ininfra && /^## / { ininfra = 0 }
+    ininfra && /^Alpha deploy:/ {
+      sub(/^Alpha deploy:[[:space:]]*/, "")
+      sub(/[[:space:]]+$/, "")
+      print
+      exit
+    }
+  ' "$f")
+  [ -n "$cmd" ] || return 1
+  printf '%s\n' "$cmd"
+}
+
 cmd_init() {
   project=$1
   f=$(file_for "$project")
@@ -107,7 +135,7 @@ cmd_init() {
 {The target shape. The invariants that must hold. What we are deliberately moving toward, and what we are moving away from.}
 
 ## Infrastructure direction
-{Deploy, ops, and cost posture. What runs where, and what we refuse to run.}
+{Deploy, ops, and cost posture. What runs where, and what we refuse to run. For mission-mode Alpha verification, add a line "Alpha deploy: <command>" here.}
 
 ## Quality direction
 {Test posture. What "good" means here. The non-negotiables, and the debt we knowingly accept.}
@@ -231,5 +259,6 @@ case "$ACTION" in
   check) cmd_check "${1:-}" ;;
   list)  cmd_list ;;
   add-decision) [ "$#" -ge 2 ] || die "add-decision needs a project and text"; cmd_add_decision "$@" ;;
+  alpha-deploy) [ "$#" -ge 1 ] || die "alpha-deploy needs a project"; cmd_alpha_deploy "$1" ;;
   *)     die "unknown action '$ACTION' (see --help)" ;;
 esac
