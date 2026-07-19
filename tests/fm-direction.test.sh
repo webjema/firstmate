@@ -219,6 +219,59 @@ test_add_decision_drops_scaffold_placeholder() {
   pass "add-decision drops the scaffold placeholder on the first real decision"
 }
 
+# (f) alpha-deploy: the mission Alpha gate's deploy-command extractor.
+test_alpha_deploy_extracts_command_or_signals_absence() {
+  local home out rc
+  home=$(make_home alpha_deploy)
+
+  # A direction with an "Alpha deploy:" line under Infrastructure direction.
+  write_direction "$home" acme '# acme - Direction
+
+## Business vision
+Sell widgets.
+
+## Architecture direction
+Command handlers.
+
+## Infrastructure direction
+CDK only.
+Alpha deploy: ./scripts/deploy-alpha.sh --env alpha
+
+## Quality direction
+Root-cause only.
+
+## Standing decisions
+- none yet'
+  out=$(run_direction "$home" alpha-deploy acme) || fail "alpha-deploy: should succeed when a deploy line exists"
+  [ "$out" = "./scripts/deploy-alpha.sh --env alpha" ] || fail "alpha-deploy: must print the command verbatim, got '$out'"
+
+  # No deploy line -> exit non-zero with no output, so the gate pauses and asks.
+  write_direction "$home" nodeploy '# nodeploy - Direction
+
+## Business vision
+x
+
+## Architecture direction
+x
+
+## Infrastructure direction
+Nothing about deploys here.
+
+## Quality direction
+x
+
+## Standing decisions
+- x'
+  rc=0; out=$(run_direction "$home" alpha-deploy nodeploy) || rc=$?
+  [ "$rc" -ne 0 ] || fail "alpha-deploy: a missing deploy line must exit non-zero"
+  [ -z "$out" ] || fail "alpha-deploy: a missing deploy line must print nothing, got '$out'"
+
+  # Absent direction -> also non-zero, never a silent success.
+  rc=0; run_direction "$home" alpha-deploy ghost >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "alpha-deploy: an absent direction must exit non-zero"
+  pass "alpha-deploy prints the deploy command or signals absence for the Alpha gate"
+}
+
 test_add_decision_requires_existing_direction() {
   local home rc=0
   home=$(make_home add_decision_absent)
@@ -237,3 +290,4 @@ test_list_reports_projects
 test_add_decision_prepends_dated_line_newest_first
 test_add_decision_drops_scaffold_placeholder
 test_add_decision_requires_existing_direction
+test_alpha_deploy_extracts_command_or_signals_absence
