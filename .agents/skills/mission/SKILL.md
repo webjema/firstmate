@@ -15,7 +15,8 @@ Phase 1 (Planning, below) decomposes the goal, has an independent judge critique
 Phase 2 (Running the mission, below) then drives the DAG itself: it dispatches ready tasks, gates each one at an adversarial review panel, and advances dependents as tasks land.
 Phase 3 grants merge authority: a task that survives the review panel and goes green on CI is **merged to `main` by the mission itself**, bounded by the envelope and mechanically red-safe (`bin/fm-pr-merge.sh` refuses a red PR).
 **Production is always a human hard-stop:** the mission merges to `main` and (in a later phase) deploys to Alpha, but never promotes to production - that stays the captain's.
-The Alpha integration-verification gate and autonomous recovery adjudication arrive in a later phase; do not claim or perform them yet.
+A stuck task recovers autonomously under a hard cap rather than dead-ending at the captain (`stuck-crewmate-recovery`, Autonomous adjudication).
+The Alpha deploy and its integration-verification gate arrive in a later phase; do not claim or perform them yet.
 
 The mission-file contract - its format, id minting, scaffold, validation, and every write path - is owned by `bin/fm-mission.sh`; read its header with `bin/fm-mission.sh --help`.
 Never hand-edit a file under `data/missions/`; every write goes through that script, the same way a direction goes through `bin/fm-direction.sh`.
@@ -80,9 +81,9 @@ Once the DAG is materialized, firstmate drives it. Keep exactly one live supervi
    While a crew is working, periodically sample its current diff (`bin/fm-review-diff.sh <id>`) against its brief and the mission's acceptance criteria with a fresh agent, to catch drift before it reaches review-ready.
    On a drift finding, steer the crew (`bin/fm-send.sh`) or, if it is off-plan, escalate.
 
-5. **Cap the churn.**
-   Cap review-fix rounds per task (default 3) and per-task relaunches.
-   On a trip, stop re-running the loop: escalate that task to the captain as a batched digest rather than churning tokens on a task that will not converge.
+5. **Cap the churn, and recover a stuck task autonomously.**
+   Cap review-fix rounds per task (default 3): on a trip, stop re-running the panel loop and escalate that task rather than churning tokens on work that will not converge.
+   When a crew is wedged rather than merely mid-fix, load `stuck-crewmate-recovery` and use its Autonomous adjudication rung: it retries, re-plans, or escalates under a mechanical hard cap (`bin/fm-recovery-ledger.sh`), so the mission recovers itself instead of dead-ending at the captain, but still escalates once the cap trips.
 
 6. **Auto-merge when green, then advance.**
    Arm each approved PR's poll with `bin/fm-pr-check.sh` so its CI result wakes firstmate.
