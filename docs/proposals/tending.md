@@ -1,8 +1,10 @@
 # Proposal: tending (incremental, tracked codebase and docs health)
 
-Status: proposed, awaiting captain sign-off.
+Status: design signed off; Phase 1 (the shared engine) built.
 Date: 2026-07-19.
 Scope: two firstmate self-improvements over one shared engine, shipped through the normal branch to PR to captain-merge pipeline, one PR per phase.
+
+Settled at sign-off: the skills are `/code-shape` and `/docs-sync`; both are captain-invoked only, never run on a schedule; a run is bounded by an estimated-token budget (default 25000, roughly 20-30k) rather than a unit count.
 
 ## 1. What this is
 
@@ -46,8 +48,8 @@ It is gitignored like the rest of `data/`, because what firstmate has and has no
 
 A unit is a reviewable slice of the project.
 By default a unit is a top-level source directory, auto-derived so the skill works on any project with zero configuration.
-A project whose default units are too coarse can override them with a units list at `data/reviews/<project>/units.txt`, one unit path per line.
-The `docs` track derives its units from the documentation set rather than the source tree.
+A project whose default units are too coarse can override them per track with a units list at `data/reviews/<project>/<track>.units`, one git pathspec per line.
+The `codebase` and `docs` tracks share this unit model and differ in the ledger they write and the brief the crew is given; a docs-centralized project points the `docs` track at its documentation tree through that override.
 
 ### What the ledger stores
 
@@ -117,18 +119,17 @@ The Asana relationship is bidirectional in what it reconciles - code and PRs and
 
 One PR per phase, each independently shippable, in this order so the hard part is de-risked first.
 
-- Phase 1: the shared engine.
-  `bin/fm-review-ledger.sh` with `select`, `record`, and `status`, the auto-derived units with override, the git-driven tier selection, the history-rewrite fallback, colocated tests under `tests/`, and a `docs/` reference for the ledger format.
+- Phase 1: the shared engine. Built.
+  `bin/fm-review-ledger.sh` with `select`, `record`, `status`, and `units`, the auto-derived units with per-track override, the git-driven tier selection, the estimated-token budget, and the history-rewrite fallback; colocated tests at `tests/fm-review-ledger.test.sh`; the mechanism reference at `docs/review-ledger.md`.
 - Phase 2: `/code-shape`.
   The skill under `.agents/skills/code-shape/`, its brief additions, its section 13 trigger, and the quality-direction comment rule.
 - Phase 3: `/docs-sync`.
   The skill under `.agents/skills/docs-sync/`, the Asana reconciliation and captain-confirmed write path, its brief additions, and its section 13 trigger.
 
-## 7. Open questions
+## 7. Resolved at sign-off
 
-- Names.
-  `/code-shape` and `/docs-sync` describe intent; `/tend-code` and `/tend-docs` signal the shared engine and recurring cadence. Either pair is cheap to change before Phase 2.
-- Cadence.
-  Whether firstmate ever runs a tending pass on its own schedule, via the existing `/loop` or `schedule` skills, or only when the captain invokes it.
-- Run budget defaults.
-  The per-pass unit count or diff-size cap that keeps one run cheap while still making visible progress.
+- Names: `/code-shape` and `/docs-sync`.
+- Cadence: captain-invoked only; no self-scheduling.
+- Run budget: an estimated-token cap, default 25000 (`FM_LEDGER_TOKEN_CAP`), rather than a unit count.
+
+Deferred, not blocking: a smarter docs-track default that auto-derives units from a `docs/` tree instead of the shared top-level set; today a docs-centralized project uses the per-track override.
