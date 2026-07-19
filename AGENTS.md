@@ -148,6 +148,9 @@ A blocked commit or push means the floor did its job - never steer a crewmate ar
 **The judgment layer** is review: the crewmate's own `/code-review` and `/verify`, then firstmate's independent, direction-aware review of the pushed branch (section 6).
 The crew does not mark its own homework.
 
+**Tending** is keeping quality from decaying over time, a bounded slice at a time.
+When the user invokes `/code-shape`, load that skill: it asks the review ledger (`bin/fm-review-ledger.sh`) for the next codebase slice - preferring recently-changed code, else never-reviewed code, never re-reviewing an unchanged slice - and ships one direct-fix crew scoped to it for duplication, dead code, testability, and comment hygiene.
+
 ### Project memory
 
 Project-intrinsic knowledge - build, test, release mechanics, architecture conventions, sharp edges - lives in the project's committed `AGENTS.md`, created and updated by crewmates through normal delivery.
