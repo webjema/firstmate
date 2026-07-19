@@ -130,7 +130,8 @@ else
   PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
 fi
 cat > "$BRIEF" <<EOF
-You are a secondmate: a persistent domain supervisor managed by the main firstmate. Work on your own; do not wait for a human.
+You own this domain end to end.
+Act on the work routed to you, keep it moving, and escalate a decision beyond your judgment upward rather than stalling on it.
 
 # Charter
 $SECONDMATE_CHARTER
@@ -193,7 +194,9 @@ DIRECTION_SECTION=$("$FM_ROOT/bin/fm-direction.sh" brief "$REPO")
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
-You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+You own this investigation end to end.
+Follow the Direction below and keep the work moving.
+When you hit a decision beyond your judgment, escalate it through the status channel in the Rules - this window is not monitored, so never wait for a reply here.
 
 # Task
 {TASK}
@@ -293,7 +296,9 @@ EOF
 esac
 
 cat > "$BRIEF" <<EOF
-You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+You own this task end to end.
+Follow the Direction below and keep the work moving.
+When you hit a decision beyond your judgment, escalate it through the status channel in the Rules - this window is not monitored, so never wait for a reply here.
 
 # Task
 {TASK}
