@@ -236,6 +236,7 @@ FM_MISSION_MAX_TASKS=15            # default max tasks in a mission plan before 
 FM_MISSION_MAX_SPEND=50            # default max mission spend in USD before a pause; per-mission overridable with `new --max-spend`
 FM_MISSION_MAX_HOURS=12            # default max mission wall-clock hours before a pause; per-mission overridable with `new --max-hours`
 FM_MISSION_SUFFIX=                 # internal/test override for the random id suffix minted by `fm-mission.sh new`
+FM_RECOVERY_CAP=3                  # max autonomous recovery attempts (retry/replan) per task before a mission's recovery rung must escalate to the captain (bin/fm-recovery-ledger.sh)
 ```
 
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.

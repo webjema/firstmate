@@ -24,3 +24,17 @@ Escalate in order:
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    The worktree and commits persist, so relaunch is cheap.
 5. If a second relaunch fails too, write `failed` to the backlog and tell the user with evidence.
+
+## Autonomous adjudication (mission context)
+
+When the stuck task belongs to a running mission, rung 5's dead-end at the captain is the wrong default: a mission is meant to run without a human in the loop, so it adjudicates the recovery itself first, under a mechanical hard cap.
+
+Before each autonomous recovery attempt, check the cap: `bin/fm-recovery-ledger.sh tripped <id>` (default cap `FM_RECOVERY_CAP=3`).
+If it prints `TRIP`, stop adjudicating and escalate to the captain as a batched digest with the evidence - the cap is enforced by the ledger, not by your own count, precisely so an autonomous loop cannot talk itself past its own limit.
+Otherwise adjudicate the failure and pick one, then record it with `bin/fm-recovery-ledger.sh record <id> <action>`:
+
+- **retry** - the failure looks transient or addressable (a flaky step, a missing detail): relaunch the crew with corrective guidance (rung 4), then re-review.
+- **replan** - the task as scoped is the problem (wrong shape, a hidden dependency, an unbuildable acceptance criterion): abandon this attempt, take the finding back to the mission's planning pass to re-decompose that slice, and reset the ledger for the new task with `bin/fm-recovery-ledger.sh reset <id>`.
+- **escalate** - the failure is destructive/irreversible/security-sensitive, a direction conflict the ledger of standing decisions does not settle, or otherwise beyond autonomous judgment: hand it to the captain immediately, regardless of the cap.
+
+The cap counts `retry` and `replan` only; `escalate` is the terminal exit and never counts.
