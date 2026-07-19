@@ -123,8 +123,8 @@ One PR per phase, each independently shippable, in this order so the hard part i
   `bin/fm-review-ledger.sh` with `select`, `record`, `status`, and `units`, the auto-derived units with per-track override, the git-driven tier selection, the estimated-token budget, and the history-rewrite fallback; colocated tests at `tests/fm-review-ledger.test.sh`; the mechanism reference at `docs/review-ledger.md`.
 - Phase 2: `/code-shape`. Built.
   The skill at `.agents/skills/code-shape/SKILL.md`, its `{TASK}` brief mandate, its trigger in the section 5 Quality subsection, and the offer to record the comment-hygiene rule into the project's quality direction.
-- Phase 3: `/docs-sync`.
-  The skill under `.agents/skills/docs-sync/`, the Asana reconciliation and captain-confirmed write path, its brief additions, and its section 13 trigger.
+- Phase 3: `/docs-sync`. Built.
+  The skill at `.agents/skills/docs-sync/SKILL.md`: a direct-fix crew reconciles docs against code, PRs, and commits, then firstmate reconciles Asana from the crew's evidence with every write captain-confirmed. Trigger added to the section 5 Quality Tending paragraph.
 
 ## 7. Resolved at sign-off
 
