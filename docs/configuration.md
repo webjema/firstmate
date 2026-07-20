@@ -57,9 +57,10 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 ## Context management thresholds (config/context-management)
 
 `config/context-management` (local, gitignored) carries the token thresholds the context gauge classifies against, one `key=value` per non-empty, non-comment line.
-Keys: `soft` (default 120000), `hard` (default 160000), `ceiling` (default 200000), and `proxy_tokens_per_event` (default 1500).
+Keys: `soft` (default 120000), `hard` (default 160000), `ceiling` (default 200000), `proxy_tokens_per_event` (default 1500), and `autocompact_pct` (default 90).
 An absent file means every default applies, so the gauge works with no configuration.
-Each key also has an environment override, `FM_CONTEXT_SOFT`, `FM_CONTEXT_HARD`, `FM_CONTEXT_CEILING`, and `FM_CONTEXT_PROXY_TOKENS_PER_EVENT`, which beats the file.
+Each key also has an environment override, `FM_CONTEXT_SOFT`, `FM_CONTEXT_HARD`, `FM_CONTEXT_CEILING`, `FM_CONTEXT_PROXY_TOKENS_PER_EVENT`, and `FM_CONTEXT_AUTOCOMPACT_PCT`, which beats the file.
+Every firstmate-launched claude crew is started with `CLAUDE_CODE_AUTO_COMPACT_WINDOW=<ceiling>` and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=<autocompact_pct>`, so it auto-compacts around the managed ceiling instead of the model's full 200K or 1M window; setting `autocompact_pct` outside 1-100 (for example `0`) or a non-positive `ceiling` disables that injection and leaves the crew on the harness default.
 `bin/fm-context-gauge.sh` reads a session's live context size and reports `level: ok|high|critical` against `soft` and `hard`; `bin/fm-context-lib.sh` owns the resolution and classification contract.
 A native token count is read from the claude transcript matching the session's working directory; harnesses with no readable native usage fall back to the watcher-maintained per-event counter times `proxy_tokens_per_event`, reported as `source: proxy` so an estimate is never mistaken for a measurement.
 See [`proposals/context-management.md`](proposals/context-management.md) for the layered design.
