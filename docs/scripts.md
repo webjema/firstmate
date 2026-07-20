@@ -43,6 +43,8 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target for the daemon and launcher                   |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
+| `fm-context-gauge.sh`    | Print one deterministic context-pressure line for a session (native token read, proxy floor) |
+| `fm-context-lib.sh`      | Shared context threshold resolution, native transcript read, and level classification |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
