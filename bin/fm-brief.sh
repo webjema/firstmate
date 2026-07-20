@@ -118,6 +118,7 @@ Keep your own working context lean so a long task never crowds out the work itse
 - Investigate through your harness's read-only exploration subagent where it has one, so file contents and search output come back as a short conclusion instead of filling your main context.
 - Read only what you need: prefer targeted reads over whole files, and never re-read a file you already understand.
 - Capture large command output - test runs, builds, long logs - to a file and read only the tail or the failing lines, rather than streaming all of it through your context.
+- Keep a short running plan in a scratch file in your worktree (`.fm/progress.md`: what is done, what is left, key findings), and update it as you go; it is scratch, so never stage or commit it. Your context may be compacted mid-task; the plan file and your commits are what let you resume without losing your place, so treat them as your durable memory, not your chat history.
 EOF
 )
 
