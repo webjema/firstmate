@@ -348,8 +348,44 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+# The context-discipline block keeps a crew's own working context lean so a long
+# task stays under its window. It is injected into ship and scout briefs (not the
+# secondmate charter, which is a firstmate in its own right), from ONE shared
+# owner, so both carry identical guidance.
+test_context_discipline_in_ship_and_scout() {
+  local home id brief kind
+  home="$TMP_ROOT/context-discipline-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-ctxdisc-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    assert_grep "# Context discipline" "$brief" "$kind brief lost the Context discipline section"
+    assert_grep "read-only exploration subagent" "$brief" \
+      "$kind brief lost the subagent-first investigation guidance"
+    assert_grep "Capture large command output" "$brief" \
+      "$kind brief lost the capture-large-output-to-a-file guidance"
+    assert_grep "never re-read a file you already understand" "$brief" \
+      "$kind brief lost the targeted-reads guidance"
+  done
+
+  # The secondmate charter is a firstmate itself and must NOT carry the crew block.
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='x' \
+    "$ROOT/bin/fm-brief.sh" ctxdisc-sm --secondmate --no-projects >/dev/null 2>&1
+  assert_no_grep "# Context discipline" "$home/data/ctxdisc-sm/brief.md" \
+    "secondmate charter wrongly carries the crew context-discipline block"
+  pass "fm-brief.sh: ship and scout briefs carry the context-discipline block"
+}
+
 test_script_parses
 test_help_includes_entire_header
+test_context_discipline_in_ship_and_scout
 test_ship_modes_generate_clean_briefs
 test_legacy_mode_token_maps_to_pr
 test_pr_dod_carries_the_review_contract
