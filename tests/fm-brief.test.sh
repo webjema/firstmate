@@ -373,6 +373,10 @@ test_context_discipline_in_ship_and_scout() {
       "$kind brief lost the capture-large-output-to-a-file guidance"
     assert_grep "never re-read a file you already understand" "$brief" \
       "$kind brief lost the targeted-reads guidance"
+    assert_grep ".fm/progress.md" "$brief" \
+      "$kind brief lost the durable running-plan file guidance"
+    assert_grep "never stage or commit it" "$brief" \
+      "$kind brief lost the do-not-commit-the-scratch-plan rule"
   done
 
   # The secondmate charter is a firstmate itself and must NOT carry the crew block.
