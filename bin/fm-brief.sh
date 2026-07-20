@@ -108,6 +108,19 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+# Shared context-discipline block, injected verbatim into ship and scout briefs so
+# a long task keeps its own working context lean. One owner: the same guidance is
+# never written twice. See docs/proposals/context-management.md (Layer 1, reduce
+# inflow) - a crew that keeps only conclusions reaches its window far more slowly.
+CONTEXT_DISCIPLINE=$(cat <<'EOF'
+# Context discipline
+Keep your own working context lean so a long task never crowds out the work itself.
+- Investigate through your harness's read-only exploration subagent where it has one, so file contents and search output come back as a short conclusion instead of filling your main context.
+- Read only what you need: prefer targeted reads over whole files, and never re-read a file you already understand.
+- Capture large command output - test runs, builds, long logs - to a file and read only the tail or the failing lines, rather than streaming all of it through your context.
+EOF
+)
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -209,6 +222,8 @@ This is a SCOUT task: the deliverable is a written report, not a PR.
 Before starting any work, read the project's \`CLAUDE.md\` and \`AGENTS.md\` at the repo root, and follow any imports or parent-guide pointers they reference (for example a nested example project whose \`AGENTS.md\` points to a parent \`../../AGENTS.md\`), so you understand the project's rules, conventions, and architecture first.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
+
+$CONTEXT_DISCIPLINE
 
 # Rules
 1. Never push to any remote and never open a PR.
@@ -314,6 +329,8 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`
 2. Read the project's \`CLAUDE.md\` and \`AGENTS.md\` at the repo root before starting any work, and follow any imports or parent-guide pointers they reference (for example a nested example project whose \`AGENTS.md\` points to a parent \`../../AGENTS.md\`), so you understand the project's rules, conventions, and architecture first.
+
+$CONTEXT_DISCIPLINE
 
 # Rules
 $RULE1
