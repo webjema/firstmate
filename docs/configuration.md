@@ -54,6 +54,16 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Context management thresholds (config/context-management)
+
+`config/context-management` (local, gitignored) carries the token thresholds the context gauge classifies against, one `key=value` per non-empty, non-comment line.
+Keys: `soft` (default 120000), `hard` (default 160000), `ceiling` (default 200000), and `proxy_tokens_per_event` (default 1500).
+An absent file means every default applies, so the gauge works with no configuration.
+Each key also has an environment override, `FM_CONTEXT_SOFT`, `FM_CONTEXT_HARD`, `FM_CONTEXT_CEILING`, and `FM_CONTEXT_PROXY_TOKENS_PER_EVENT`, which beats the file.
+`bin/fm-context-gauge.sh` reads a session's live context size and reports `level: ok|high|critical` against `soft` and `hard`; `bin/fm-context-lib.sh` owns the resolution and classification contract.
+A native token count is read from the claude transcript matching the session's working directory; harnesses with no readable native usage fall back to the watcher-maintained per-event counter times `proxy_tokens_per_event`, reported as `source: proxy` so an estimate is never mistaken for a measurement.
+See [`proposals/context-management.md`](proposals/context-management.md) for the layered design.
+
 ## User preferences (data/user.md)
 
 Personal preferences for one user's fleet live locally in `data/user.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.
