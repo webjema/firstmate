@@ -134,3 +134,18 @@ The plan leans on machinery that already exists rather than inventing parallel s
 - The exact native-usage read path per harness, verified empirically in Phase 0 before it is trusted.
 - Whether the primary hard-threshold reset should default to restart or seeded `/compact` on Claude, decided by which reconstructs more cheaply in practice.
 - The proxy formula for harnesses with no native usage read, calibrated in Phase 0 against a harness that does expose it.
+
+## 10. As built
+
+Shipped, in order:
+
+- **Phase 0a** - `bin/fm-context-gauge.sh` + `bin/fm-context-lib.sh`: the deterministic one-line context read. The native token read is verified for the claude harness (last transcript `usage` total, transcript matched by recorded `cwd`); non-claude harnesses fall back to a proxy event counter.
+- **Phase 1** - the crew context-discipline block in every ship and scout brief (subagent-first investigation, targeted reads, capture-large-output-to-a-file).
+- **Phase 2** - the robust core. `clear_tool_uses` context editing turned out to be unavailable in the Claude Code CLI, so the CLI-native `CLAUDE_CODE_AUTO_COMPACT_WINDOW` / `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` env is injected into every claude crew launch: the harness itself now auto-compacts each claude crew around the ceiling, so a crew never exceeds it without any custom machinery. The primary is held to the same ceiling by launching it with that env (documented in the configuration reference).
+- **Phase 3a** - the crew durable running-plan file (`.fm/progress.md`), so a crew that auto-compacts mid-task resumes from the file and its commits.
+- **Phase 3b** - the `helm-handoff` skill: firstmate prepares its own session for a lossless reset by flushing volatile in-head state to its durable homes and refreshing the bearings checkpoint, so an auto-compaction or restart loses nothing.
+
+Deliberately deferred (not built), because the Phase 2 finding changed their value:
+
+- The **watcher `context-high` surfacing** (the observability half of Phase 0b) and the **Phase 4 hard-ceiling trigger wiring**. Once the harness auto-compacts every claude crew at the ceiling, enforcement is automatic, so a watcher that proactively surfaces high context for firstmate to act on is largely redundant for claude - while it is the single riskiest edit (the supervision hot loop). It stays worth doing for non-claude crews (no auto-compact) and for on-demand observability, but only behind an opt-in gate, and is left as scoped future work rather than shipped autonomously into the supervision backbone.
+- The **crew re-attach affordance** (attach a fresh crew session to an existing worktree): auto-compaction plus the progress file cover the common case, so firstmate-driven crew restart is no longer on the critical path.
