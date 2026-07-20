@@ -71,6 +71,33 @@ fm_context_pct() {  # <tokens>
   printf '%s\n' "$(( t * 100 / ceil ))"
 }
 
+# --- auto-compact launch env (claude) ---------------------------------------
+# The CLI-native way to keep a firstmate-launched claude session under the managed
+# ceiling: the Claude Code CLI does NOT expose the server-side clear_tool_uses
+# context-editing feature (API/Agent-SDK only), but it DOES honor two env vars,
+# verified against code.claude.com/docs/en/env-vars:
+#   CLAUDE_CODE_AUTO_COMPACT_WINDOW  - treat the context window as this many tokens
+#                                      for auto-compaction (default: the model's own
+#                                      window, 200K or 1M), so a 1M model compacts as
+#                                      if it were <ceiling>.
+#   CLAUDE_AUTOCOMPACT_PCT_OVERRIDE  - fire auto-compaction at this percent (1-100)
+#                                      of that window.
+# Together they make a claude session auto-compact around <ceiling> * <pct>%, keeping
+# it under the ceiling natively instead of only near the model's full window.
+#
+# Emits a trailing-space-terminated "KEY=val KEY=val " prefix suitable for prepending
+# to a launch command, or empty when disabled (autocompact_pct outside 1-100, or a
+# non-positive ceiling). Only the claude launch template consumes it.
+fm_context_autocompact_env() {
+  local ceil pct
+  ceil=$(fm_context_ceiling)
+  pct=$(fm_context_threshold autocompact_pct 90)
+  case "$ceil" in ''|*[!0-9]*) return 0 ;; esac
+  case "$pct" in ''|*[!0-9]*) return 0 ;; esac
+  { [ "$ceil" -gt 0 ] && [ "$pct" -ge 1 ] && [ "$pct" -le 100 ]; } || return 0
+  printf 'CLAUDE_CODE_AUTO_COMPACT_WINDOW=%s CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%s ' "$ceil" "$pct"
+}
+
 # --- native transcript read (claude) ----------------------------------------
 
 fm_context_projects_dir() {

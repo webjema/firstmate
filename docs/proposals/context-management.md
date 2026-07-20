@@ -34,12 +34,13 @@ Layers 1 and 2 make resets rare; layer 3 makes the ceiling hard.
 
 Spend fewer tokens per unit of work, so a session reaches the ceiling far more slowly.
 
-**1A. Context editing (tool-result clearing).**
+**1A. Auto-compaction tuned to the ceiling (claude), context editing where available.**
 Firstmate's tool results are almost all reconstructable-on-demand: a pane peek, a crew-state read, or a review diff from thirty turns ago has zero forward value, and the underlying truth is still on disk.
-That is the ideal profile for the platform `clear_tool_uses` strategy: clear stale `tool_result` blocks, keep the reasoning.
-The `state/` and `data/` files already act as the memory the cleared results would otherwise hold, so clearing loses nothing.
-Enable the `context-management-2025-06-27` beta in the primary session and in the crew spawn path, gated by harness capability.
-See [context editing](https://platform.claude.com/docs/en/build-with-claude/context-editing) and the [context-management guidance](https://claude.com/blog/context-management).
+The ideal mechanism is the platform `clear_tool_uses` context-editing strategy - clear stale `tool_result` blocks, keep the reasoning, with the `state/` and `data/` files acting as the memory the cleared results would otherwise hold.
+That strategy, however, is exposed only through the Claude API and Agent SDK, not the Claude Code CLI that firstmate and its crews actually run on (verified against the Claude Code docs, 2026-07).
+The CLI-native equivalent that keeps a claude session under the managed ceiling is auto-compaction tuning: launching each claude session with `CLAUDE_CODE_AUTO_COMPACT_WINDOW=<ceiling>` and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=<pct>` makes it auto-compact around the ceiling instead of the model's full 200K or 1M window, so it never exceeds the ceiling - the harness enforces the bound natively.
+This ships in the crew spawn path; the primary session is launched with the same env.
+See [context editing](https://platform.claude.com/docs/en/build-with-claude/context-editing), the [context-management guidance](https://claude.com/blog/context-management), and the Claude Code [env-vars reference](https://code.claude.com/docs/en/env-vars).
 
 **1B. Enforce bounded reads in the hot loop.**
 The bounded, deterministic tools are firstmate's signature move and already strong: `fm-crew-state.sh` returns one line, `fm-peek.sh` defaults to forty, `fm-bearings-snapshot.sh` and `fm-fleet-snapshot.sh` render a projection the model reads instead of raw files, and `gh-axi` emits TOON.
@@ -111,9 +112,10 @@ The plan leans on machinery that already exists rather than inventing parallel s
 - **Phase 1 - Reduce inflow (cheap).**
   The crew-brief context-discipline section in `bin/fm-brief.sh`, and the bounded-read audit of the primary hot loop.
   Depends on nothing; can run in parallel with Phase 0.
-- **Phase 2 - Context editing.**
-  Enable `clear_tool_uses` for the primary session and the crew spawn path on capable harnesses, gated by the capability matrix, and measure the reduction against Phase 0 numbers.
-  Depends on Phase 0 for measurement.
+- **Phase 2 - Auto-compaction tuned to the ceiling.**
+  Launch every claude crew (and the primary) with `CLAUDE_CODE_AUTO_COMPACT_WINDOW` / `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` set from `config/context-management`, so a claude session compacts around the ceiling natively.
+  Context editing (`clear_tool_uses`) is not exposed in the Claude Code CLI, so it is deferred to any future Agent-SDK-based harness.
+  Depends on Phase 0 for the ceiling value.
 - **Phase 3 - Lossless reset.**
   The firstmate helm handoff (pre-reset flush plus bearings-seeded checkpoint plus restart or seeded `/compact`) and the crew progress-file and re-attach affordance, triggered by the Phase 0 gauge.
   Depends on Phase 0.
