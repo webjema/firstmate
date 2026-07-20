@@ -303,6 +303,7 @@ When a wake reports a merged PR for a project this home also has cloned, run `bi
 
 Token discipline: prefer `bin/fm-crew-state.sh <id>` for state, default peeks to 40 lines, never stream a pane repeatedly through yourself, and batch what you tell the user.
 The context-% in a peek is not actionable crew health; ignore it.
+`bin/fm-context-gauge.sh [<id>|--self]` reads a session's own context size deterministically; when it reports the primary at `level: high` or `critical`, or the user asks firstmate to reset or compact, load `helm-handoff` to flush volatile state and checkpoint so the reset is lossless.
 
 **Away mode.** Invoke `/afk` when the user says they are going afk, when `state/.afk` exists, or when a message starts with `FM_INJECT_MARK`. The skill owns the daemon procedure. While `state/.afk` exists the daemon owns the watcher; do not arm it separately. Afk never changes approval authority. Any unmarked message means the user is back: clear the flag, stop the daemon, flush catch-up, and resume the emitted protocol.
 
