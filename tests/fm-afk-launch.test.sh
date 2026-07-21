@@ -7,14 +7,11 @@
 #   fresh entry vs a refresh, and the correct-ordered stop (daemon SIGTERM'd
 #   while state/.afk is still present, .afk cleared last).
 #
-#   E2E TOPOLOGY (per backend, skipped when its tool is absent): the anti-
-#   regression for the pane split/shrink - entering AND exiting away mode leaves
-#   the user's active tab topology UNCHANGED, because the daemon lands in a
-#   NON-VISIBLE separate terminal (a herdr dedicated workspace, a detached tmux
-#   session), never a split of the user's pane. The herdr path runs on a
-#   throwaway, NEVER-default HERDR_SESSION and asserts the default session is
-#   byte-identical via the fm-herdr-lab.sh fleet-state tripwire; the tmux path
-#   uses uniquely-named throwaway sessions killed by exact name. A harmless
+#   E2E TOPOLOGY (tmux, skipped when tmux is absent): the anti-regression for the
+#   pane split/shrink - entering AND exiting away mode leaves the user's active tab
+#   topology UNCHANGED, because the daemon lands in a NON-VISIBLE separate terminal
+#   (a detached tmux session), never a split of the user's pane. The tmux path uses
+#   uniquely-named throwaway sessions killed by exact name. A harmless
 #   sleeper replaces the real daemon (FM_AFK_LAUNCH_ENTRY) so the test observes
 #   only the terminal lifecycle.
 set -u
@@ -276,92 +273,6 @@ unit_signal_exits_with_lock_cleanup() {
     pass "launcher signal: TERM exits and releases the lifecycle lock"
   else
     fail "launcher signal: interrupted lifecycle resumed or retained its lock"
-  fi
-  rm -rf "$st"
-}
-
-unit_herdr_partial_create_recovery() {
-  local st recorded
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-partial.XXXXXX")
-  recorded="$st/recorded"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY=/bin/true \
-    FM_AFK_LAUNCH_LABEL=afk-exact-label RECORDED="$recorded" bash -c '
-    . "$1"
-    fm_backend_source() { return 0; }
-    fm_backend_herdr_server_ensure() { return 0; }
-    fm_backend_herdr_cli() {
-      if [ "$2 $3" = "workspace create" ]; then
-        printf %s '\''truncated'\''
-        return 1
-      elif [ "$2 $3" = "workspace list" ]; then
-        printf %s '\''{"result":{"workspaces":[{"workspace_id":"ws-partial","label":"afk-exact-label"}]}}'\''
-      else
-        printf %s '\''{"result":{"panes":[{"pane_id":"pane-exact"}]}}'\''
-      fi
-    }
-    fm_afk_launch_record_write() { printf "%s:%s:%s" "$1" "$2" "$3" > "$RECORDED"; }
-    fm_afk_launch_create_herdr lab:captain herdr
-  ' _ "$LAUNCH"
-  if [ "$(cat "$recorded" 2>/dev/null || true)" = "herdr:lab:pane-exact:ws-partial" ]; then
-    pass "herdr create: malformed response recovers durable exact ownership"
-  else
-    fail "herdr create: malformed response left terminal ownership unknown"
-  fi
-  rm -rf "$st"
-}
-
-unit_herdr_error_with_exact_ids_closes_exact() {
-  local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-error-exact.XXXXXX")
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
-    . "$1"
-    fm_backend_source() { return 0; }
-    fm_backend_herdr_server_ensure() { return 0; }
-    fm_backend_herdr_cli() {
-      if [ "$2 $3" = "workspace create" ]; then
-        printf %s '\''{"result":{"workspace":{"workspace_id":"ws-exact"},"root_pane":{"pane_id":"pane-exact"}}}'\''
-        return 1
-      elif [ "$2 $3" = "pane get" ]; then
-        printf %s '\''{"error":{"code":"transport_error"}}'\''
-        return 2
-      fi
-      return 2
-    }
-    ! fm_afk_launch_create_herdr lab:captain herdr
-  ' _ "$LAUNCH"
-  if [ "$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)" = "lab:pane-exact" ]; then
-    pass "herdr create error: unconfirmed exact id is persisted for reconciliation"
-  else
-    fail "herdr create error: unconfirmed exact cleanup id was discarded"
-  fi
-  rm -rf "$st"
-}
-
-unit_herdr_run_failure_preserves_unconfirmed_record() {
-  local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-run-fail.XXXXXX")
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
-    . "$1"
-    fm_backend_source() { return 0; }
-    fm_backend_herdr_server_ensure() { return 0; }
-    fm_backend_herdr_cli() {
-      if [ "$2 $3" = "workspace create" ]; then
-        printf %s '\''{"result":{"workspace":{"workspace_id":"ws-exact"},"root_pane":{"pane_id":"pane-exact"}}}'\''
-        return 0
-      elif [ "$2 $3" = "pane run" ]; then
-        return 1
-      elif [ "$2 $3" = "pane get" ]; then
-        printf %s '\''{"error":{"code":"transport_error"}}'\''
-        return 2
-      fi
-      return 2
-    }
-    ! fm_afk_launch_create_herdr lab:captain herdr
-  ' _ "$LAUNCH"
-  if [ "$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)" = "lab:pane-exact" ]; then
-    pass "herdr run failure: unconfirmed exact id remains reconcilable"
-  else
-    fail "herdr run failure: unconfirmed exact id was discarded"
   fi
   rm -rf "$st"
 }
@@ -825,9 +736,6 @@ unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized
 unit_lock_initialization_grace
 unit_signal_exits_with_lock_cleanup
-unit_herdr_partial_create_recovery
-unit_herdr_error_with_exact_ids_closes_exact
-unit_herdr_run_failure_preserves_unconfirmed_record
 unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
