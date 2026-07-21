@@ -40,12 +40,9 @@ Prefer a sharp sentence over a complete one: "every write goes through a command
 
 ## The four gates
 
-Direction is worthless if it only exists in a file. Apply it at every point where judgment enters the fleet:
-
-1. **Intake.** Before dispatching, judge the request against the direction and say in one line how it sits. If the user has asked for something that moves against the stated direction, say so *before* burning a crew on it - they may have changed their mind, and that is a direction update, not a task.
-2. **Brief.** Automatic: `bin/fm-brief.sh` injects the direction into every ship and scout brief, with the conflict-escalation contract.
-3. **Answering a `needs-decision`.** Load the direction before you answer. A crewmate's question about which way to build something is a direction question; answer it from the direction, not from local convenience. If the direction does not settle it, that is a gap - take it to the user and then record the answer.
-4. **Pre-merge review.** Review the diff against the direction (`bin/fm-review-diff.sh <id>`) before relaying to the user. Mechanical quality is the hooks' and CI's job; *this* review is for drift. Say plainly if the change works but pulls the architecture the wrong way.
+Direction is worthless if it only exists in a file; apply it wherever judgment enters the fleet - intake, brief injection, answering a `needs-decision`, and pre-merge review.
+`AGENTS.md` section 5 owns the full four-gate contract.
+The gate that most often loads this skill is answering a `needs-decision`: a crewmate's question about which way to build something is a direction question, answered from the direction and not from local convenience, and if the direction does not settle it, that is a gap to take to the user and then record.
 
 ## The ledger is the whole point
 
@@ -58,9 +55,6 @@ Curate this file the way `data/user.md` and `data/learnings.md` are curated - in
 
 ## Relationship to other memory
 
-Direction answers "where are we going and what is good".
-It is not project documentation and not fleet trivia.
-
-- Project-intrinsic knowledge - how to build, test, and deploy this repo - belongs in the project's own `AGENTS.md`, via normal crewmate delivery. Never copy the direction into the project.
-- User preferences and working style belong in `data/user.md`.
-- Fleet-local operational gotchas belong in `data/learnings.md`.
+Direction answers "where are we going and what is good"; it is not project documentation and not fleet trivia.
+`AGENTS.md` section 5's knowledge-routing table owns where every other kind of knowledge goes: project-intrinsic knowledge to the project's own `AGENTS.md` via crewmate delivery, user preferences to `data/user.md`, fleet-local gotchas to `data/learnings.md`.
+Never copy the direction into the project.

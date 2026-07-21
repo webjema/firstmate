@@ -50,11 +50,5 @@ This touches only the firstmate repo and its own worktrees, never anything under
 
 ## Safety
 
-- **Fast-forward only.**
-  A target that has diverged, is dirty, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
-  Nothing with unlanded work is ever discarded - this is prime directive #3.
-- **Only the firstmate repo and its worktrees** are touched, never `projects/`.
-  It is the same sanctioned self-write as the fleet sync.
-- **Secondmates are never disrupted.**
-  A secondmate gets a tracked-files fast-forward (safe while it is mid-task, since its work lives in gitignored operational dirs and separate project worktrees) plus a gentle re-read nudge.
-  It is never torn down, interrupted, or forced.
+Fast-forward only, the same sanctioned self-write as the fleet sync: a diverged, dirty, offline, or wrong-branch target is skipped and reported, never forced or stashed, so nothing with unlanded work is ever discarded (prime directive #3).
+Only the firstmate repo and its own worktrees are touched, never `projects/`, and a secondmate is never torn down, interrupted, or forced - just a tracked-files fast-forward plus a gentle re-read nudge.

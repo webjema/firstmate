@@ -14,8 +14,8 @@ The scoping, tracking, and prioritization are the review ledger's job on its `do
 It is captain-invoked only; it never runs on a schedule.
 
 The work splits by who can see what.
-The crew reconciles docs against code, PRs, and commit history - all readable from the repo it already has.
-Firstmate reconciles docs and code against Asana, because firstmate holds the Asana connector and a spawned crew may not, and because every Asana write needs the captain's word.
+The crew reconciles docs against code, PRs, and commit history, all readable from the repo it already has.
+Firstmate reconciles docs and code against Asana: it holds the Asana connector a spawned crew may not, and every Asana write needs the captain's word.
 
 ## Running a pass
 

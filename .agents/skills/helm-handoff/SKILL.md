@@ -10,7 +10,7 @@ metadata:
 
 Prepare the firstmate session for a lossless context reset.
 
-Firstmate's design already makes a restart a non-event: the conversation is a cache, and all truth lives in tmux, `state/`, `data/`, and secondmate homes (AGENTS.md section 4).
+Firstmate's design already makes a restart a non-event (AGENTS.md section 4).
 This skill closes the one gap that assumption depends on - that nothing important lives ONLY in the current chat - and it does so BEFORE a reset, not after, so an auto-compaction that fires at the ceiling or a deliberate restart loses nothing.
 
 Invoke it when the user says firstmate is getting full and should reset, compact, or "hand off the helm", or when `bin/fm-context-gauge.sh --self` reports `level: high` or `critical`.
