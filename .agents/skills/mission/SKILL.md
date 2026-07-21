@@ -10,11 +10,8 @@ metadata:
 
 A mission is a whole goal run as one unit: the captain hands over an end goal, and firstmate decomposes it into an ordered task DAG, plans it, and runs it toward production-ready.
 The design rationale is in `docs/proposals/mission-mode.md`.
-**This skill implements the full mission-mode arc:** the judged planner, the autonomous dispatcher with the adversarial review panel, mission-scoped auto-merge under the envelope, autonomous recovery, and the Alpha integration-verification gate.
-Phase 1 (Planning, below) decomposes the goal, has an independent judge critique the plan, gets the captain's confirmation, and materializes the mission and its DAG.
-Phase 2 (Running the mission, below) then drives the DAG itself: it dispatches ready tasks, gates each one at an adversarial review panel, and advances dependents as tasks land.
+**This skill implements the full mission-mode arc:** the judged planner (Phase 1), the autonomous dispatcher with the adversarial review panel (Phase 2), mission-scoped auto-merge under the envelope, autonomous recovery, and the Alpha integration-verification gate (Phase 4).
 Merge authority is the mission's: a task that survives the review panel and goes green on CI is **merged to `main` by the mission itself**, bounded by the envelope and mechanically red-safe (`bin/fm-pr-merge.sh` refuses a red PR).
-When the DAG is landed, the mission deploys to Alpha and verifies the whole goal against the live deploy (Alpha verification, below).
 A stuck task recovers autonomously under a hard cap rather than dead-ending at the captain (`stuck-crewmate-recovery`, Autonomous adjudication).
 **Production is always a human hard-stop:** the mission reaches `main` and a verified Alpha deploy, and stops there holding the production promotion for the captain - it never promotes to production.
 

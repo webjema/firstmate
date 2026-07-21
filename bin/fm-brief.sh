@@ -1,26 +1,24 @@
 #!/usr/bin/env bash
 # Scaffold a crewmate brief or persistent secondmate charter at
 # data/<task-id>/brief.md under the active firstmate home.
-# For ordinary tasks, the standard Direction/Setup/Rules/Definition-of-done contract
-# is filled in. Firstmate then replaces the {TASK} placeholder with the task
-# description, acceptance criteria, and context, and may adjust other sections
-# when the task genuinely deviates (e.g. working an existing external PR instead
-# of shipping a new one).
+# For ordinary tasks it fills in the standard Direction/Setup/Rules/Definition-of-done
+# contract; firstmate then replaces the {TASK} placeholder with the task description,
+# acceptance criteria, and context, and adjusts other sections only when the task
+# genuinely deviates (e.g. working an existing external PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
-#   --secondmate writes a persistent secondmate charter. The project list
-#   is cloned into the secondmate home, while the natural-language scope
-#   tells the main firstmate when to route work there; routine churn stays in its own home;
-#   captain-relevant escalations and marked from-firstmate replies append to this
-#   home's status file.
+#   --secondmate writes a persistent secondmate charter. The project list is cloned
+#   into the secondmate home, while the natural-language scope tells the main firstmate
+#   when to route work there; routine churn stays in its own home, and captain-relevant
+#   escalations and marked from-firstmate replies append to this home's status file.
 #   --no-projects writes a project-less charter for a domain whose subject is the
 #   firstmate repo itself (its home is a firstmate worktree, its crews take pooled
 #   worktrees of the same repo). It is mutually exclusive with a project list, and
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
-#   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter.
 # Every ship and scout brief opens with the project's Direction (bin/fm-direction.sh):
 # the business vision and the architecture, infrastructure, and quality direction the
 # change must move with. It is injected verbatim, on every task however small, because
@@ -28,17 +26,15 @@
 # direction conflict, not a fix. A crewmate that cannot honor the direction escalates
 # with needs-decision rather than quietly working against it.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
-# (data/projects.md via fm-project-mode.sh; see AGENTS.md project management
-# and task lifecycle):
+# (data/projects.md via fm-project-mode.sh; see AGENTS.md task lifecycle):
 #   PR          implement -> /code-review + /verify -> push the branch, open NO PR ->
 #               report `review-ready: branch fm/<id> pushed, no PR` and STOP (default).
 #               Firstmate reviews the pushed branch against the direction; findings are
-#               fixed in place on the same branch and re-signalled `review-ready:`, and only
-#               an approval opens the PR (plain gh) with `done: PR <url>`. The review gate sits
-#               BEFORE the PR because firstmate's review of a diff never needed a PR to exist,
-#               while a post-PR finding invalidates the crew's own review, its verify, its full
-#               suite run, and the PR's CI - the single largest source of rework measured in the
-#               fleet. The push still happens, so the work is durable against a box reboot.
+#               fixed in place and re-signalled `review-ready:`, and only an approval opens
+#               the PR (plain gh) with `done: PR <url>`. The review gate sits BEFORE the PR so
+#               a finding costs one fix, not a re-review plus a re-run of the crew's verify and
+#               full suite and the PR's CI - the largest source of rework measured in the fleet.
+#               The push still happens, so the work is durable against a box reboot.
 #   local-only  implement on branch, stop and report "ready in branch" (no push/PR);
 #               firstmate reviews, user approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -162,8 +158,7 @@ $PROJECT_CLONES_NOTE
 Each project you supervise has a standing direction at \`data/directions/<project>.md\`: the business vision and the architecture, infrastructure, and quality direction that every change must move with. Read it before you dispatch anything, brief your crewmates with it, and judge their work against it.
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
-You do not generate your own work.
-Act only on tasks the main firstmate routes to you.
+You do not generate your own work; act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
 
 # Requests from the main firstmate
@@ -240,8 +235,8 @@ $CONTEXT_DISCIPLINE
    FYI progress lines; firstmate reads your pane for that.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
-   firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
-   treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   firstmate then leaves your idle pane alone and rechecks on a long cadence instead of treating
+   it as a wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -325,7 +320,7 @@ $DIRECTION_SECTION
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, not the primary checkout firstmate operates from.
-The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
+The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` help inspect the repo but cannot prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`
@@ -348,8 +343,8 @@ $RULE1
    firstmate reads your pane for that.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
-   a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
-   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   a scheduled window): firstmate then leaves your idle pane alone and rechecks on a long cadence
+   instead of treating it as a wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, a conflict with the Direction above),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.

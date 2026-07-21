@@ -47,5 +47,5 @@ It is captain-invoked only; it never runs on a schedule.
 
 ## The comment rule belongs in the direction too
 
-The comment-hygiene bar this skill enforces - no redundant, stale, or misleading comments, compact and why-focused only - is a standing quality principle, not a one-pass whim.
+The comment-hygiene bar this pass enforces (step 3) is a standing quality principle, not a one-pass whim.
 When a project's quality direction does not already carry it, offer to record it once with `bin/fm-direction.sh add-decision <project> "..."` (via `capture-decision`), so `bin/fm-brief.sh` injects it into every brief and every crew holds the line, not just a code-shape pass.

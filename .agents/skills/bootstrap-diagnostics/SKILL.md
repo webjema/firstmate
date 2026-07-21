@@ -41,7 +41,7 @@ The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then
 - `POOL_SLOT: <project>: slot <name> is DIRTY... ` - a crew died mid-task and left its workspace with uncommitted work in it.
   `treehouse get` skips a dirty slot forever and `treehouse prune` refuses to reclaim it, so the project's pool has silently shrunk by one and will keep shrinking with every crash until someone looks.
   **Never reclaim it reflexively.**
-  The line reports the evidence it found (uncommitted files, unpushed commits) precisely because that work may be worth saving - on 2026-07-14 exactly such a slot held a dead crew's work, and it was salvaged and shipped.
+  The line reports the evidence it found (uncommitted files, unpushed commits) precisely because that work may be worth saving - such a slot has held a dead crew's salvageable work before.
   Inspect the slot with the printed `git -C <path> status`.
   If it holds real work, dispatch a crewmate to recover it before anything else.
   Only once the work is landed, or the user has explicitly said to discard it, may the printed `treehouse destroy ... --include-unlanded --yes` be run - it is irreversible, so it needs the user's word (`AGENTS.md` section 8: anything destructive reaches the user).

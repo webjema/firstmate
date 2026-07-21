@@ -10,9 +10,7 @@ metadata:
 
 Generate a "pick up where I left off" report from the fleet's live state, so the user can resume in one read after a break, a night, or a context reset.
 The deliverable is a dated markdown file plus a concise chat summary; this is the reusable version of the worked example at `data/status-report-2026-07-06.md` when that file is present in this home.
-This skill is read-mostly.
-It reads fleet state and writes exactly one report file.
-It never tears down a task, merges a PR, dispatches new work, or mutates any task state as a side effect of producing the brief - those belong to the user's explicit word and the normal task lifecycle.
+This skill is read-mostly: it reads fleet state and writes exactly one report file (see Supervision discipline below).
 
 ## What it does
 
