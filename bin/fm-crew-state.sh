@@ -119,9 +119,8 @@ map_log_state() {  # <line>
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
-# Backend-aware endpoint reads (fm_backend_of_meta defaults an absent backend= to
-# tmux, the P1 contract), so a herdr task is read through fm_backend_capture
-# instead of a bare tmux probe.
+# Backend-aware endpoint reads: fm_backend_of_meta defaults an absent backend= to
+# tmux, the only backend, and the tmux endpoint is probed directly below.
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
