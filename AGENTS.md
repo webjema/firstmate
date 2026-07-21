@@ -150,6 +150,7 @@ The crew does not mark its own homework.
 
 **Tending** is keeping quality from decaying over time, a bounded slice at a time.
 When the user invokes `/code-shape`, load that skill: it asks the review ledger (`bin/fm-review-ledger.sh`) for the next codebase slice - preferring recently-changed code, else never-reviewed code, never re-reviewing an unchanged slice - and ships one direct-fix crew scoped to it for duplication, dead code, testability, and comment hygiene.
+When the user invokes `/docs-sync`, load that skill: it tends the same ledger's `docs` track, shipping a crew to reconcile docs against code, PRs, and commits, then firstmate reconciles Asana with every write captain-confirmed.
 
 ### Project memory
 
