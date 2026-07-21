@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Shared, backend-neutral agent-state transition shape and supervision policy.
 #
-# This library owns TWO contracts, deliberately backend-independent so any
-# push-capable session backend (herdr today, others later) reuses them instead
-# of re-deriving a private, per-status escalation hack:
+# This library owns TWO contracts, deliberately backend-independent so a
+# push-capable session backend reuses them instead of re-deriving a private,
+# per-status escalation hack:
 #
 #   1. The NORMALIZED TRANSITION RECORD - the ONE shape every backend's event
 #      stream is normalized into before any policy runs. A single TAB-separated
@@ -12,13 +12,12 @@
 #      Only `to_status` is authoritative for the policy below; the other fields
 #      are identity/telemetry and MAY be empty when a backend cannot supply
 #      them. `from_status` in particular is empty for backends whose event
-#      carries only the new status (herdr's `pane.agent_status_changed` does
-#      not report the previous status, and its stream is edge-triggered, so
-#      each `to_status` IS itself a fresh edge); it exists in the shape for
-#      backends that DO report the prior state and for future edge diagnostics.
+#      carries only the new status (an edge-triggered stream reports each
+#      `to_status` as itself a fresh edge, with no previous status); it exists
+#      in the shape for backends that DO report the prior state and for future
+#      edge diagnostics.
 #      Statuses use the shared agent-state vocabulary
-#      (idle|working|blocked|done|unknown), the same enum herdr's `agent get`
-#      and `pane.agent_status_changed` report.
+#      (idle|working|blocked|done|unknown).
 #
 #   2. The STATUS -> ACTION POLICY TABLE (fm_transition_policy) - the SINGLE
 #      OWNER of the mapping from a normalized `to_status` to the supervision
@@ -26,10 +25,9 @@
 #      consumer re-encodes the mapping. Adding or changing a status's action is
 #      a one-line edit here, and it changes every backend at once.
 #
-# The split is what keeps the escalation general rather than a herdr blocked
-# hack: a backend contributes only a wire->record normalizer and a stream
-# reader; the shape and the policy are shared. See bin/backends/herdr.sh
-# (fm_backend_herdr_wait_transition) for the herdr producer and bin/fm-watch.sh
+# The split is what keeps the escalation general rather than a per-backend
+# blocked hack: a backend contributes only a wire->record normalizer and a
+# stream reader; the shape and the policy are shared. See bin/fm-watch.sh
 # (the watcher's event-wait splice) for the consumer.
 
 # Field separator for the normalized record. A literal TAB; every field is
@@ -72,7 +70,7 @@ fm_transition_agent()        { fm_transition_field "$1" 5; }
 #
 #   actionable - escalate to the supervisor IMMEDIATELY (a fresh edge here is a
 #                durable wake now). `blocked` is the only immediately-actionable
-#                status today: herdr reports it precisely when a harness is
+#                status today: it is reported precisely when a harness is
 #                waiting on the human (a permission/trust dialog, an interactive
 #                menu, a wedged prompt) - the cases that write no status file
 #                and otherwise sit until the stale-pane wedge timer.

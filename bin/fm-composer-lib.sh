@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # bin/fm-composer-lib.sh - the ONE fleet-wide owner of composer-content
-# classification, shared by every session-provider adapter: the tmux path
-# through bin/fm-tmux-lib.sh, and bin/backends/{herdr,orca,cmux}.sh directly.
+# classification, used by the session-provider adapter through
+# bin/fm-tmux-lib.sh. It stays a shared owner so the classification cannot drift
+# back into a per-adapter copy if another backend is ever added.
 #
-# WHY THIS EXISTS (task fm-composer-shellglyph-safety): the four adapters each
-# carried their own copy of the "is this composer row empty / pending / not an
-# agent composer" decision, and the copies drifted. The dangerous drift: a BARE
+# WHY THIS EXISTS (task fm-composer-shellglyph-safety): the session-provider
+# adapters each carried their own copy of the "is this composer row empty /
+# pending / not an agent composer" decision, and the copies drifted. The
+# dangerous drift: a BARE
 # shell prompt glyph (`>`, `$`, `%`, `#`) - what a pane shows once its agent has
 # exited to a plain login shell - was treated as an empty, ready-to-inject
 # AGENT composer. The away-mode escalation injector (bin/fm-supervise-daemon.sh)
@@ -22,32 +24,28 @@
 # injection target). The AGENT prompt glyphs `❯` (claude) and `›` (codex) are a
 # genuine empty agent composer either way, bordered or bare.
 #
-# GHOST/PLACEHOLDER TEXT is the other half of this owner (task
-# afk-herdr-false-pending): a harness fills an otherwise-empty composer with
-# de-emphasized ghost text - claude's rotating prompt suggestion, codex's idle
-# suggestion, grok's placeholder - which a plain capture cannot tell apart from
-# text a human typed, so the away-mode injector reads the idle pane as "pending
-# input" and defers every escalation (the overnight wedge that motivated this
-# consolidation). fm_composer_strip_ghost is the ONE ANSI-aware extractor of
-# "real typed content": it drops every de-emphasized run - dim/faint (SGR 2, how
-# claude and codex render ghost text) AND a dark/muted TRUECOLOR foreground (how
-# grok renders placeholder/hint text) - and keeps only normal-intensity,
-# normally-coloured text. Consolidating it here means the two ANSI-capable
-# adapters (tmux via bin/fm-tmux-lib.sh, herdr via bin/backends/herdr.sh) cannot
-# drift into per-harness one-off strips again; the previous herdr-only faint
-# byte-pattern check missed claude's own dim ghost (its prompt glyph is not
-# bold-wrapped) and no adapter covered grok's truecolor placeholder at all.
+# GHOST/PLACEHOLDER TEXT is the other half of this owner: a harness fills an
+# otherwise-empty composer with de-emphasized ghost text - claude's rotating
+# prompt suggestion, codex's idle suggestion, grok's placeholder - which a plain
+# capture cannot tell apart from text a human typed, so the away-mode injector
+# reads the idle pane as "pending input" and defers every escalation (the
+# overnight wedge that motivated this consolidation). fm_composer_strip_ghost is
+# the ONE ANSI-aware extractor of "real typed content": it drops every
+# de-emphasized run - dim/faint (SGR 2, how claude and codex render ghost text)
+# AND a dark/muted TRUECOLOR foreground (how grok renders placeholder/hint text)
+# - and keeps only normal-intensity, normally-coloured text. Consolidating it
+# here means the tmux adapter (via bin/fm-tmux-lib.sh) cannot drift into a
+# per-harness one-off strip again; the previous faint byte-pattern check missed
+# claude's own dim ghost (its prompt glyph is not bold-wrapped) and did not cover
+# grok's truecolor placeholder at all.
 #
-# Each adapter still owns its own CAPTURE and structural row-finding, because
-# those use genuinely different primitives (tmux's cursor-row read, herdr's ANSI
-# tail scan, orca/cmux's plain read-screen). Once an adapter has a candidate
-# composer row it hands the RAW styled row to fm_composer_strip_ghost for the
-# real-typed-content extraction, strips the box borders, trims, and hands the
-# result plus a <bordered> flag to fm_composer_classify_content for the shared
-# empty|pending|unknown verdict. orca/cmux read a plain (unstyled) screen so
-# they have no ghost styling to strip and rely on the idle-placeholder match
-# below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
-# include guard (matching bin/fm-tmux-lib.sh).
+# The adapter owns its own CAPTURE and structural row-finding, using tmux's
+# cursor-row read. Once it has a candidate composer row it hands the RAW styled
+# row to fm_composer_strip_ghost for the real-typed-content extraction, strips
+# the box borders, trims, and hands the result plus a <bordered> flag to
+# fm_composer_classify_content for the shared empty|pending|unknown verdict.
+# Re-sourcing is a cheap idempotent redefinition, so this file needs no include
+# guard (matching bin/fm-tmux-lib.sh).
 
 # fm_composer_strip_ansi: drop every CSI escape sequence, leaving plain text.
 # Used for STRUCTURAL row/shape detection, where ghost text must be KEPT so the
@@ -63,7 +61,7 @@ fm_composer_strip_ansi() {
 
 # fm_composer_strip_ghost: the ONE fleet-wide ANSI-aware extractor of "real typed
 # content" from a captured, styled composer row. Reads the styled line on stdin
-# (from `tmux capture-pane -e` or `herdr pane read --format ansi`) and prints the
+# (from `tmux capture-pane -e`) and prints the
 # plain, non-ghost text on stdout, dropping:
 #   - dim/faint runs (SGR 2): how claude and codex render ghost/suggestion text.
 #     A reset (SGR 0) or normal-intensity (SGR 22) ends a dim run.
