@@ -10,7 +10,7 @@ metadata:
 
 A tending pass keeps documentation honest a bounded slice at a time: docs that match what the code actually does, with no work-in-progress leftovers and no claims the code has since moved past.
 Documentation files are this pass's territory; comments inside the code belong to the `/code-shape` pass, so the two tending passes never edit the same lines.
-The scoping, tracking, and prioritization are the review ledger's job on its `docs` track (`bin/fm-review-ledger.sh`, narrated in `docs/review-ledger.md`); this skill turns the chosen slice into one direct-fix ship for the docs, then reconciles Asana separately because writing to Asana is outward-facing.
+The scoping, tracking, and prioritization are the review ledger's job on its `docs` track (`$FM_ROOT/bin/fm-review-ledger.sh`, narrated in `$FM_ROOT/docs/review-ledger.md`); this skill turns the chosen slice into one direct-fix ship for the docs, then reconciles Asana separately because writing to Asana is outward-facing.
 It is captain-invoked only; it never runs on a schedule.
 
 The work splits by who can see what.
@@ -21,12 +21,12 @@ Firstmate reconciles docs and code against Asana: it holds the Asana connector a
 
 1. **Resolve the project and read its direction.**
    Resolve the project from the invocation exactly as intake does (`AGENTS.md` section 6) and state it back.
-   Read `data/directions/<project>.md`; a doc that documents the project against its stated direction is worth more than one that just matches today's code.
+   Read `$FM_ROOT/data/directions/<project>.md`; a doc that documents the project against its stated direction is worth more than one that just matches today's code.
 
 2. **Ask the ledger for the next doc slice.**
-   Run `bin/fm-review-ledger.sh select <project> docs` and read the chosen unit(s), the reason, and the head sha; `NOTHING_TO_REVIEW` means the docs are covered and quiet, so say so and stop.
-   Run `bin/fm-review-ledger.sh select <project> docs --paths` to get the exact paths to scope the crew to.
-   A docs-centralized project should point its `docs` track at the documentation tree with a `data/reviews/<project>/docs.units` override (see `docs/review-ledger.md`), so the slice is doc-shaped rather than source-shaped.
+   Run `$FM_ROOT/bin/fm-review-ledger.sh select <project> docs` and read the chosen unit(s), the reason, and the head sha; `NOTHING_TO_REVIEW` means the docs are covered and quiet, so say so and stop.
+   Run `$FM_ROOT/bin/fm-review-ledger.sh select <project> docs --paths` to get the exact paths to scope the crew to.
+   A docs-centralized project should point its `docs` track at the documentation tree with a `$FM_ROOT/data/reviews/<project>/docs.units` override (see `$FM_ROOT/docs/review-ledger.md`), so the slice is doc-shaped rather than source-shaped.
 
 3. **Dispatch one direct-fix ship crew scoped to the doc slice.**
    Scaffold a ship brief (`$FM_ROOT/bin/fm-brief.sh <id> <project>`), then replace `{TASK}` with a docs-reconciliation task:
@@ -50,6 +50,6 @@ Firstmate reconciles docs and code against Asana: it holds the Asana connector a
 
 5. **Record the slice on the ledger when the pass ends.**
    Record each doc unit from step 2 at the landed commit (sync the clone first, `AGENTS.md` section 7):
-   `bin/fm-review-ledger.sh record <project> docs <unit> --sha <merged-sha> --verdict <full-PR-url>`.
+   `$FM_ROOT/bin/fm-review-ledger.sh record <project> docs <unit> --sha <merged-sha> --verdict <full-PR-url>`.
    For a slice the crew reported clean, record each unit at the current clone head with `--verdict clean`.
    The Asana leg is not part of the ledger row; the ledger tracks doc-review coverage, and Asana is reconciled fresh from evidence each pass.
