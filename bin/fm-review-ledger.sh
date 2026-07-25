@@ -224,15 +224,16 @@ classify_unit() {
     churn=$(git_r log --oneline --since="$date" -- $(unit_pathspec "$unit") 2>/dev/null | wc -l | tr -d ' ')
   fi
   
-  if [ -n "$(git_r status --porcelain -- "$(unit_pathspec "$unit")" 2>/dev/null)" ]; then
+  # shellcheck disable=SC2046
+  if [ -n "$(git_r status --porcelain -- $(unit_pathspec "$unit") 2>/dev/null)" ]; then
     dirty=1
   fi
   
   ttl_days=${FM_LEDGER_TTL_DAYS:-30}
-  local now then diff=0
-  now=$(date +%s)
-  if [ -n "$date" ] && then=$(date -d "$date" +%s 2>/dev/null); then
-    diff=$(( (now - then) / 86400 ))
+  local time_now time_then diff=0
+  time_now=$(date +%s)
+  if [ -n "$date" ] && time_then=$(date -d "$date" +%s 2>/dev/null); then
+    diff=$(( (time_now - time_then) / 86400 ))
   fi
 
   if [ "${churn:-0}" -gt 0 ] || [ "$dirty" -eq 1 ]; then
