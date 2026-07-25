@@ -29,7 +29,7 @@ Firstmate reconciles docs and code against Asana: it holds the Asana connector a
    A docs-centralized project should point its `docs` track at the documentation tree with a `data/reviews/<project>/docs.units` override (see `docs/review-ledger.md`), so the slice is doc-shaped rather than source-shaped.
 
 3. **Dispatch one direct-fix ship crew scoped to the doc slice.**
-   Scaffold a ship brief (`bin/fm-brief.sh <id> <project>`), then replace `{TASK}` with a docs-reconciliation task:
+   Scaffold a ship brief (`$FM_ROOT/bin/fm-brief.sh <id> <project>`), then replace `{TASK}` with a docs-reconciliation task:
    - **Cross-Reference Codebase Diffs.** Scan the codebase diffs (commits and merged PRs) since the last docs pass. Identify which codebase features changed and search for their corresponding documentation. If a codebase change has no corresponding doc update, flag it as a missed file.
    - **Reconcile.** For every work-in-progress and implementation doc in the slice, check each claim against the merged PRs, the commit history, and the actual code, and classify it: implemented (the code matches), partial leftover (a described step was never finished), stale (the code has moved past the doc), orphaned (it references things that no longer exist), or intended (it describes direction the code has not reached yet, which is a standing intent to keep as intent, not a false claim to delete).
    - **Hunt for Orphaned Files.** Check the doc slice against the codebase graph (`codebase-memory-mcp`). If a doc references an entity (function, route, module) that no longer exists in the codebase graph, the doc is an orphaned "missed file" and should be deleted or marked obsolete.
