@@ -230,6 +230,9 @@ FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; a
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
+FM_PENDING_FROZEN_SECS=600         # seconds a pending composer must stay byte-identical under continuous observation before the force flush drains it; 0 restores the unbounded refusal
+FM_PENDING_SAMPLE_GAP_MAX=120      # longest gap between two composer observations that still counts as continuous; a longer gap restarts the freeze window
+FM_AFK_PREFLIGHT=1                 # away-mode entry proves the supervisor composer reads empty before starting; 0 skips the check and leaves the wake path unverified
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|command:<cmd>; absent = auto (macOS -> an OS notification)
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10

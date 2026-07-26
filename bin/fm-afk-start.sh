@@ -41,6 +41,8 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-afk-preflight-lib.sh
+. "$FM_AFK_START_DIR/fm-afk-preflight-lib.sh"
 
 fm_afk_start_usage() {
   sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -116,6 +118,14 @@ fm_afk_start_main() {
     -h|--help) fm_afk_start_usage; return 0 ;;
     * ) echo "usage: $(basename "${BASH_SOURCE[1]:-fm-afk-start.sh}")" >&2; return 2 ;;
   esac
+
+  # Prove the wake path BEFORE any state is written, so a refusal leaves nothing
+  # half-entered and firstmate never believes it is in away mode with no way to
+  # be woken (incident afk-wake-fix-r4). The launcher-prepared path already ran
+  # its own preflight before preparing state, so it is not re-run here.
+  if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ]; then
+    fm_afk_preflight || return 1
+  fi
 
   mkdir -p "$FM_AFK_STATE"
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then

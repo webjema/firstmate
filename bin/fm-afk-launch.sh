@@ -334,6 +334,13 @@ fm_afk_launch_start() {
   captain_backend=$(discover_supervisor_backend) || {
     fm_afk_launch_log "could not resolve the user supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
 
+  # Prove away mode can actually reach that pane before creating a terminal or
+  # touching state - the launcher resolves the target, so it owns the proof for
+  # this path (bin/fm-afk-preflight-lib.sh; incident afk-wake-fix-r4). Runs on
+  # the refresh path too: a refresh re-asserts the same promise.
+  FM_SUPERVISOR_TARGET="$captain_target" FM_SUPERVISOR_BACKEND="$captain_backend" \
+    fm_afk_preflight || return 1
+
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
   if daemon_lock_held_by_live_daemon; then
