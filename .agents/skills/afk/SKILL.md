@@ -20,6 +20,7 @@ batched digest rather than per-wake injections.
    This owns the durable state write, session-scoped stale-artifact clearing,
    terminal record, and rollback.
    The flag survives a firstmate restart, so recovery re-enters afk when it is present.
+   Entry is gated by a preflight that proves the wake path first (below); a refusal means away mode did NOT start.
 
 2. **Ensure the sub-supervisor daemon is running as a tracked background process.**
    Its hosting differs by harness.
@@ -50,6 +51,17 @@ batched digest rather than per-wake injections.
 
 4. **Acknowledge** to the user that away-mode is active.
    The daemon will self-handle routine wakes, escalate captain-relevant events and bounded declared-external-wait rechecks, and let the user exit by sending any real message.
+
+## Entry preflight (away mode must prove it can wake somebody)
+
+Both entry paths run `fm_afk_preflight` (`bin/fm-afk-preflight-lib.sh`) before writing any away-mode state.
+It resolves the supervisor pane exactly as the daemon will, classifies its composer through the real classifier, and enters away mode only on an affirmative `empty`.
+Any other verdict - `pending`, `unknown`, or a missing pane - refuses entry and prints what it saw plus the fix.
+Away mode is a promise to wake the user, and a promise that cannot be demonstrated at the moment it is made must not be made at all: on 2026-07-26 a composer misread let away mode start against a pane it could never reach, and the user lost a 7-hour overnight window.
+
+On a refusal, do not retry blindly and never set `FM_AFK_PREFLIGHT=0` to get past it.
+Read the verdict, tell the user in plain language that away mode did not start and why (unsubmitted text on the line, the pane is not running firstmate, no pane found), and enter away mode only once a retry passes.
+`FM_AFK_PREFLIGHT=0` exists for test harnesses and for a user who has explicitly accepted that they may not be woken.
 
 ## How to exit afk
 
@@ -102,7 +114,13 @@ If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon ru
 First it attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
 If that cannot be confirmed, it attempts a **force flush**: delivery with the busy guard and the empty-composer requirement bypassed, so a detection that misfires toward "never idle" (a busy footer lingering in scrollback, or a composer misread as `unknown`) can no longer wedge the digest forever.
 This is safe in away mode because no human is typing, so the guards' rationale (do not clobber a human's line) does not apply, and a genuinely mid-turn agent simply queues the submitted digest for after the turn.
-The one guard force still honours is a `pending` composer: `pending` means real unsubmitted text is on the line right now (a returning user's keystrokes, or a swallowed prior injection), so force refuses it and leaves it to the strict Enter-retry path.
+A `pending` composer is the one case force does not simply type into, because `pending` normally means real unsubmitted text is on the line (a returning user's keystrokes, or a swallowed prior injection).
+It is bounded rather than refused outright, because refusing it outright is unbounded: one classifier misread then stalls delivery forever, which is exactly what produced the 26,211-second wedge on 2026-07-26.
+The bound is **change, not time**.
+While the composer's content keeps changing, force always refuses - a human is on the line and no amount of waiting earns the right to clobber it.
+Once the content has been byte-identical for `FM_PENDING_FROZEN_SECS` (default 600) of continuously-observed time, the line is a frozen read rather than a human, and force drains it with a single `Enter` and delivers only if the composer then confirms it is no longer `pending`.
+Force never types on top of text: appending would both merge the digest into that text and push the sentinel marker off the front of the line, which firstmate reads as "the user is back".
+If the frozen line does not drain, force refuses and the wedge alarm path takes over.
 Only if the force flush also cannot deliver does the daemon raise a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
@@ -166,7 +184,8 @@ the marker lets firstmate distinguish it from a real user message.
 - **Ghost-stripping classifier** - the shared composer classifier receives a candidate row only after tmux performs its own capture and structural row recognition, routing the raw styled candidate row through the shared `fm_composer_strip_ghost` extractor, which removes dim/faint and dark-TRUECOLOR ghost/placeholder text before classification.
   It reads the composer shape from a separately ANSI-stripped plain row because a dark TRUECOLOR border can be stripped with ghost content, so a ghost-only or idle bordered composer such as claude's `│ > ... │` reads empty without letting an unbordered shell prompt do the same.
   `FM_COMPOSER_IDLE_RE` still overrides tmux empty-composer matching after shared ghost and border stripping, and `FM_BUSY_REGEX` overrides busy footers.
-- **Max-defer escape** - per Busy-guard and composer guard above: past `FM_MAX_DEFER_SECS` the daemon attempts a normal flush then a force flush that bypasses the busy and empty-composer guards but still refuses a `pending` composer, and only a force flush that cannot confirm delivery raises the loud, rate-limited wedge alarm.
+- **Max-defer escape** - per Max-defer escape above: past `FM_MAX_DEFER_SECS` the daemon attempts a normal flush then a force flush that bypasses the busy and empty-composer guards, treating a `pending` composer as escapable only once its content has been frozen byte-identical for `FM_PENDING_FROZEN_SECS`, and only a force flush that cannot confirm delivery raises the loud, rate-limited wedge alarm.
+- **Proven wake path at entry** - per Entry preflight above: away mode refuses to start unless it can classify the supervisor composer as `empty` right then, so a pane it could never reach fails closed in front of the user instead of silently overnight.
 - **Verified type-once submit model** - per Submit model above: the digest is typed once, then Enter is retried (Enter only, never a retype) until the backend submit primitive reports `empty`.
 - **Marker strip** - `strip_injection_marker` removes the sentinel prefix before
   classification or relay, so the digest text firstmate sees is clean.

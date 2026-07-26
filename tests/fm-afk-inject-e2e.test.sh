@@ -15,6 +15,13 @@
 #     A captain-relevant status must deliver exactly ONE sentinel-prefixed,
 #     single-line digest with no duplicate or spurious user submission.
 #
+#   Scenario D (the wedge shape, incident afk-wake-fix-r4): the supervisor pane
+#     renders the composer shape that wedged delivery for 26,211s - a bare `❯`
+#     followed by U+00A0, not an ASCII space, drawn under a rule. The pane is
+#     IDLE; only the classifier was wrong. The digest must land. A unit test on a
+#     string classifier cannot prove this, because the bug was in what the pane
+#     actually draws; only capturing a real pane does.
+#
 # Isolation: all test tmux runs on a dedicated socket (tmux -L afk-e2e-<pid>).
 # A tmux shim first on PATH redirects the daemon's bare `tmux` calls to the
 # private socket. The daemon points at a throwaway state dir (FM_STATE_OVERRIDE)
@@ -85,6 +92,12 @@ cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
 MARK=$'\x1f'
 LOG="$1"
+# Optional composer chrome, passed as printf %b specs so the caller can hand us
+# ESC and multibyte glyphs through a plain single-quoted send-keys command line.
+# PROMPT is redrawn on the cursor row before the buffer, so an EMPTY buffer
+# leaves exactly the prompt bytes on the row the composer classifier reads.
+PROMPT=$(printf '%b' "${2-}")
+RULE=$(printf '%b' "${3-}")
 OLD_STTY=$(stty -g 2>/dev/null || true)
 [ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true
 cleanup() {
@@ -94,7 +107,7 @@ trap cleanup EXIT INT TERM
 
 _buf=
 redraw() {
-  printf '\r\033[K%s' "$_buf"
+  printf '\r\033[K%s%s' "$PROMPT" "$_buf"
 }
 submit_line() {
   local _line=$_buf _c _hex
@@ -110,6 +123,7 @@ submit_line() {
   redraw
 }
 
+[ -z "$RULE" ] || printf '%s\n' "$RULE"
 redraw
 while IFS= read -r -n 1 _ch; do
   if [ -z "$_ch" ]; then
@@ -423,8 +437,85 @@ test_scenario_c() {
   pass "Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
 }
 
+# --- Scenario D: the wedge shape (incident afk-wake-fix-r4) -----------------
+# A second supervisor pane draws the real wedged composer: SGR 37, U+276F,
+# U+00A0, SGR 39, under a box rule. Nothing else about the pane is unusual - it
+# is idle and healthy, and the daemon has a captain-relevant digest to deliver.
+# On the pre-fix classifier that row read `pending`, so every delivery deferred
+# and the digest never arrived. Here it must arrive.
+#
+# Only the top rule is drawn: the composer classifier reads the CURSOR ROW and
+# nothing else, so a bottom rule would add cursor-parking complexity for no
+# assertion. The row shapes around the glyph are owned by
+# tests/fm-composer-lib.test.sh's bare-glyph-between-rules case.
+
+test_scenario_d() {
+  local pane row hex verdict digest_count digest_line digest_hex
+  # Prompt spec: \033[37m U+276F U+00A0 \033[39m - the captured incident bytes.
+  local prompt_spec='\033[37m\342\235\257\302\240\033[39m'
+  local rule_spec='\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200'
+
+  LOG_FILE="$STATE_DIR/submitted-d.log"
+  : > "$LOG_FILE"
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -n wedge-shape -t supervisor
+  pane=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t wedge-shape '#{pane_id}')
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$pane" \
+    "clear; bash '$LOOP_SCRIPT' '$LOG_FILE' '$prompt_spec' '$rule_spec'" Enter
+  sleep 1
+  SUPERVISOR_PANE="$pane"
+
+  # Precondition 1: the pane really carries the incident bytes, not a lookalike.
+  # Without this the scenario could pass against an ordinary ASCII-space prompt
+  # and prove nothing.
+  row=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$pane" \
+    -S "$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$pane" '#{cursor_y}')" \
+    -E "$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$pane" '#{cursor_y}')")
+  hex=$(printf '%s' "$row" | od -An -tx1 | tr -d ' \n')
+  case "$hex" in
+    *e29daf*) ;;
+    *) fail "Scenario D: the pane is not drawing U+276F (cursor row hex: $hex)" ;;
+  esac
+  case "$hex" in
+    *c2a0*) ;;
+    *) fail "Scenario D: the pane is not drawing U+00A0 - this is not the wedge shape (hex: $hex)" ;;
+  esac
+
+  # Precondition 2: the classifier the injector consults calls this pane empty.
+  # This is the assertion that fails on the pre-fix classifier, which read
+  # `pending` here and deferred delivery indefinitely.
+  verdict=$(PATH="$TMUX_SHIM_DIR:$PATH" fm_backend_composer_state tmux "$pane")
+  [ "$verdict" = empty ] \
+    || fail "Scenario D: the wedge composer classifies '$verdict', not empty - delivery will defer"
+
+  reset_state
+  afk_enter "$STATE_DIR"
+  start_daemon
+
+  echo "done: PR https://example.test/pr/400" > "$STATE_DIR/fake-c1.status"
+  sleep 6
+
+  digest_count=$(grep -c 'Supervisor escalate' "$LOG_FILE" || true)
+  [ "$digest_count" -eq 1 ] \
+    || fail "Scenario D: expected exactly 1 digest into the wedge-shaped composer, got $digest_count"
+
+  digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
+  case "$digest_line" in
+    *injection) ;;
+    *) fail "Scenario D: digest misclassified (expected injection): $digest_line" ;;
+  esac
+  digest_hex=$(printf '%s' "$digest_line" | cut -f1)
+  case "$digest_hex" in
+    1f*) ;;
+    *) fail "Scenario D: digest does not start with sentinel marker (hex: $digest_hex)" ;;
+  esac
+
+  stop_daemon
+  pass "Scenario D: a digest lands in the real composer shape that wedged away mode"
+}
+
 test_scenario_a
 test_scenario_b
 test_scenario_c
+test_scenario_d
 
 echo "all e2e injection tests passed"

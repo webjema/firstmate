@@ -74,9 +74,12 @@ The daemon escalates captain-relevant events, plus a bounded recheck for a decla
 Its supervisor injection path targets tmux panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
 Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`, using the same submit core as the tmux send path.
 Composer-content classification has one shared owner, `bin/fm-composer-lib.sh`, used after the tmux adapter performs its own capture and composer-row recognition.
+That owner also folds Unicode whitespace (U+00A0 and its relatives) before the empty test, because a composer whose only content is a non-breaking space is empty to a human and must be empty to the classifier.
 The daemon injects only into an affirmatively `empty` composer, so both `pending` and `unknown` defer and a bare dead-shell prompt cannot receive an escalation.
+Because that verdict gates every delivery, away mode proves it at entry rather than discovering it after the user has left: `bin/fm-afk-preflight-lib.sh` classifies the supervisor composer before any away-mode state is written and refuses entry on anything but `empty`.
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
+The force escape that runs first is bounded in every terminal composer state, including `pending`: a line whose content is frozen byte-identical for `FM_PENDING_FROZEN_SECS` is drained and delivered, while a line that keeps changing is never touched, so no misclassification can stall delivery indefinitely and no human's typing is clobbered.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
 ## Runtime session backends

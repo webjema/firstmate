@@ -318,6 +318,24 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
   esac
 }
 
+# fm_backend_composer_content: the real-typed composer CONTENT behind the
+# verdict above - ghost-stripped, border-stripped, whitespace-normalized.
+# Exposed so a caller can distinguish a `pending` composer that is FROZEN (the
+# identical bytes tick after tick, i.e. a stale read or a misclassification)
+# from one a human is actively editing. The away-mode daemon's bounded-`pending`
+# escape is built on that distinction; see bin/fm-supervise-daemon.sh. A backend
+# with no reader prints nothing, which callers must not read as "empty composer"
+# - always pair it with fm_backend_composer_state.
+fm_backend_composer_content() {  # <backend> <target> -> the composer row's real text
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf ''; return 0; }
+  case "$backend" in
+    tmux) fm_tmux_composer_content "$@" ;;
+    *) printf '' ;;
+  esac
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the recorded
 # TARGET endpoint still exist? Never starts a server or session. A gone tmux
 # window fails, which IS "does not exist" for this purpose.

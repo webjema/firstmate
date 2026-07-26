@@ -29,7 +29,7 @@ test_afk_start_refuses_when_flag_cannot_be_written() {
   state="$dir/state"
   mkdir -p "$state/.afk"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported FM_AFK_PREFLIGHT=0 "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should fail when state/.afk cannot be written"
@@ -44,7 +44,7 @@ test_afk_start_ignores_stale_pidfile_without_lock() {
   state="$dir/state"
   printf '%s\n' "$$" > "$state/.supervise-daemon.pid"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported FM_AFK_PREFLIGHT=0 "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup instead of trusting a pidfile-only live pid"
@@ -64,7 +64,7 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   printf '%s\n' "$$" > "$lock/pid"
   printf '%s\n' "stale daemon identity" > "$lock/pid-identity"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported FM_AFK_PREFLIGHT=0 "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup after rejecting a reused-pid lock"
@@ -720,6 +720,148 @@ test_housekeeping_max_defer_forces_after_strict_fails() {
   [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after a forced max-defer delivery"
   [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge alarm fired even though the force escape delivered"
   pass "max-defer escape force-delivers when the strict flush stays blocked"
+}
+
+# --- bounded `pending` escape (incident afk-wake-fix-r4) ----------------------
+# Refusing `pending` outright made the force escape unbounded: one classifier
+# misread wedged delivery for 26,211s with no way out. The escape is now bounded
+# by CHANGE, not by time alone - a composer whose content is byte-identical
+# across the whole window is a frozen read and may be drained, while a composer
+# whose content moves is a human at the keyboard and is never touched, no matter
+# how long the digest has waited.
+
+# age_pending_record: rewrite the tracker's first-seen epoch to <secs> ago,
+# leaving last-seen and content alone, so the next observation sees a window that
+# has genuinely spanned <secs> without waiting for it.
+age_pending_record() {  # <state> <secs>
+  local rec="$1/.subsuper-composer-pending" secs=$2 last prev
+  last=$(sed -n '2p' "$rec"); prev=$(sed -n '3,$p' "$rec")
+  printf '%s\n%s\n%s\n' "$(( $(date +%s) - secs ))" "$last" "$prev" > "$rec"
+}
+
+test_pending_tracker_resets_on_every_change_signal() {
+  local dir state frozen
+  dir=$(make_supercase pending-track)
+  state="$dir/state"
+
+  frozen=$(composer_pending_track "$state" pending 'draft text')
+  [ "$frozen" = 0 ] || fail "a first sighting should report 0s frozen, got '$frozen'"
+  age_pending_record "$state" 900
+  frozen=$(composer_pending_track "$state" pending 'draft text')
+  [ "$frozen" -ge 900 ] || fail "unchanged content should accumulate its window, got '$frozen'"
+
+  # A changed line is a human typing: the window restarts from zero.
+  frozen=$(composer_pending_track "$state" pending 'draft text!')
+  [ "$frozen" = 0 ] || fail "changed content must reset the window, got '$frozen'"
+
+  # A lapse in observation cannot be counted as time the line was watched.
+  age_pending_record "$state" 900
+  printf '%s\n%s\n%s\n' "$(( $(date +%s) - 900 ))" "$(( $(date +%s) - 300 ))" 'draft text!' \
+    > "$state/.subsuper-composer-pending"
+  frozen=$(FM_PENDING_SAMPLE_GAP_MAX=120 composer_pending_track "$state" pending 'draft text!')
+  [ "$frozen" = 0 ] || fail "an observation gap must reset the window, got '$frozen'"
+
+  # Leaving `pending` drops the record entirely, so a later pending line starts fresh.
+  composer_pending_track "$state" empty '' >/dev/null
+  assert_absent "$state/.subsuper-composer-pending" "leaving pending did not clear the tracker record"
+  pass "pending tracker resets on changed content, an observation gap, and leaving pending"
+}
+
+test_force_flush_escapes_a_frozen_pending_composer() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase force-pending-frozen)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"
+  # The incident shape: the composer reads `pending` but nothing is happening -
+  # the same bytes, forever. Nobody is typing, so the digest must get out.
+  printf 'a line that never changes\n' > "$capture"
+  escalate_add "$state" "needs-decision: pick C"
+  afk_enter "$state"
+
+  # First attempt: the window has only just opened, so refusing is still correct.
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    FM_PENDING_FROZEN_SECS=600 escalate_flush "$state" 1; then
+    fail "force flush escaped a pending composer before the freeze window elapsed"
+  fi
+  [ -s "$sent" ] && fail "force flush typed into a composer inside the freeze window"
+
+  # Same bytes, window now elapsed: drain the dead line with Enter, then deliver.
+  age_pending_record "$state" 900
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    FM_PENDING_FROZEN_SECS=600 escalate_flush "$state" 1 \
+    || fail "force flush stayed wedged on a composer frozen past the window"
+  grep -F 'needs-decision: pick C' "$sent" >/dev/null \
+    || fail "force flush did not deliver the digest after draining a frozen line"
+  grep -F "$FM_INJECT_MARK" "$sent" >/dev/null \
+    || fail "the delivered digest lost its injection marker"
+  [ -s "$state/.subsuper-escalations" ] && fail "buffer not cleared after a frozen-line delivery"
+  pass "force flush drains and delivers past a composer frozen byte-identical past the window"
+}
+
+test_force_flush_never_escapes_a_changing_pending_composer() {
+  local dir state fakebin sent capture i before
+  dir=$(make_supercase force-pending-typing)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"
+  # A human is genuinely typing. Every attempt is aged well past the freeze
+  # window BEFORE the next observation, so only the content check can save the
+  # line - which is exactly the property under test.
+  printf 'the user is ty\n' > "$capture"
+  escalate_add "$state" "needs-decision: pick D"
+  afk_enter "$state"
+
+  for i in ping pingm pingme pingmen; do
+    if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+      FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 FM_INJECT_CONFIRM_SLEEP=0.05 \
+      FM_PENDING_FROZEN_SECS=600 escalate_flush "$state" 1; then
+      fail "force flush clobbered a composer the user was still typing into ('$i')"
+    fi
+    [ -s "$sent" ] && fail "force flush sent keys to a composer the user was typing into ('$i')"
+    before=$(cat "$capture")
+    [ -f "$state/.subsuper-composer-pending" ] \
+      && age_pending_record "$state" 3600
+    printf 'the user is typing %s\n' "$i" > "$capture"
+    [ "$before" != "$(cat "$capture")" ] || fail "test bug: composer content did not change"
+  done
+
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost while refusing a changing composer"
+  grep -F 'the user is typing pingmen' "$capture" >/dev/null \
+    || fail "the user's typed line was modified"
+  pass "force flush never escapes a pending composer whose content is changing, at any age"
+}
+
+test_force_flush_leaves_a_frozen_line_alone_when_enter_does_not_drain_it() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase force-pending-nodrain)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"
+  # Enter is swallowed, so the line survives the drain attempt. Delivering now
+  # would append the digest onto that text and push FM_INJECT_MARK off the front
+  # of the line, which reads to firstmate as "the user is back". Refuse instead.
+  printf 'a line that never changes\n' > "$capture"
+  : > "$dir/swallow"
+  escalate_add "$state" "needs-decision: pick E"
+  afk_enter "$state"
+  composer_pending_track "$state" pending 'a line that never changes' >/dev/null
+  age_pending_record "$state" 900
+
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    FM_FAKE_TMUX_SWALLOW_FILE="$dir/swallow" \
+    FM_PENDING_FROZEN_SECS=600 escalate_flush "$state" 1; then
+    fail "force flush delivered even though the frozen line never drained"
+  fi
+  grep -F 'needs-decision: pick E' "$sent" >/dev/null \
+    && fail "force flush typed the digest on top of an undrained line"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost while refusing an undrained line"
+  grep -Fx 'a line that never changes' "$capture" >/dev/null \
+    || fail "the undrained line was modified"
+  pass "force flush refuses when a frozen line does not drain on Enter"
 }
 
 test_marker_detection() {
@@ -1539,6 +1681,10 @@ test_busy_guard_defers_when_supervisor_busy
 test_force_flush_bypasses_busy_guard
 test_force_flush_refuses_pending_composer
 test_housekeeping_max_defer_forces_after_strict_fails
+test_pending_tracker_resets_on_every_change_signal
+test_force_flush_escapes_a_frozen_pending_composer
+test_force_flush_never_escapes_a_changing_pending_composer
+test_force_flush_leaves_a_frozen_line_alone_when_enter_does_not_drain_it
 test_marker_detection
 test_afk_turn_exemption
 test_should_exit_afk_when_afk_inactive

@@ -71,3 +71,43 @@ In production the title is "firstmate: away-mode escalations WEDGED" and the bod
 
 The `command:` channel runs `sh -c "<cmd>" fm-wedge-alarm "<summary>"` with the summary also piped on stdin.
 `test_wedge_alarm_command_channel_receives_summary` deliberately unsets the seam for a safe file-writing command to verify this dispatch contract without a notification.
+
+## Verification (Linux, `command:` channel to a phone)
+
+Recorded 2026-07-26 on Ubuntu (Linux 6.17.0-1019-aws), during the afk-wake-fix-r4 investigation.
+`auto` fires nothing on Linux, so this box configures the channel explicitly:
+
+```
+$ cat config/wedge-alarm
+command:CLAUDE_NOTIFY_FORCE=1 /home/webjema/cloud-workstation/firstmate-notify.sh
+```
+
+That script sends a tmux bell and an ntfy.sh push to the topic in `~/.config/firstmate-notify/ntfy-topic`.
+The topic string is a bearer capability - anyone holding it can read and publish - so it is never recorded here or anywhere in the repo.
+
+One bounded dispatch through the exact form the daemon uses, labelled so the push is unmistakably harmless:
+
+```
+$ cmd=$(sed -n 's/^command://p' config/wedge-alarm)
+$ printf '%s' "$summary" | sh -c "$cmd" fm-wedge-alarm "FIRSTMATE TEST - IGNORE (wedge-alarm channel verification)"
+$ echo $?
+0
+```
+
+Exit 0, and a read-only poll of the ntfy topic returned the test message, so the channel is armed end to end on this box, not merely configured.
+
+### The channel was NOT the failure in the 2026-07-26 wedge
+
+The away-mode stall that prompted this record was widely assumed to be an unreachable alarm.
+It was not.
+A read-only 24-hour poll of the same topic, taken 2026-07-26, returned 88 retained messages, 87 of them wedge alarms:
+
+```
+$ curl -s "https://ntfy.sh/<topic>/json?poll=1&since=24h" | ...
+total 88 wedged 87
+first 2026-07-26 00:13:27 last 2026-07-26 07:25:17
+```
+
+The first push landed roughly five minutes into the stall and they continued at the max-defer cadence for seven hours.
+The alarm did its job; the digest still never arrived, because the composer misread and the unbounded `pending` refusal blocked delivery itself.
+Two lessons the code now carries: a fault in delivery is not a fault in alerting, and an alarm that repeats identically 87 times is worth reviewing for fatigue.

@@ -85,29 +85,40 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # (bin/fm-composer-lib.sh). The bordered flag is what lets a bordered `│ > │`
 # (claude's own idle composer) read empty while a bare, unbordered `$ ` dead-shell
 # prompt reads unknown.
-fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
+#
+# Every trim below goes through the shared fm_composer_trim, which folds unicode
+# whitespace to ASCII first. That matters structurally, not just for the final
+# verdict: claude pads its composer row with U+00A0, and a plain `[[:space:]]`
+# trim leaves that padding in place, so a bordered row could fail its `│…│`
+# match and a bare `❯` row could fail its glyph match (incident afk-wake-fix-r4).
+# The three fields are tab-separated: a tmux pane is a character GRID, so a
+# captured row can never itself contain a tab (tmux expands them on write).
+fm_tmux_composer_read() {  # <target> -> "<bordered>\t<plain>\t<stripped>"; 1 if unreadable
   local target=$1 cy raw plain stripped bordered=0
-  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
-  case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
-  raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
+  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
+  case "$cy" in ''|*[!0-9]*) return 1 ;; esac
+  raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || return 1
   # bordered: from the plain row (borders survive an all-ANSI strip).
-  plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
-  plain="${plain#"${plain%%[![:space:]]*}"}"
-  plain="${plain%"${plain##*[![:space:]]}"}"
+  plain=$(fm_composer_trim "$(printf '%s\n' "$raw" | fm_composer_strip_ansi)")
   case "$plain" in
     '│'*'│'|'┃'*'┃'|'|'*'|') bordered=1 ;;
   esac
   # content: from the ghost-stripped row (real typed text only).
-  stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  stripped=$(fm_composer_trim "$(printf '%s\n' "$raw" | fm_composer_strip_ghost)")
   case "$stripped" in
     '│'*'│') stripped=${stripped#│}; stripped=${stripped%│} ;;
     '┃'*'┃') stripped=${stripped#┃}; stripped=${stripped%┃} ;;
     '|'*'|') stripped=${stripped#|}; stripped=${stripped%|} ;;
   esac
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  stripped=$(fm_composer_trim "$stripped")
+  printf '%s\t%s\t%s' "$bordered" "$plain" "$stripped"
+}
+
+fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
+  local target=$1 row bordered plain stripped
+  row=$(fm_tmux_composer_read "$target") || { printf 'unknown'; return 0; }
+  bordered=${row%%$'\t'*}; row=${row#*$'\t'}
+  plain=${row%%$'\t'*}; stripped=${row#*$'\t'}
   # A busy footer landing on the cursor line is not pending input (tmux-specific:
   # only tmux captures the raw cursor row, which may BE the footer).
   if [ -n "$stripped" ] \
@@ -115,6 +126,19 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
     printf 'empty'; return 0
   fi
   fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain"
+}
+
+# fm_tmux_composer_content: the real-typed CONTENT the classifier judged, i.e.
+# the ghost-stripped, border-stripped, whitespace-normalized composer row.
+# Exists so a caller can tell a composer that is STILL SAYING THE SAME THING
+# from one a human is actively editing - the bounded-`pending` escape in the
+# away-mode daemon (bin/fm-supervise-daemon.sh) is built on exactly that
+# distinction. Prints the empty string for an unreadable pane, which callers
+# must not confuse with an empty composer; pair it with the state verdict.
+fm_tmux_composer_content() {  # <target>
+  local row
+  row=$(fm_tmux_composer_read "$1") || { printf ''; return 0; }
+  printf '%s' "${row##*$'\t'}"
 }
 
 # fm_pane_input_pending: 0 (pending) if the cursor line holds real unsubmitted

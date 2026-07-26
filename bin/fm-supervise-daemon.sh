@@ -47,8 +47,10 @@
 #     Buffered escalation delivery also has a max-defer escape: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush, then
 #     a FORCE flush that bypasses the busy/empty-composer guards (safe in afk: no
-#     human is typing; real pending text is still never clobbered) to break an
-#     indefinite "never went idle" wedge, and only if force too cannot deliver
+#     human is typing) to break an indefinite "never went idle" wedge. A pending
+#     composer is escaped only once its content has been frozen byte-identical
+#     for FM_PENDING_FROZEN_SECS, so live typing is still never clobbered while
+#     no misread can stall delivery forever. Only if force too cannot deliver
 #     does it write state/.subsuper-inject-wedged and attempt a configurable
 #     active alert. See the /afk skill's "Max-defer escape" for the full contract.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
@@ -93,9 +95,18 @@
 #          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
 #                                   undelivered before the max-defer escape runs:
 #                                   one normal flush, then a force flush that
-#                                   bypasses the busy/empty guards (never real
-#                                   pending text); only if force too fails does a
-#                                   wedge alarm fire (default 300; 0 disables)
+#                                   bypasses the busy/empty guards; only if force
+#                                   too fails does a wedge alarm fire
+#                                   (default 300; 0 disables)
+#          FM_PENDING_FROZEN_SECS   seconds a pending composer's content must
+#                                   stay byte-identical under continuous
+#                                   observation before the force flush stops
+#                                   believing a human is typing and drains it
+#                                   (default 600; 0 restores the old unbounded
+#                                   refusal)
+#          FM_PENDING_SAMPLE_GAP_MAX longest gap between two observations that
+#                                   still counts as continuous; a longer gap
+#                                   restarts the freeze window (default 120)
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
 #                                   (off|auto|osascript|command:<cmd>). An
@@ -176,6 +187,19 @@ HOUSEKEEPING_TICK_DEFAULT=15
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
 MAX_DEFER_SECS_DEFAULT=300
+# How long a `pending` composer must hold BYTE-IDENTICAL content, under
+# continuous observation, before the max-defer force escape stops believing a
+# human is on the line and delivers anyway. A person editing a line changes it
+# or submits it; content frozen this long is a stale read or a classifier
+# misfire, and refusing it forever is what turned the 2026-07-26 incident into a
+# 7-hour silent stall instead of a 5-minute delay. Set to 0 to disable the
+# escape and restore the old unbounded refusal.
+PENDING_FROZEN_SECS_DEFAULT=600
+# Longest gap between two observations that still counts as CONTINUOUS. The
+# freeze window is only meaningful if the daemon actually watched the whole of
+# it, so a gap longer than this restarts the window rather than crediting time
+# nobody was looking. Housekeeping ticks every 15s by default.
+PENDING_SAMPLE_GAP_MAX_DEFAULT=120
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
@@ -1063,14 +1087,51 @@ window_for_task() {  # <task-key> [state]
 # empty-composer REQUIREMENT are bypassed, because during afk no human is typing,
 # so the guards' whole rationale (don't clobber a human's line) does not apply,
 # and a genuinely mid-turn claude simply QUEUES the submitted digest for after the
-# turn. The ONE guard force still honours is a `pending` composer: `pending` means
-# real, unsubmitted text is on the line right now (a returning user's keystrokes,
-# or our own swallowed prior injection), and neither may be clobbered by a
-# type-append - so force refuses `pending` and lets the strict Enter-retry path
-# keep handling a swallowed submit. Force is only ever entered from housekeeping's
-# max-defer branch, only after the strict flush has already failed.
+# turn. A `pending` composer is the one case force does not simply type into,
+# because `pending` normally means real unsubmitted text is on the line (a
+# returning user's keystrokes, or our own swallowed prior injection) - it is
+# BOUNDED rather than refused outright, by the freeze rule below. Force is only
+# ever entered from housekeeping's max-defer branch, only after the strict flush
+# has already failed.
+# --- bounded `pending` escape: is this composer FROZEN, or is a human typing? --
+# The record at state/.subsuper-composer-pending is three lines: the epoch the
+# current content was FIRST seen, the epoch it was LAST seen, and the content
+# itself (a composer row, so never multi-line). Any of these resets the window:
+#   - the content changed (a human edited the line);
+#   - the composer stopped being `pending` (it was submitted or cleared);
+#   - observation lapsed longer than PENDING_SAMPLE_GAP_MAX (we cannot claim a
+#     line was frozen through a stretch we never looked at).
+# Prints the number of seconds the CURRENT content has been continuously
+# observed unchanged - 0 whenever the window just reset.
+composer_pending_track() {  # <state> <composer-state> <content> -> seconds frozen
+  local state=$1 composer=$2 content=$3 rec="$1/.subsuper-composer-pending"
+  local now first last prev gap
+  now=$(_now)
+  if [ "$composer" != pending ]; then
+    rm -f "$rec" 2>/dev/null
+    printf '0'; return 0
+  fi
+  first=""; last=""; prev=""
+  if [ -r "$rec" ]; then
+    first=$(sed -n '1p' "$rec" 2>/dev/null)
+    last=$(sed -n '2p' "$rec" 2>/dev/null)
+    prev=$(sed -n '3,$p' "$rec" 2>/dev/null)
+  fi
+  gap=${FM_PENDING_SAMPLE_GAP_MAX:-$PENDING_SAMPLE_GAP_MAX_DEFAULT}
+  case "$gap" in ''|*[!0-9]*) gap=$PENDING_SAMPLE_GAP_MAX_DEFAULT ;; esac
+  # A record that is not two epochs is not a record: restart the window rather
+  # than credit time from bytes we cannot read.
+  case "$first$last" in ''|*[!0-9]*) first=""; last="" ;; esac
+  if [ -z "$first" ] || [ "$prev" != "$content" ] || [ $((now - last)) -gt "$gap" ]; then
+    first=$now
+  fi
+  printf '%s\n%s\n%s\n' "$first" "$now" "$content" > "$rec" 2>/dev/null || true
+  printf '%s' $((now - first))
+}
+
 inject_msg() {  # <message> [state] [force]
   local msg=$1 state force target backend retries sleep_s verdict composer
+  local composer_content frozen_for frozen_secs
   state="${2:-$(_state_root)}"
   force="${3:-0}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
@@ -1092,12 +1153,57 @@ inject_msg() {  # <message> [state] [force]
   fm_backend_target_exists "$backend" "$target" || return 1
   # Read the composer once; both the strict guards and the force carve-out use it.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  # Sample the pending-composer freeze window on EVERY attempt, strict or force.
+  # The strict path runs each housekeeping tick, so by the time a force attempt
+  # happens the window already reflects the whole defer period - which is the
+  # only way "byte-identical across the defer window" can mean anything.
+  composer_content=""
+  if [ "$composer" = pending ]; then
+    composer_content=$(fm_backend_composer_content "$backend" "$target" 2>/dev/null)
+  fi
+  frozen_for=$(composer_pending_track "$state" "$composer" "$composer_content")
   if [ "$force" = 1 ]; then
     # (3-force) Break an indefinite wedge. Bypass the busy guard and the
-    # empty-composer requirement, but NEVER type over real pending text.
+    # empty-composer requirement, but never type over a line a human is on.
+    #
+    # `pending` used to be refused unconditionally, on the reasoning that it
+    # means a human's keystrokes are present. That is right for a REAL pending
+    # and catastrophic for a misclassified one: it left a single classifier bug
+    # able to stall delivery forever with no escape at all, which is exactly
+    # what happened on 2026-07-26 (a U+00A0 in claude's composer row read as
+    # typed text for 7 hours). The refusal is now bounded by evidence rather
+    # than absolute: a human either edits the line or submits it, so content
+    # that has not changed by one byte through the whole continuously-observed
+    # freeze window is a stale read, not a person, and delivery proceeds. A
+    # `pending` whose content is still CHANGING is a real human and is still
+    # refused, for as long as it keeps changing.
+    #
+    # The escape DRAINS the frozen line with Enter rather than typing over it.
+    # That keeps "never clobber" literally true in every case: a misread empty
+    # composer submits nothing, our own swallowed injection finally lands, and a
+    # human's abandoned line is submitted as their own message - none of it
+    # overwritten, none of it concatenated with the digest, and the sentinel
+    # stays at the START of the digest where the afk-exit contract needs it. If
+    # the line will not drain, the escape gives up and the wedge alarm fires.
+    frozen_secs=${FM_PENDING_FROZEN_SECS:-$PENDING_FROZEN_SECS_DEFAULT}
+    # A garbled override must not decide whether to touch a human's line: fall
+    # back to the default rather than let `[ -le ]` error its way past the gate.
+    case "$frozen_secs" in ''|*[!0-9]*) frozen_secs=$PENDING_FROZEN_SECS_DEFAULT ;; esac
     if [ "$composer" = pending ]; then
-      log "inject force-deferred: composer pending (real unsubmitted text present) — not clobbering the line"
-      return 1
+      if [ "$frozen_secs" -le 0 ] || [ "$frozen_for" -lt "$frozen_secs" ]; then
+        log "inject force-deferred: composer pending and still changing (frozen ${frozen_for}s < ${frozen_secs}s) — a human is on the line, not clobbering it"
+        return 1
+      fi
+      log "inject FORCE: composer pending but byte-identical for ${frozen_for}s (>= ${frozen_secs}s) — a frozen read, not a human typing; draining the line with Enter"
+      fm_backend_send_key "$backend" "$target" Enter 2>/dev/null || true
+      sleep "${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}"
+      composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+      if [ "$composer" = pending ]; then
+        log "inject force-deferred: frozen composer did not drain on Enter (still pending) — leaving the line untouched"
+        return 1
+      fi
+      composer_pending_track "$state" "$composer" "" >/dev/null
+      log "inject FORCE: frozen line drained (composer=${composer:-unknown})"
     fi
     log "inject FORCE: bypassing busy/empty guards after max-defer (composer=${composer:-unknown})"
   else
