@@ -152,14 +152,25 @@ pass "(d) a warm lease orphaned by a dead warmer is reported as safely releasabl
 C=$(new_case e)
 give_pool_slot "$C"
 printf '1     leased       /pool/1/proj  (held by fm-warm-proj)\n' > "$C/status.txt"
-# A LIVE warmer holds the pool lock the way the code takes it: an flock held by a
-# live process (`exec sleep` so the pid we record is the one holding the fd).
+# A LIVE warmer holds the pool lock the way the code takes it ON THIS BOX: an flock
+# held by a live process where flock exists (`exec sleep` so the pid we record is
+# the one holding the fd), and otherwise the library's own directory lock, taken in
+# its own process for the same reason. fm_pool_lock_acquire branches the same way,
+# and stock macOS ships no flock - hardcoding it here failed this case on every
+# macOS box with `flock: command not found`.
 key=$(printf '%s' "$(cd "$C/home/projects/proj" && pwd -P)" | cksum | awk '{print $1}')
 base="$C/th-root/.fm-warm-locks/proj-$key"
 mkdir -p "$(dirname "$base")"
-( flock -x 9; exec sleep 60 ) 9>"$base.lock" &
-holder=$!
-i=0; while [ "$i" -lt 40 ] && flock -n "$base.lock" -c true 2>/dev/null; do sleep 0.1; i=$((i+1)); done
+if command -v flock >/dev/null 2>&1; then
+  ( flock -x 9; exec sleep 60 ) 9>"$base.lock" &
+  holder=$!
+  i=0; while [ "$i" -lt 40 ] && flock -n "$base.lock" -c true 2>/dev/null; do sleep 0.1; i=$((i+1)); done
+else
+  bash -c '. "$1"; fm_pool_lock_acquire "$2" || exit 1; exec sleep 60' \
+    _ "$ROOT/bin/fm-pool-lib.sh" "$base" &
+  holder=$!
+  i=0; while [ "$i" -lt 40 ] && [ ! -r "$base/pid" ]; do sleep 0.1; i=$((i+1)); done
+fi
 out=$(run_status "$C")
 kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
 [ -z "$out" ] || fail "(e) a live warmer mid-install must not be reported as a fault, got: $out"

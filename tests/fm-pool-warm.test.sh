@@ -2,15 +2,17 @@
 # Tests for bin/fm-pool-warm.sh - the always-plus-one warm spare.
 #
 # The contract (its header owns the policy): for every project with work IN
-# FLIGHT, at least one treehouse slot must sit free and warm, so a crew never
-# pays the cold dependency install on the spawn path (measured 137s for optiroq;
-# 2s warm). When the last free slot is taken, the next is provisioned
-# preventively, in the background, on firstmate's time.
+# FLIGHT, at least one treehouse slot must sit free and WARM - dependencies
+# already installed - so a crew never pays the cold install on the spawn path.
+# When the last free slot is taken, the next is provisioned preventively, in the
+# background, on firstmate's time.
 #
 # treehouse is stubbed (the suite's usual fakebin/PATH shim): a real warm would
 # install multiple GB. The stub records every treehouse invocation, so these
-# tests assert the exact commands - that warming IS `get --lease` + `return`, and
-# nothing reimplemented.
+# tests assert the exact commands - that warming IS `get --lease`, then the
+# dependency provision, then `return`, and nothing reimplemented. treehouse
+# itself installs nothing; bin/fm-worktree-provision.sh is what makes a warm slot
+# warm, and tests/fm-worktree-provision.test.sh owns its cases.
 #
 #   (a) a free warm slot already exists          -> warms NOTHING (the common case)
 #   (b) no free slot                             -> leases, installs, returns
@@ -26,6 +28,8 @@
 #   (l) a HUNG install                           -> is bounded; lease and lock freed
 #   (m) five warmers vs one stale lock           -> exactly one warm (no TOCTOU)
 #   (n) a live pid from a PREVIOUS boot          -> not a live warmer; lock reclaimed
+#   (o) no `timeout` binary on the box           -> the bound still holds (macOS)
+#   (p) the leased slot is PROVISIONED before handover, under the warm's deadline
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -66,9 +70,9 @@ case "${1:-}" in
   get)
     rc=$(cat "${TH_GET_RC:?}")
     [ "$rc" = 0 ] || exit "$rc"
-    # A real `get --lease` marks the lease FIRST, then runs post_create (the dep
-    # install - TH_GET_DELAY models how long that takes), and only prints the path
-    # at the END. So a warmer killed mid-install holds a lease it never saw.
+    # A real `get --lease` marks the lease FIRST, does its work (TH_GET_DELAY models
+    # how long a create-or-reset takes), and prints the path only at the END. So a
+    # warmer killed mid-warm holds a lease it never saw.
     mkdir -p "${TH_NEW_SLOT:?}"
     printf 'leased %s\n' "$(holder_of "$@")" > "${TH_LEASE_STATE:?}"
     delay=$(cat "${TH_GET_DELAY:?}" 2>/dev/null || echo 0)
@@ -148,20 +152,45 @@ current_boot() {
   fi
 }
 
-# hold_lock_live <case-dir>: hold the pool lock the way a REAL warmer does - an
-# flock held by a live process - and set LOCK_HOLDER_PID. Planting a directory
-# would not do: the code locks with flock, and the kernel is the arbiter.
+# hold_lock_live <case-dir>: hold the pool lock the way a REAL warmer does ON THIS
+# BOX, and set LOCK_HOLDER_PID.
+#
+# Which way that is depends on the platform, because fm_pool_lock_acquire itself
+# branches: flock where it exists (CI, Linux), a pid+boot directory where it does
+# not (stock macOS ships no flock). Hardcoding flock here made cases (f) and (g)
+# fail on every macOS box with `flock: command not found` - not a real defect, but
+# a local suite that cannot run is a local suite nobody trusts.
+#
+# Neither branch plants a lock by hand. Under flock the kernel is the arbiter, so
+# a hand-planted directory would not exclude anything; under the fallback the lock
+# records the OWNER'S PID, so it has to be a process we actually hold and can kill
+# to simulate a crash. Both branches therefore hold a real live process.
 hold_lock_live() {
   local base i=0
   base="$1/th-root/.fm-warm-locks/$(pool_key "$1")"
   mkdir -p "$(dirname "$base")"
-  # `exec sleep` so the process that HOLDS fd 9 is the one whose pid we record:
-  # a plain `flock -c 'sleep'` leaves an orphan child that INHERITED the fd and so
-  # keeps the lock after the recorded pid is killed.
-  ( flock -x 9; exec sleep 60 ) 9>"$base.lock" &
+
+  if command -v flock >/dev/null 2>&1; then
+    # `exec sleep` so the process that HOLDS fd 9 is the one whose pid we record:
+    # a plain `flock -c 'sleep'` leaves an orphan child that INHERITED the fd and so
+    # keeps the lock after the recorded pid is killed.
+    ( flock -x 9; exec sleep 60 ) 9>"$base.lock" &
+    LOCK_HOLDER_PID=$!
+    while [ "$i" -lt 40 ]; do          # wait until the lock is really held
+      flock -n "$base.lock" -c true 2>/dev/null || return 0
+      sleep 0.1; i=$((i + 1))
+    done
+    return 1
+  fi
+
+  # Fallback path: take the lock through the library, in its OWN bash process, so
+  # the pid the lock records is the pid we hold. `exec sleep` for the same reason
+  # as above - the recorded pid must be the one that stays alive.
+  bash -c '. "$1"; fm_pool_lock_acquire "$2" || exit 1; exec sleep 60' \
+    _ "$ROOT/bin/fm-pool-lib.sh" "$base" &
   LOCK_HOLDER_PID=$!
-  while [ "$i" -lt 40 ]; do            # wait until the lock is really held
-    flock -n "$base.lock" -c true 2>/dev/null || return 0
+  while [ "$i" -lt 40 ]; do            # wait until the lock directory is really there
+    [ -r "$base/pid" ] && return 0
     sleep 0.1; i=$((i + 1))
   done
   return 1
@@ -229,7 +258,14 @@ pass "(c) the lease is held across the install and released on the leased slot"
 
 # --- (d) the disk budget stops warming, with real numbers ---------------------
 # optiroq is ~2.8 GB/slot and firstmate ~6 MB/slot, so the ceiling is DISK, not a
-# slot count. Two ~1 MB slots and a 3 MB budget: the next slot would not fit.
+# slot count. Two ~1 MB slots and a 2.5 MB budget: the next slot would not fit.
+#
+# NOT a 3 MB budget, which is what this used to use. `du -sk` reports exactly 2048
+# for these two slots on APFS, so the projection (2048 used + 1024 estimated) came
+# to exactly 3072 - and the ceiling allows a slot that fits EXACTLY, so nothing was
+# blocked and this case failed. It passed only on filesystems that charge for
+# directory blocks and pushed `du` over the line. Pick a budget the projection
+# clears unambiguously, so the case tests the ceiling and not the block size.
 C=$(new_case d)
 in_flight "$C"
 mkdir -p "$C/th-root/pool/1" "$C/th-root/pool/2"
@@ -239,7 +275,7 @@ cat > "$C/status.txt" <<EOF
 1     in-use       $C/th-root/pool/1/proj
 2     in-use       $C/th-root/pool/2/proj
 EOF
-FM_POOL_DISK_BUDGET_KB=3072 run_warm "$C" || fail "(d) must exit 0"
+FM_POOL_DISK_BUDGET_KB=2560 run_warm "$C" || fail "(d) must exit 0"
 assert_not_contains "$(th_log "$C")" "get" "(d) a budget-blocked pool must NOT be grown"
 blocked=$(warm_log "$C")
 assert_contains "$blocked" "disk budget reached" "(d) the budget block must be reported"
@@ -249,7 +285,7 @@ pass "(d) the disk budget stops warming and reports the real numbers"
 
 # The report is made ONCE: an unchanged situation must not re-log every cycle.
 before=$(warm_log "$C" | grep -c 'disk budget reached')
-FM_POOL_DISK_BUDGET_KB=3072 run_warm "$C" || fail "(d2) must exit 0"
+FM_POOL_DISK_BUDGET_KB=2560 run_warm "$C" || fail "(d2) must exit 0"
 after=$(warm_log "$C" | grep -c 'disk budget reached')
 [ "$before" = "$after" ] || fail "(d2) a blocked warm must be reported once, not every cycle"
 pass "(d2) an unchanged block is reported once, not on every cycle"
@@ -360,6 +396,57 @@ assert_contains "$(warm_log "$C")" "timed out" "(l) the timeout must be reported
   || fail "(l) a timed-out warm must still release its lease"
 assert_absent "$C/th-root/.fm-warm-locks/$(pool_key "$C")" "(l) and must not hold the pool lock forever"
 pass "(l) a hung install is bounded, its lease released and its lock freed"
+
+# --- (o) the bound must hold on a box with no `timeout` binary ------------------
+# fm_pool_run_bounded is what makes (l) true. Stock macOS ships no `timeout`, and
+# the callers used to degrade to an UNBOUNDED run there - so on the box firstmate
+# actually runs on, (l)'s guarantee quietly did not hold. CI is Linux, where the
+# fallback would never execute on its own, so force it with a PATH that has no
+# `timeout` on it.
+NOBIN="$TMP_ROOT/o/nobin"
+mkdir -p "$NOBIN"
+ln -sf "$(command -v sleep)" "$NOBIN/sleep"
+start=$(date +%s)
+rc=0
+# shellcheck source=bin/fm-pool-lib.sh disable=SC1091
+( PATH="$NOBIN"; . "$ROOT/bin/fm-pool-lib.sh"; fm_pool_run_bounded 2 sleep 60 ) || rc=$?
+elapsed=$(( $(date +%s) - start ))
+expect_code 124 "$rc" "(o) an expired bound must report 124, exactly as timeout does"
+[ "$elapsed" -lt 30 ] || fail "(o) the fallback bound never fired: took ${elapsed}s"
+rc=0
+( PATH="$NOBIN"; . "$ROOT/bin/fm-pool-lib.sh"; fm_pool_run_bounded 30 sleep 0 ) || rc=$?
+expect_code 0 "$rc" "(o) a command that finishes in time keeps its own exit status"
+pass "(o) the time bound holds, and reports 124, with no timeout binary on the box"
+
+# --- (p) the warm is what makes a warm slot warm ------------------------------
+# treehouse hands over an EMPTY worktree and installs nothing, so without this step
+# "warmed" would mean no more than "created" and the first crew would still pay the
+# whole install. It has to happen while the lease is still held, and it has to
+# inherit the warm's own deadline, or a three-root project could hold that lease
+# for three times the bound the warm was given.
+C=$(new_case p)
+in_flight "$C"
+printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+SLOT="$C/th-root/pool/9/proj"
+mkdir -p "$SLOT"
+printf '{"name":"proj"}\n' > "$SLOT/package.json"
+cat > "$C/fakebin/npm" <<SH
+#!/usr/bin/env bash
+d=none; [ -n "\${FM_PROVISION_DEADLINE:-}" ] && d=set
+printf 'cwd=%s deadline=%s\n' "\$PWD" "\$d" >> "$C/npm.log"
+mkdir -p node_modules/pkg && printf 'x\n' > node_modules/pkg/index.js
+exit 0
+SH
+chmod +x "$C/fakebin/npm"
+: > "$C/npm.log"
+run_warm "$C" || fail "(p) must exit 0"
+# The path is matched by its pool-relative tail: the provisioner reports RESOLVED
+# paths, and on macOS this tmpdir sits under a symlinked /var.
+assert_grep "/pool/9/proj deadline=set" "$C/npm.log" \
+  "(p) the leased slot is provisioned, under the warm's own deadline"
+assert_contains "$(warm_log "$C")" "PROVISION proj" "(p) and the step is reported in the warm log"
+assert_contains "$(th_log "$C")" "return" "(p) the lease is still released afterwards"
+pass "(p) the warm provisions the slot it leased, under its own time budget"
 
 # --- (m) five concurrent warmers must produce exactly ONE warm ----------------
 # The lock exists to stop two warmers over-provisioning a pool by GBs. The earlier

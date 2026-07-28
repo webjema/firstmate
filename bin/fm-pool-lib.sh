@@ -130,16 +130,56 @@ fm_pool_gb() {  # <kb>
   awk -v kb="${1:-0}" 'BEGIN { printf "%.1f", kb / 1048576 }'
 }
 
+# fm_pool_run_bounded <secs> <command> [args...]: the single owner of "how a warm
+# step is time-bounded". Runs the command with a hard ceiling and returns 124 on
+# expiry, exactly as `timeout` does.
+#
+# It exists because stock macOS ships NO `timeout`, and the callers used to degrade
+# to an unbounded run there - which is precisely the failure the bound exists to
+# prevent (a hung step holds the treehouse lease and the pool lock with a LIVE pid,
+# so nothing may reclaim either, and the leak report is suppressed too). That was
+# survivable while the only bounded step was a `treehouse get`; it is not now that
+# a dependency install runs on the warm path and can hang for as long as a dead
+# registry stays dead.
+#
+# Only the direct child is signalled, which is `timeout`'s own behavior: the point
+# is to free the lease and the lock, not to guarantee no orphan survives.
+fm_pool_run_bounded() {  # <secs> <command> [args...]
+  local secs=$1 pid waited=0 rc
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+    return $?
+  fi
+  "$@" &
+  pid=$!
+  while [ "$waited" -lt "$secs" ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 1
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    return 124
+  fi
+  wait "$pid"
+  rc=$?
+  return $rc
+}
+
 # fm_pool_lease <project-real-path> <holder> [timeout-secs]: reserve a slot,
-# creating-or-resetting it and running the post_create hook (i.e. installing deps).
-# Prints its path. This IS the warm operation - treehouse does the work, firstmate
-# does not reimplement any of it.
-# BOUNDED when a timeout is given (exit 124 on expiry, per `timeout`): an install
-# that hangs must not hold a lease and a pool lock forever. See bin/fm-pool-warm.sh.
+# creating-or-resetting it, and print its path. treehouse installs NOTHING here -
+# the slot comes back empty, and populating it is bin/fm-worktree-provision.sh's
+# job, which fm-pool-warm.sh calls while this lease is still held.
+# BOUNDED when a timeout is given (exit 124 on expiry): a reset that hangs must not
+# hold a lease and a pool lock forever. See bin/fm-pool-warm.sh.
 fm_pool_lease() {  # <project-real-path> <holder> [timeout-secs]
   local project=$1 holder=$2 secs=${3:-}
-  if [ -n "$secs" ] && [ "$secs" -gt 0 ] 2>/dev/null && command -v timeout >/dev/null 2>&1; then
-    (cd "$project" 2>/dev/null && timeout "$secs" treehouse get --lease --lease-holder "$holder" 2>/dev/null)
+  if [ -n "$secs" ] && [ "$secs" -gt 0 ] 2>/dev/null; then
+    (cd "$project" 2>/dev/null \
+      && fm_pool_run_bounded "$secs" treehouse get --lease --lease-holder "$holder" 2>/dev/null)
   else
     (cd "$project" 2>/dev/null && treehouse get --lease --lease-holder "$holder" 2>/dev/null)
   fi
@@ -300,11 +340,11 @@ fm_pool_owner_alive() {  # <lock-dir>
 
 # fm_pool_leased_by <project-real-path> <holder>: the slot path treehouse says is
 # leased by <holder>, or empty.
-# This is what makes a mid-install kill recoverable. `treehouse get --lease` marks
-# the lease BEFORE it runs post_create and only prints the path at the END, so a
-# warmer killed during the install (a reboot) holds a real lease whose path it
-# never learned - and could not release it by path even though it must. treehouse's
-# own status reports the holder, so ask it.
+# This is what makes a mid-warm kill recoverable. `treehouse get --lease` marks
+# the lease BEFORE it does its work and only prints the path at the END, so a
+# warmer killed before that (a reboot) holds a real lease whose path it never
+# learned - and could not release it by path even though it must. treehouse's own
+# status reports the holder, so ask it.
 fm_pool_leased_by() {  # <project-real-path> <holder>
   local project=$1 holder=$2 slot state path lease
   fm_pool_read "$project" || return 0

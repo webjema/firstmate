@@ -26,6 +26,8 @@
 #   (i) not inside a pool       -> a clean no-op
 #   (j) --harvest               -> caches an existing tree and installs NOTHING
 #   (k) --probe                 -> reports clone support
+#   (l) a spent shared budget   -> every root is skipped, and the skip is reported
+#   (m) ONE budget for ALL roots: a root that eats it leaves none for the rest
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -277,3 +279,34 @@ case "$out" in
   *) fail "(k) --probe said something else: $out" ;;
 esac
 pass "(k) --probe reports this volume's clone support"
+
+# --- (l) a spent budget starts nothing ----------------------------------------
+# The provisioner runs inside a warm that already holds a treehouse lease and the
+# pool lock. Starting an install with no time left to finish in would hold both
+# past the bound its caller was given, for a root that gets abandoned anyway.
+
+SLOT=$(new_case spent)
+fake_npm "$TMP_ROOT/spent"
+out=$(FM_PROVISION_DEADLINE=$(( $(date +%s) - 1 )) run_provision "$SLOT")
+assert_contains "$out" "the warm's time budget is spent" "(l) the skip is reported, not silent"
+assert_no_grep "cwd=" "$NPM_LOG" "(l) and nothing is installed with the budget already gone"
+pass "(l) a spent shared budget skips every root and says so"
+
+# --- (m) one budget for ALL roots, not one budget EACH ------------------------
+# A three-root project must not be able to hold its caller's lease for three times
+# the bound. The first root here eats the whole budget, so the rest get none.
+
+SLOT=$(new_case shared)
+CASE=$TMP_ROOT/shared
+fake_npm "$CASE"
+cat > "$CASE/fakebin/npm" <<SH
+#!/usr/bin/env bash
+printf 'npm %s cwd=%s\n' "\$*" "\$PWD" >> "$NPM_LOG"
+sleep 60
+SH
+chmod +x "$CASE/fakebin/npm"
+out=$(FM_PROVISION_DEADLINE=$(( $(date +%s) + 3 )) run_provision "$SLOT")
+assert_contains "$out" "the warm's time budget is spent" "(m) the later roots are skipped, not given a fresh budget each"
+[ "$(grep -c 'cwd=' "$NPM_LOG")" -eq 1 ] \
+  || fail "(m) $(grep -c 'cwd=' "$NPM_LOG") installs started on one budget - the budget is not shared"
+pass "(m) the time budget is shared across every root of one warm"

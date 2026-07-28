@@ -69,11 +69,22 @@
 # store, so its node_modules is near-zero on disk already and cloning it would add
 # nothing. pnpm roots reconcile only.
 #
-# ALWAYS EXITS 0 for a failed provision, and says why. It runs on the warm path
-# (background, on firstmate's time) and, if ever wired as a treehouse post_create
-# hook, on the spawn path. A slot that failed to pre-warm is merely cold - the
-# crew installs for itself, as it always did - and that must never fail a warm,
-# leak a lease, or wake the user. A usage error still exits 2.
+# ONE SHARED TIME BUDGET. FM_PROVISION_DEADLINE (an epoch second) bounds the
+# WHOLE provision rather than each install separately, and bin/fm-pool-warm.sh
+# sets it to its own deadline. Without it a three-root project would hold that
+# caller's treehouse lease and pool lock for three times the bound it was given -
+# and a leaked lease removes a slot from the pool permanently. A root reached with
+# no budget left is reported as skipped, never started.
+#
+# THIS IS CALLED FROM THE WARM PATH, NOT FROM A treehouse HOOK, and that is not an
+# oversight: treehouse ignores hooks in a repo's own treehouse.toml BY DESIGN, and
+# its only working hook home is the user's GLOBAL config. docs/treehouse-backend.md
+# records the evidence. Read it before proposing a repo-level hook again.
+#
+# ALWAYS EXITS 0 for a failed provision, and says why. It runs on the warm path,
+# in the background, on firstmate's time. A slot that failed to pre-warm is merely
+# cold - the crew installs for itself, as it always did - and that must never fail
+# a warm, leak a lease, or wake the user. A usage error still exits 2.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -236,6 +247,24 @@ harvest_one() {  # <worktree> <subpath> <pool-key>
 
 # --- provisioning -----------------------------------------------------------
 
+# budget_secs: how long the NEXT install may run. With FM_PROVISION_DEADLINE set
+# (an epoch second; bin/fm-pool-warm.sh sets it), every root shares ONE budget, so
+# a three-root project cannot silently take three times the bound its caller was
+# given while holding that caller's treehouse lease and pool lock. Unset - a hand
+# run - falls back to the per-install warm timeout.
+budget_secs() {
+  local left
+  if [ -n "${FM_PROVISION_DEADLINE:-}" ]; then
+    left=$(( FM_PROVISION_DEADLINE - $(date +%s) ))
+    [ "$left" -gt 0 ] || { printf '0'; return 0; }
+    printf '%s' "$left"
+    return 0
+  fi
+  fm_pool_warm_timeout
+}
+
+out_of_time() { [ "$(budget_secs)" -le 0 ]; }
+
 # reconcile <dir>: the project's own installer, which is what makes a cloned tree
 # CORRECT rather than merely present. Bounded, because a hung install on the warm
 # path holds a treehouse lease and a pool lock (bin/fm-pool-warm.sh's header owns
@@ -243,12 +272,9 @@ harvest_one() {  # <worktree> <subpath> <pool-key>
 reconcile() {  # <dir>
   local dir=$1 cmd secs
   cmd=$(install_cmd "$dir")
-  secs=$(fm_pool_warm_timeout)
-  if command -v timeout >/dev/null 2>&1; then
-    (cd "$dir" && timeout "$secs" sh -c "$cmd" >/dev/null 2>&1)
-  else
-    (cd "$dir" && sh -c "$cmd" >/dev/null 2>&1)
-  fi
+  secs=$(budget_secs)
+  [ "$secs" -gt 0 ] || return 1
+  (cd "$dir" && fm_pool_run_bounded "$secs" sh -c "$cmd" >/dev/null 2>&1)
 }
 
 # provision_root <worktree> <subpath> <pool-key> <clone-ok>
@@ -262,6 +288,13 @@ provision_root() {  # <worktree> <subpath> <pool-key> <clone-ok>
   entry=$(cache_entry "$key" "$rel")
   fp=$(fingerprint "$dir")
   started=$(date +%s)
+
+  # Say so rather than start an install with no time left to finish in: a root
+  # abandoned mid-install is worse than one never begun.
+  if out_of_time; then
+    say "  $rel: skipped, the warm's time budget is spent (slot stays cold here)"
+    return 1
+  fi
 
   if uses_pnpm "$dir"; then
     reconcile "$dir" || { say "  $rel: pnpm install FAILED (slot stays cold here)"; return 1; }
