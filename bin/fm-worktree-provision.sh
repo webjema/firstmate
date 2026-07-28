@@ -231,15 +231,21 @@ cache_fresh() {  # <cache-entry> <fingerprint>
   [ "$(cat "$1/.fingerprint" 2>/dev/null || true)" = "$2" ]
 }
 
-# harvest_one <worktree> <subpath> <pool-key>: copy a CORRECT node_modules into
-# the cache. Clone-only: a harvest that fell back to a real copy would write the
-# whole tree a second time for real, which is the disk cost this exists to avoid.
-harvest_one() {  # <worktree> <subpath> <pool-key>
-  local wt=$1 rel=$2 key=$3 dir entry fp
+# harvest_one <worktree> <subpath> <pool-key> [fingerprint]: copy a CORRECT
+# node_modules into the cache. Clone-only: a harvest that fell back to a real copy
+# would write the whole tree a second time for real, which is the disk cost this
+# exists to avoid.
+#
+# The caller passes the fingerprint it took BEFORE reconciling, because that is
+# the state a later slot will present: a fresh checkout carries the lockfile git
+# has, not the one npm rewrote during the install. Storing the post-install
+# fingerprint instead would never match, and every warm would re-harvest.
+harvest_one() {  # <worktree> <subpath> <pool-key> [fingerprint]
+  local wt=$1 rel=$2 key=$3 fp=${4:-} dir entry
   dir=$wt/$rel
   [ -d "$dir/node_modules" ] || return 1
   entry=$(cache_entry "$key" "$rel")
-  fp=$(fingerprint "$dir")
+  [ -n "$fp" ] || fp=$(fingerprint "$dir")
   clone_tree "$dir/node_modules" "$entry/node_modules" || return 1
   printf '%s\n' "$fp" > "$entry/.fingerprint" 2>/dev/null || true
   return 0
@@ -321,7 +327,7 @@ provision_root() {  # <worktree> <subpath> <pool-key> <clone-ok>
   # Refresh the cache from what we just proved correct. Only when it is missing
   # or stale, so a steady-state warm rewrites nothing.
   if [ "$clone_ok" = yes ] && ! cache_fresh "$entry" "$fp"; then
-    if harvest_one "$wt" "$rel" "$key"; then
+    if harvest_one "$wt" "$rel" "$key" "$fp"; then
       say "  $rel: clone=$cloned, reconciled in ${elapsed}s, cache seeded"
       return 0
     fi

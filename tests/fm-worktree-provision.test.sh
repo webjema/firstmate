@@ -28,6 +28,7 @@
 #   (k) --probe                 -> reports clone support
 #   (l) a spent shared budget   -> every root is skipped, and the skip is reported
 #   (m) ONE budget for ALL roots: a root that eats it leaves none for the rest
+#   (n) an installer that rewrites its lockfile -> the cache is not re-harvested
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -310,3 +311,34 @@ assert_contains "$out" "the warm's time budget is spent" "(m) the later roots ar
 [ "$(grep -c 'cwd=' "$NPM_LOG")" -eq 1 ] \
   || fail "(m) $(grep -c 'cwd=' "$NPM_LOG") installs started on one budget - the budget is not shared"
 pass "(m) the time budget is shared across every root of one warm"
+
+# --- (n) an installer that rewrites its own lockfile must not thrash the cache -
+# npm does exactly this. If the cache recorded the fingerprint of the POST-install
+# tree, no later slot - which presents the lockfile git has - would ever match it,
+# and every warm would re-harvest a multi-GB tree for nothing.
+
+if clone_supported; then
+  SLOT=$(new_case rewrite)
+  CASE=$TMP_ROOT/rewrite
+  fake_npm "$CASE"
+  cat > "$CASE/fakebin/npm" <<SH
+#!/usr/bin/env bash
+printf 'npm %s cwd=%s\n' "\$*" "\$PWD" >> "$CASE/npm.log"
+[ -f package-lock.json ] && printf '{"rewritten":true}\n' > package-lock.json
+mkdir -p node_modules/pkg && printf 'x\n' > node_modules/pkg/index.js
+exit 0
+SH
+  chmod +x "$CASE/fakebin/npm"
+  out=$(run_provision "$SLOT")
+  assert_contains "$out" "cache seeded" "(n) the first run seeds the cache"
+  # Model the next slot: a fresh checkout, so the lockfile is the one git has.
+  rm -rf "$SLOT/node_modules" "$SLOT/src/app/node_modules" "$SLOT/src/ui/node_modules"
+  printf '{}\n' > "$SLOT/src/app/package-lock.json"
+  printf '{}\n' > "$SLOT/src/ui/package-lock.json"
+  out=$(run_provision "$SLOT")
+  assert_contains "$out" "clone=yes" "(n) the second slot still clones from the cache"
+  assert_not_contains "$out" "cache seeded" "(n) and must NOT re-harvest a cache that is still right"
+  pass "(n) a lockfile the installer rewrote does not invalidate the cache"
+else
+  pass "(n) skipped: this volume does not support cp -c clones"
+fi

@@ -231,8 +231,8 @@ warm_one() {  # <project-real-path>
   # this slot half-installed.
   #
   # BOUNDED, because an unbounded warm is the worst failure in this system: a hung
-  # install (a dead registry, a lockfile that never resolves) would hang the
-  # warmer forever while it holds
+  # install (a dead registry, a lockfile that never resolves) would hang the warmer
+  # forever while it holds
   # BOTH the pool lock - with a live pid, so no other warmer may ever reclaim it -
   # and the treehouse lease, whose slot then leaves the pool permanently. And a
   # live-pid lock makes fm-pool-status.sh's warmer_is_live() true, so the leaked
