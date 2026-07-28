@@ -9,6 +9,14 @@
 #   (d) the root must be a claude-<uid> scratch root, or the reaper refuses
 #   (e) non-session siblings (bundled-skills/<version>) are never touched
 #   (f) an emptied project-encoded parent dir is cleaned up
+#   (g) a LIVE session survives a find that rejects the GNU-only primaries (BSD/macOS)
+#   (h) a probe that cannot run spares the dir - the reaper fails CLOSED - and says so
+#
+# (g) and (h) are regression tests for a defect that deleted live sessions' scratch on
+# every macOS run, so neither may be satisfied by a GNU-only path: both drive the
+# reaper through a stub `find` and assert the outcome on the implementation the
+# platform's own /usr/bin/find would produce. A test that only exercises GNU find
+# cannot see this bug at all, because GNU find is the half that always worked.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -26,10 +34,58 @@ make_scratch() {
            "$root/-proj-b/11111111-2222-3333-4444-555555555555/scratchpad" \
            "$root/bundled-skills/2.1.210"
   echo dead > "$root/-proj-a/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/scratchpad/f"
-  touch -d '3 days ago' "$root/-proj-a/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/scratchpad/f"
+  age_days "$root/-proj-a/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/scratchpad/f" 3
   echo live > "$root/-proj-b/11111111-2222-3333-4444-555555555555/scratchpad/f"
   echo skill > "$root/bundled-skills/2.1.210/y"
   printf '%s\n' "$root"
+}
+
+# Backdate a file N days, on either flavor of the toolchain. `touch -d '3 days ago'`
+# is GNU-only - BSD touch wants an ISO stamp for -d and silently leaves the mtime at
+# now, which quietly turns a "dead" fixture into a live one. `touch -t` is POSIX and
+# understood by both; only the date arithmetic that produces the stamp differs.
+age_days() {  # <file> <days>
+  local f=$1 days=$2 stamp
+  stamp=$(date -v-"${days}"d +%Y%m%d%H%M.%S 2>/dev/null) ||
+    stamp=$(date -d "$days days ago" +%Y%m%d%H%M.%S 2>/dev/null) ||
+    fail "no portable way to compute a timestamp $days days ago"
+  touch -t "$stamp" "$f"
+}
+
+# Put a stub `find` first on PATH that refuses one specific primary and delegates
+# everything else to the platform's real find. This is how a macOS-only failure is
+# made visible on a GNU runner: the stub reproduces exactly what BSD find does with a
+# primary it does not implement - a diagnostic on stderr, a non-zero exit, and NOTHING
+# on stdout, which is the empty result the old probe misread as "nothing recent here".
+# Echoes the dir to prepend to PATH.
+make_find_stub() {  # <name> <primary-to-reject> [reject-value-prefix]
+  local name=$1 primary=$2 valpfx=${3:-} dir real
+  dir="$TMP_ROOT/stub-$name"
+  mkdir -p "$dir"
+  real=$(PATH=/usr/bin:/bin command -v find) || fail "no real find to delegate to"
+  cat > "$dir/find" <<EOF
+#!/usr/bin/env bash
+# Stub find: rejects '$primary' the way BSD find does, delegates the rest.
+armed=0
+for a in "\$@"; do
+  if [ "\$armed" = 1 ]; then
+    case "\$a" in
+      ${valpfx:-@}*) echo "find: Can't parse date/time: \$a" >&2; exit 1 ;;
+    esac
+    armed=0
+  fi
+  case "\$a" in
+    "$primary")
+      if [ -z "$valpfx" ]; then
+        echo "find: $primary: unknown primary or operator" >&2; exit 1
+      fi
+      armed=1 ;;
+  esac
+done
+exec $real "\$@"
+EOF
+  chmod +x "$dir/find"
+  printf '%s\n' "$dir"
 }
 
 DEAD=-proj-a/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
@@ -97,9 +153,42 @@ test_max_age_threshold_respected() {
   pass "--max-age-hours gates reaping by the untouched window"
 }
 
+# The defect this guards: with `find` rejecting the GNU-only @epoch form, the old probe
+# produced no stdout, the reaper read that as "no recent file here", and it deleted
+# every session dir it enumerated - live ones included, on every macOS run.
+test_live_session_survives_bsd_find() {
+  local root stub
+  root=$(make_scratch bsdfind)
+  stub=$(make_find_stub bsd -newermt @)
+  PATH="$stub:$PATH" FM_SCRATCH_ROOT="$root" "$REAP" >/dev/null 2>&1
+  [ -e "$root/$LIVE" ] ||
+    fail "live session reaped under a find that rejects -newermt @<epoch> (the macOS path)"
+  # The other half: the probe must still WORK on that find, not just spare everything.
+  [ ! -e "$root/$DEAD" ] ||
+    fail "dead session was not reaped under a find that rejects -newermt @<epoch>"
+  pass "a live session survives a find that rejects the GNU-only date form"
+}
+
+# Rail 4, independent of any syntax: when the probe itself cannot run, the answer is
+# unknown, and an unknown answer must never clear a deletion.
+test_fails_closed_when_probe_cannot_run() {
+  local root stub out
+  root=$(make_scratch failclosed)
+  stub=$(make_find_stub noprobe -mmin)
+  out=$(PATH="$stub:$PATH" FM_SCRATCH_ROOT="$root" "$REAP" 2>/dev/null)
+  [ -e "$root/$DEAD" ] ||
+    fail "reaper deleted a session dir when its liveness probe could not run"
+  [ -e "$root/$LIVE" ] || fail "reaper deleted the live session dir as well"
+  assert_contains "$out" 'refusing to reap on an unknown answer' \
+    "fail-closed spare is reported rather than silent"
+  pass "a probe that cannot run spares the dir and says so"
+}
+
 test_reaps_dead_spares_fresh
 test_cleans_emptied_parent
 test_protect_spares_regardless_of_age
 test_dry_run_deletes_nothing
 test_refuses_non_harness_root
 test_max_age_threshold_respected
+test_live_session_survives_bsd_find
+test_fails_closed_when_probe_cannot_run
