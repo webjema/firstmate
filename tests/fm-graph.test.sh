@@ -127,6 +127,50 @@ test_missing_binary_is_non_fatal() {
   pass "fm-graph-reindex.sh: a missing binary warns and exits 0"
 }
 
+# A restricted PATH with everything the script needs EXCEPT the named tool, so
+# "the graph is unavailable" can be proved rather than assumed. Mirrors
+# tests/fm-cd-pretool-check.test.sh's missing-node/missing-jq cases.
+path_without() {
+  local missing=$1 dir=$2 tool tool_path
+  mkdir -p "$dir"
+  for tool in bash sh env git jq awk grep head tr basename dirname cat printf sed timeout gtimeout; do
+    [ "$tool" != "$missing" ] || continue
+    tool_path=$(command -v "$tool") || continue
+    ln -sf "$tool_path" "$dir/$tool"
+  done
+  printf '%s\n' "$dir"
+}
+
+test_missing_jq_is_non_fatal() {
+  local home repo out code bin
+  read -r home repo <<<"$(new_case)"
+  bin=$(path_without jq "$home/nojq")
+  fm_graph_stub_projects "$home/projects.json" jqless-proj "$repo"
+  out=$(FM_STUB_PROJECTS="$home/projects.json" PATH="$bin" run_reindex "$home" "$repo"); code=$?
+  expect_code 0 "$code" "a missing jq must not fail the caller"
+  [ -z "$out" ] || fail "a missing jq must print nothing on stdout, got: $out"
+  assert_grep "CLI unavailable" "$home/stderr.log" "a missing jq must report the graph unavailable"
+  pass "fm-graph-reindex.sh: a missing jq reports the graph unavailable and exits 0"
+}
+
+# No timeout(1) and no gtimeout means a call cannot be BOUNDED, and an unbounded
+# graph call in front of a fleet sync is exactly what the contract forbids - so
+# the graph counts as unavailable instead.
+test_missing_timeout_binary_is_non_fatal() {
+  local home repo out code bin
+  read -r home repo <<<"$(new_case)"
+  bin=$(path_without timeout "$home/notimeout")
+  rm -f "$bin/gtimeout"
+  fm_graph_stub_projects "$home/projects.json" unbounded-proj "$repo"
+  out=$(FM_STUB_PROJECTS="$home/projects.json" FM_STUB_LOG="$home/calls.log" \
+    PATH="$bin" run_reindex "$home" "$repo"); code=$?
+  expect_code 0 "$code" "no timeout binary must not fail the caller"
+  [ -z "$out" ] || fail "no timeout binary must print nothing on stdout, got: $out"
+  assert_grep "CLI unavailable" "$home/stderr.log" "no timeout binary must report the graph unavailable"
+  [ ! -f "$home/calls.log" ] || fail "an unboundable call must never be made"
+  pass "fm-graph-reindex.sh: with no timeout binary the graph is unavailable, not unbounded"
+}
+
 test_lookup_error_is_non_fatal() {
   local home repo out code
   read -r home repo <<<"$(new_case)"
@@ -239,6 +283,8 @@ test_matches_on_canonical_root
 test_resolves_bare_project_name
 test_unindexed_project_is_skipped_not_indexed
 test_missing_binary_is_non_fatal
+test_missing_jq_is_non_fatal
+test_missing_timeout_binary_is_non_fatal
 test_lookup_error_is_non_fatal
 test_index_error_is_non_fatal
 test_garbage_payload_is_non_fatal

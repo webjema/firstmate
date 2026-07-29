@@ -27,13 +27,30 @@
 
 # --- binary resolution ------------------------------------------------------
 
+# Echo the timeout(1) binary, or return 1 when there is none. macOS without
+# coreutils has neither, and fm-watch.sh sets the precedent of trying `gtimeout`
+# second. Every graph call is bounded by contract, so an unboundable call is not
+# made at all: no timeout binary means "graph unavailable", not an unbounded call
+# in front of a brief scaffold or a fleet sync.
+fm_graph_timeout_bin() {
+  if command -v timeout >/dev/null 2>&1; then
+    printf '%s\n' timeout
+  elif command -v gtimeout >/dev/null 2>&1; then
+    printf '%s\n' gtimeout
+  else
+    return 1
+  fi
+}
+
 # Echo the codebase-memory CLI binary, or return 1 when it cannot be used.
 # FM_GRAPH_CLI overrides (tests point it at a stub); otherwise PATH wins, then
-# the standard user install location. jq is required to read the JSON, so its
-# absence counts as "graph unavailable" rather than a separate failure mode.
+# the standard user install location. jq (to read the JSON) and a timeout binary
+# (to bound the call) are both required, so either one missing counts as "graph
+# unavailable" rather than a separate failure mode.
 fm_graph_cli() {
   local cli=${FM_GRAPH_CLI:-}
   command -v jq >/dev/null 2>&1 || return 1
+  fm_graph_timeout_bin >/dev/null || return 1
   if [ -n "$cli" ]; then
     [ -x "$cli" ] || command -v "$cli" >/dev/null 2>&1 || return 1
     printf '%s\n' "$cli"
@@ -81,9 +98,9 @@ fm_graph_mode() {
 
 # Seconds a single CLI call may take before it is killed. Two bounds because the
 # two callers have very different budgets: a lookup sits in front of a brief
-# scaffold, a reindex does real work. Measured on a 14,735-node clone: cold index
-# 4.0s, incremental reindex after a merge-sized change 0.1-4.4s, so the reindex
-# default is ample headroom rather than a working limit.
+# scaffold, a reindex does real work. Measured: list_projects 0.12-0.16s; on a
+# 14,735-node clone, cold index 4.0s and incremental reindex after a merge-sized
+# change 0.1-4.4s. Both defaults are ample headroom rather than working limits.
 fm_graph_lookup_timeout() { printf '%s\n' "${FM_GRAPH_LOOKUP_TIMEOUT_SECS:-10}"; }
 fm_graph_reindex_timeout() { printf '%s\n' "${FM_GRAPH_REINDEX_TIMEOUT_SECS:-60}"; }
 
@@ -95,10 +112,11 @@ fm_graph_reindex_timeout() { printf '%s\n' "${FM_GRAPH_REINDEX_TIMEOUT_SECS:-60}
 # Leading non-JSON lines (the mem.init log, a deprecation warning) are dropped
 # rather than assumed away.
 fm_graph_call() {
-  local secs=$1 tool=$2 cli out json
+  local secs=$1 tool=$2 cli tmo out json
   shift 2
   cli=$(fm_graph_cli) || return 1
-  out=$(timeout "$secs" "$cli" cli "$tool" "$@" 2>/dev/null) || return 1
+  tmo=$(fm_graph_timeout_bin) || return 1
+  out=$("$tmo" "$secs" "$cli" cli "$tool" "$@" 2>/dev/null) || return 1
   json=$(printf '%s\n' "$out" | awk '/^[[:space:]]*[{[]/ { found = 1 } found { print }')
   [ -n "$json" ] || return 1
   printf '%s\n' "$json" | jq -e . >/dev/null 2>&1 || return 1
