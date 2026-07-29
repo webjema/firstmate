@@ -12,6 +12,12 @@
 # The pre-existing fast-forward / already-current / local-only / no-origin paths
 # must be unchanged, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
 #
+# It also pins the knowledge-graph refresh hook: a clone whose default branch
+# actually moved gets its codebase-memory graph refreshed, an "already current"
+# clone never calls the graph CLI at all (the graph is pinned to a commit, so there
+# is nothing to refresh), and a failing refresh leaves the sync green - fleet sync's
+# job is the clone, and a cache must never be able to turn a good sync red.
+#
 # It also pins the orphaned .git/packed-refs.lock recovery in the fetch step
 # (fetch_with_packed_refs_lock_guard, backed by bin/fm-lock-lib.sh's shared
 # staleness proof): a provably-stale lock is retried then removed and the clone
@@ -23,8 +29,8 @@
 # non-packed-refs.lock fetch failure keeps today's behavior with no retry.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/graph-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/graph-helpers.sh"
 
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -84,10 +90,26 @@ advance_origin() {
 head_sha() { git -C "$1" rev-parse HEAD; }
 
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
+# mode=off keeps every drift/lock case off the real codebase-memory binary: these
+# fixtures are throwaway clones no graph holds, so a live lookup would only add a
+# host dependency and a subprocess per sync. The graph cases below wire in the fake
+# CLI explicitly instead.
 run_sync() {
   local home=$1
   shift
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_GRAPH_REINDEX_MODE=off \
+    "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
+}
+
+GRAPH_STUB=$(fm_graph_stub "$TMP_ROOT/graph-bin")
+
+# run_sync_graph <home> [args...]: same, with the fake graph CLI wired in. The
+# caller sets FM_STUB_PROJECTS / FM_STUB_LOG / FM_STUB_FAIL as prefix env.
+run_sync_graph() {
+  local home=$1
+  shift
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_GRAPH_CLI="$GRAPH_STUB" \
+    "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
 }
 
 # --- packed-refs.lock fixtures ----------------------------------------------
@@ -603,6 +625,76 @@ test_non_signature_fetch_failure_is_not_retried() {
   pass "a non-packed-refs.lock fetch failure keeps today's behavior (no retry)"
 }
 
+# --- knowledge-graph refresh hook -------------------------------------------
+
+# graph_home: a fresh home per graph case, not new_home. new_home's counter runs
+# inside a command substitution, so every caller of it shares home-1 - which the
+# whole-fleet case above relies on. Own homes keep these clones out of that case's
+# projects/ dir and keep each case's stub call log to itself.
+graph_home() {
+  local h
+  h=$(mktemp -d "$TMP_ROOT/graph-home.XXXXXX")
+  mkdir -p "$h/projects"
+  printf '%s\n' "$h"
+}
+
+test_graph_refreshed_after_fast_forward() {
+  local home clone out log
+  home=$(graph_home)
+  clone=$(build_pair "$home" alpha)
+  advance_origin "$home" alpha C1
+  log="$home/graph-calls.log"
+  fm_graph_stub_projects "$home/graph.json" alpha-in-graph "$clone"
+  out=$(FM_STUB_PROJECTS="$home/graph.json" FM_STUB_LOG="$log" run_sync_graph "$home" "$clone")
+  assert_contains "$out" "alpha: synced" "the clone must still fast-forward"
+  assert_contains "$out" "graph refreshed (project=alpha-in-graph" "a moved clone must refresh its graph"
+  assert_grep "index_repository" "$log" "a moved clone must re-index"
+  pass "fleet-sync: a fast-forwarded clone refreshes its knowledge graph"
+}
+
+test_graph_untouched_when_already_current() {
+  local home clone out log
+  home=$(graph_home)
+  clone=$(build_pair "$home" alpha)
+  log="$home/graph-calls.log"
+  fm_graph_stub_projects "$home/graph.json" alpha-in-graph "$clone"
+  out=$(FM_STUB_PROJECTS="$home/graph.json" FM_STUB_LOG="$log" run_sync_graph "$home" "$clone")
+  assert_contains "$out" "alpha: already current" "an unmoved clone must report already current"
+  assert_not_contains "$out" "graph refreshed" "an unmoved clone must not report a refresh"
+  assert_absent "$log" "an unmoved clone must not call the graph CLI at all"
+  pass "fleet-sync: an already-current clone never touches the graph"
+}
+
+test_graph_failure_keeps_sync_green() {
+  local home clone out code
+  home=$(graph_home)
+  clone=$(build_pair "$home" alpha)
+  advance_origin "$home" alpha C1
+  fm_graph_stub_projects "$home/graph.json" alpha-in-graph "$clone"
+  out=$(FM_STUB_PROJECTS="$home/graph.json" FM_STUB_FAIL=index_repository \
+    run_sync_graph "$home" "$clone"); code=$?
+  expect_code 0 "$code" "a failing graph refresh must not fail the sync"
+  assert_contains "$out" "alpha: synced" "a failing graph refresh must not hide the sync outcome"
+  assert_not_contains "$out" "graph refreshed" "a failed refresh must not claim success"
+  [ "$(head_sha "$clone")" = "$(git -C "$home/work-alpha" rev-parse HEAD)" ] \
+    || fail "the clone must be fast-forwarded even when the graph refresh fails"
+  pass "fleet-sync: a failing graph refresh leaves the sync green"
+}
+
+test_graph_unindexed_project_is_not_indexed() {
+  local home clone out log
+  home=$(graph_home)
+  clone=$(build_pair "$home" alpha)
+  advance_origin "$home" alpha C1
+  log="$home/graph-calls.log"
+  fm_graph_stub_projects "$home/graph.json" someone-else /somewhere/else
+  out=$(FM_STUB_PROJECTS="$home/graph.json" FM_STUB_LOG="$log" run_sync_graph "$home" "$clone")
+  assert_contains "$out" "alpha: synced" "an unindexed project must still sync"
+  assert_not_contains "$out" "graph refreshed" "an unindexed project must not report a refresh"
+  assert_no_grep "index_repository" "$log" "a merge must never index a project the graph does not hold"
+  pass "fleet-sync: a merge never indexes a project that was not already in the graph"
+}
+
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
@@ -625,3 +717,7 @@ test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal
 test_transient_packed_refs_lock_self_clears
 test_non_signature_fetch_failure_is_not_retried
+test_graph_refreshed_after_fast_forward
+test_graph_untouched_when_already_current
+test_graph_failure_keeps_sync_green
+test_graph_unindexed_project_is_not_indexed

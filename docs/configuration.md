@@ -67,6 +67,21 @@ Firstmate's recovery is designed for exactly this: because its conversation is a
 A native token count is read from the claude transcript matching the session's working directory; harnesses with no readable native usage fall back to the watcher-maintained per-event counter times `proxy_tokens_per_event`, reported as `source: proxy` so an estimate is never mistaken for a measurement.
 See [`proposals/context-management.md`](proposals/context-management.md) for the layered design.
 
+## Knowledge-graph refresh (config/graph-reindex-mode)
+
+The `codebase-memory` knowledge graph is a per-project code index the whole fleet can query instead of grepping a tree into context.
+Firstmate keeps it honest from two ends: `bin/fm-fleet-sync.sh` refreshes a project's index right after that clone's default branch actually moves, and `bin/fm-brief.sh` tells a crew the graph exists only when it actually holds that project.
+Both go through `bin/fm-graph-lib.sh`, the single owner of the CLI contract, and both are best-effort: an absent binary, a CLI error, a timeout, or an unindexed project is silent and never fails the caller.
+Only projects the graph already holds are refreshed; a first index is a decision, not a side effect of a merge, so index a project once by hand to opt it into refreshes.
+
+`config/graph-reindex-mode` (local, gitignored) carries one index mode on its first non-empty, non-comment line: `full`, `moderate`, `fast`, `cross-repo-intelligence`, or `off`.
+An absent file means `full`, deliberately: on a real 14,735-node repo, `moderate` silently excluded `tools/`, `scripts/`, and the migration and terraform-fixture trees, indexing 9,080 nodes, and a graph that silently lacks the code being asked about is worse than no graph.
+`off` is the feature's kill switch and disables both halves - no refresh, and no graph guidance in briefs - so firstmate never points crews at an index it is not maintaining.
+An unrecognized value warns and falls back to `full`.
+`FM_GRAPH_REINDEX_MODE` overrides the file.
+
+Firstmate never passes `--persistence true`, which would write `.codebase-memory/graph.db.zst` into a project clone firstmate must not modify.
+
 ## User preferences (data/user.md)
 
 Personal preferences for one user's fleet live locally in `data/user.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.
@@ -210,6 +225,10 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalati
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
+FM_GRAPH_REINDEX_MODE=  # codebase-memory index mode override; unset/blank means config/graph-reindex-mode, then full. `off` disables both the refresh and the brief's graph guidance
+FM_GRAPH_CLI=           # codebase-memory binary override (path or PATH name); unset means `codebase-memory-mcp` on PATH, then ~/.local/bin/codebase-memory-mcp
+FM_GRAPH_LOOKUP_TIMEOUT_SECS=10   # ceiling on one graph lookup, which sits in front of a brief scaffold
+FM_GRAPH_REINDEX_TIMEOUT_SECS=60  # ceiling on one graph refresh; measured incremental refresh of a 14,735-node clone is 0.1-4.4s
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature

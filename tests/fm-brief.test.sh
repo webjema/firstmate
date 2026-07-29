@@ -10,14 +10,20 @@
 # generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
 # is unaffected, so the secondmate charter block does not need this guard.
 #
+# The knowledge-graph guidance is the third: it is generated only when the graph
+# actually holds this project, so the brief can never tell a crew to query an
+# index that is not there. Every way the lookup can come up empty - no binary, a
+# CLI error, an unindexed project, the mode kill switch - must leave the brief
+# scaffolded and silent about the graph.
+#
 # The direction contract is the other load-bearing thing here: every ship and
 # scout brief must carry the project's direction and the conflict-escalation
 # rule, because that is the ONLY mechanism that makes a small bug fix get judged
 # against the project's architecture and quality posture.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/graph-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/graph-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 
@@ -387,6 +393,86 @@ test_context_discipline_in_ship_and_scout() {
   pass "fm-brief.sh: ship and scout briefs carry the context-discipline block"
 }
 
+# --- knowledge-graph guidance ------------------------------------------------
+
+GRAPH_STUB=$(fm_graph_stub "$TMP_ROOT/graph-bin")
+
+# graph_home <label> <repo>: a home with a real projects/<repo> dir (the lookup
+# resolves the clone's physical path) and a list_projects payload naming it.
+# Echoes the home.
+graph_home() {
+  local home="$TMP_ROOT/graph-$1" repo=$2 abs
+  mkdir -p "$home/data" "$home/projects/$repo"
+  abs=$(cd "$home/projects/$repo" && pwd -P)
+  fm_graph_stub_projects "$home/graph.json" "$repo-in-graph" "$abs"
+  printf '%s\n' "$home"
+}
+
+test_graph_guidance_when_project_is_indexed() {
+  local home brief kind id flags
+  home=$(graph_home indexed alpha)
+
+  for kind in ship scout; do
+    id="brief-graph-$kind"
+    flags=()
+    [ "$kind" != scout ] || flags=(--scout)
+    # FM_STUB_NOISE: the real binary's log lines share stdout with the payload, so
+    # the lookup behind a brief has to survive them.
+    FM_HOME="$home" FM_GRAPH_CLI="$GRAPH_STUB" FM_STUB_PROJECTS="$home/graph.json" \
+      FM_STUB_NOISE=1 \
+      "$ROOT/bin/fm-brief.sh" "$id" alpha "${flags[@]}" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "knowledge graph as project \`alpha-in-graph\`" "$brief" \
+      "$kind brief must name the project as the graph knows it"
+    assert_grep "detect_changes" "$brief" \
+      "$kind brief must point at detect_changes for the crew's own diff"
+    assert_grep "sound for reading code you have NOT changed" "$brief" \
+      "$kind brief must state the staleness boundary"
+    assert_grep "Never index or re-index anything yourself" "$brief" \
+      "$kind brief must forbid the crew re-indexing"
+  done
+  pass "fm-brief.sh: an indexed project's briefs carry the graph guidance"
+}
+
+test_no_graph_guidance_when_project_is_not_indexed() {
+  local home brief
+  home=$(graph_home unindexed beta)
+  # The payload names beta, the brief asks about a sibling clone the graph lacks.
+  mkdir -p "$home/projects/gamma"
+  FM_HOME="$home" FM_GRAPH_CLI="$GRAPH_STUB" FM_STUB_PROJECTS="$home/graph.json" \
+    "$ROOT/bin/fm-brief.sh" brief-graph-none gamma >/dev/null 2>&1
+  brief="$home/data/brief-graph-none/brief.md"
+  assert_present "$brief" "an unindexed project must still get a brief"
+  assert_grep "# Context discipline" "$brief" "the brief lost its context-discipline block"
+  assert_no_grep "knowledge graph" "$brief" \
+    "a project the graph does not hold must not be advertised as indexed"
+  pass "fm-brief.sh: an unindexed project's brief says nothing about the graph"
+}
+
+test_graph_lookup_failures_never_break_a_scaffold() {
+  local home brief variant cli extra
+  for variant in absent erroring garbage off; do
+    home=$(graph_home "fail-$variant" delta)
+    cli=$GRAPH_STUB
+    case "$variant" in
+      absent)   cli="$TMP_ROOT/graph-bin/does-not-exist"; extra=() ;;
+      erroring) extra=(FM_STUB_FAIL=list_projects) ;;
+      garbage)  extra=(FM_STUB_PROJECTS=/dev/null) ;;
+      off)      extra=(FM_GRAPH_REINDEX_MODE=off) ;;
+    esac
+    # env, not an assignment prefix: bash recognizes assignments at parse time, so
+    # an array expansion of "VAR=value" would become the command name instead.
+    env FM_HOME="$home" FM_GRAPH_CLI="$cli" FM_STUB_PROJECTS="$home/graph.json" \
+      "${extra[@]}" \
+      "$ROOT/bin/fm-brief.sh" "brief-graph-$variant" delta >/dev/null 2>&1
+    brief="$home/data/brief-graph-$variant/brief.md"
+    assert_present "$brief" "$variant: the brief must still be scaffolded"
+    assert_grep "# Context discipline" "$brief" "$variant: the brief lost its context-discipline block"
+    assert_no_grep "knowledge graph" "$brief" "$variant: the brief must stay silent about the graph"
+  done
+  pass "fm-brief.sh: every graph-lookup failure leaves the brief scaffolded and silent"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_context_discipline_in_ship_and_scout
@@ -401,3 +487,6 @@ test_read_project_docs_instruction
 test_secondmate_no_projects_charter
 test_secondmate_charter_points_at_direction
 test_pause_verb_override_renders_all_brief_scaffolds
+test_graph_guidance_when_project_is_indexed
+test_no_graph_guidance_when_project_is_not_indexed
+test_graph_lookup_failures_never_break_a_scaffold

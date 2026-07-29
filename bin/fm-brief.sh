@@ -44,6 +44,11 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Ship and scout briefs carry a context-discipline block. When the project is
+# actually indexed in the codebase-memory knowledge graph (checked at scaffold time
+# via bin/fm-graph-lib.sh), that block also names the graph project, states the
+# HEAD-pinned staleness boundary, and forbids the crew re-indexing; when it is not
+# indexed, or the graph is unavailable, the guidance is absent rather than untrue.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path,
 # and a quality-floor step so a project without Claude Code quality hooks gets them
@@ -197,6 +202,34 @@ exit 0
 fi
 
 REPO=${POS[1]}
+
+# Graph guidance, appended to the context-discipline block for ship and scout
+# briefs. TRUTHFUL OR ABSENT: emitted only when this project is actually in the
+# codebase-memory graph, checked here at scaffold time, because a brief that sends
+# a crew to query an index that does not exist is worse than saying nothing. The
+# check is best-effort - no binary, no jq, a CLI error, or an unindexed project all
+# yield an empty block and a brief that scaffolds normally.
+graph_guidance() {
+  local dir=$1 name
+  [ "$(fm_graph_mode)" != off ] || return 0
+  name=$(fm_graph_project_for_path "$dir" 2>/dev/null) || return 0
+  cat <<EOF
+
+- This project is indexed in the \`codebase-memory\` knowledge graph as project \`$name\`: query it (\`search_code\`, \`search_graph\`, \`get_architecture\`, \`trace_path\`) to locate and understand code instead of grepping the tree into your context. The \`codebase-memory\` skill documents the query surface.
+- The index is pinned to the clone's HEAD, not your branch, so it is sound for reading code you have NOT changed and wrong for verifying your own diff: use \`detect_changes\` to map your local changes onto it, and your own reads and tests for anything about your diff.
+- Never index or re-index anything yourself: that would multiply cost and pollute the graph with per-branch projects. Keeping it fresh is firstmate's job.
+EOF
+}
+
+GRAPH_DIR=$REPO
+if [ ! -d "$GRAPH_DIR" ]; then
+  GRAPH_DIR="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}/$REPO"
+fi
+if [ -d "$GRAPH_DIR" ]; then
+  # shellcheck source=bin/fm-graph-lib.sh
+  . "$SCRIPT_DIR/fm-graph-lib.sh"
+  CONTEXT_DISCIPLINE="$CONTEXT_DISCIPLINE$(graph_guidance "$GRAPH_DIR")"
+fi
 
 # The project's standing direction, injected verbatim into every brief.
 DIRECTION_SECTION=$("$FM_ROOT/bin/fm-direction.sh" brief "$REPO")
