@@ -85,6 +85,36 @@ The session-start clone refresh runs fleet sync under its own aggregate timeout 
 
 Firstmate never passes `--persistence true`, which would write `.codebase-memory/graph.db.zst` into a project clone firstmate must not modify.
 
+## Per-project local env files (config/project-env/)
+
+`config/project-env/<project>/` holds the canonical copy of a project's gitignored local env files, and `bin/fm-spawn.sh` copies that tree into every ship or scout crew's checkout at spawn.
+
+**It holds real secrets.**
+It is gitignored and never leaves the box.
+Never read, echo, log, or copy a value out of it - into a commit, a PR body, a report, or a test fixture.
+Seeded files are written with mode `600`, and each seeded path is added to the checkout's `.git/info/exclude`, so a credential stays invisible to git even in a project whose own ignore rules miss it.
+
+The directory mirrors the project checkout's own layout, so a file's path under `config/project-env/<project>/` is exactly its path in the checkout:
+
+```
+config/project-env/optiroq/.env.e2e
+config/project-env/optiroq/src/portal-ui/.env.e2e
+config/project-env/optiroq/src/portal-ui/.env.local
+```
+
+`<project>` is the project's directory name under `projects/`, the same name `data/projects.md` and `bin/fm-project-mode.sh` use.
+A project with no `config/project-env/<project>/` directory is the normal case and seeds nothing.
+
+Seeding never clobbers.
+A file that is absent from the checkout is copied; one that is already byte-identical is left as-is; one that is present and different is the crew's own local edit, so it is left untouched and named in a `warn:` line.
+A path the project *tracks* is refused outright, because seeding one would stage a credential for commit.
+Every ship or scout spawn prints one `env-seed: project=<name> seeded=N unchanged=N conflict=N` line, so the behaviour is visible rather than invisible.
+
+This exists because a treehouse pool slot cannot inherit gitignored files.
+A workspace reset runs `git clean -fd` with no `-x` (`bin/fm-pool-warm.sh`), so a slot keeps forever whatever ignored files it happened to be warmed with, and slots drift permanently.
+A crew that lands in a bare slot then honestly reports a credential absent that the box already holds.
+Seeding at spawn makes every slot correct the next time it is used, instead of a one-off sync that re-rots on the next warm.
+
 ## User preferences (data/user.md)
 
 Personal preferences for one user's fleet live locally in `data/user.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.
