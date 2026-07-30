@@ -812,7 +812,7 @@ release_then_relet_slot_to_other_task() {
 treehouse_return_count() {
   local case_dir=$1
   [ -f "$case_dir/treehouse.log" ] || { printf '0'; return 0; }
-  wc -l < "$case_dir/treehouse.log" | tr -d ' '
+  grep -c "\breturn\b" "$case_dir/treehouse.log" || true
 }
 
 test_released_then_relet_dirty_slot_phase2_purges_without_touching_it() {
