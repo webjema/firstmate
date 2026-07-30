@@ -15,16 +15,31 @@
 #
 # SAFETY MODEL. "Untouched for longer than the threshold" is the liveness proxy:
 # a live or recently-active session writes into its scratch tree, so a tree with
-# NO file modified within the window is a dead session. Three hard rails on top:
+# NO file modified within the window is a dead session. Four hard rails on top:
 #   1. The root must match the harness pattern (basename claude-<digits>), so the
 #      reaper can never be pointed at an arbitrary directory.
 #   2. A --protect <substr> (repeatable) skips any session dir whose path matches,
 #      so a caller that knows a live crew's worktree can guarantee it is spared
 #      regardless of age.
 #   3. --dry-run prints what it WOULD reap and deletes nothing.
+#   4. The liveness probe FAILS CLOSED. Its three answers are alive, demonstrably
+#      dead, and unknown, and unknown spares the tree. See has_recent_file below.
 # The current session's own scratch is naturally spared: it is being written to
 # now, so its newest mtime is inside the window. Pass --self <id> to spare it by
 # name as well.
+#
+# Rail 4 exists because its absence deleted live sessions. The probe used to be
+# `find "$d" -type f -newermt "@$cutoff" -print -quit 2>/dev/null`, and both of
+# those primaries are GNU-only. BSD find (macOS) rejects the @epoch form outright -
+# "find: Can't parse date/time: @1785062658", exit 1, NO stdout - and with stderr
+# discarded, an empty result read as "nothing recent here, safe to reap". So on
+# macOS every session dir was reaped on every run regardless of age or liveness,
+# including the scratch of the session doing the reaping, and including live crews'.
+# It hid for so long because the `find` in an interactive Claude Code shell is a
+# function shimming bfs, which accepts the GNU forms; only the script, running under
+# bash with /usr/bin/find, ever saw the failure.
+# The date syntax was just the trigger. The defect was deleting on an unanswered
+# safety check, so the fix is both: a portable probe AND a refusal to act on doubt.
 #
 # Usage: fm-scratch-reap.sh [options]
 #   --root DIR             scratch root (default: /tmp/claude-<uid>;
@@ -83,7 +98,33 @@ case "$(basename -- "$ROOT")" in
 esac
 [ -d "$ROOT" ] || { [ "$VERBOSE" = 1 ] && echo "SCRATCH_REAP: root $ROOT absent, nothing to do"; exit 0; }
 
-cutoff=$(( $(date +%s) - MAX_AGE_HOURS * 3600 ))
+WINDOW_MINUTES=$(( MAX_AGE_HOURS * 60 ))
+
+# has_recent_file <dir>: the liveness probe, and the one owner of "is this session
+# still alive". The ANSWER IS THE EXIT STATUS, and there are three of them:
+#   0  a file was modified inside the window - the session is alive
+#   1  demonstrably no such file - the session is dead and the dir is reapable
+#   2  the probe could not run - the answer is UNKNOWN
+# A caller must treat 2 exactly like 0. This function guards an `rm -rf`, so an
+# unanswerable check has to spare the tree; only a definite 1 may clear a deletion.
+# `-mmin` is the portable primary here: BSD and GNU find both accept it, it needs no
+# reference file, and unlike `-newermt "@<epoch>"` it cannot be rejected by one
+# implementation and honored by the other. `-quit` is GNU-only and stays out for the
+# same reason, so the walk is no longer short-circuited at the first match; the whole
+# tree is traversed either way, and only a live dir now prints more than nothing.
+# find's exit status must reach the verdict unmangled, so the output is captured
+# straight rather than piped - inside a command substitution `${PIPESTATUS[0]}` would
+# describe the assignment, not the pipeline, and silently read as success.
+# Any non-zero find status, including a permission error part-way down the tree, is
+# unknown rather than dead; sparing a reapable dir costs a little disk, and the other
+# mistake costs a live crew its work.
+has_recent_file() {  # <dir>
+  local d=$1 out rc=0
+  out=$(find "$d" -type f -mmin "-$WINDOW_MINUTES" -print 2>/dev/null) || rc=$?
+  [ "$rc" -eq 0 ] || return 2
+  [ -n "$out" ] && return 0
+  return 1
+}
 
 is_protected() {  # <path>
   local p=$1 sub
@@ -96,15 +137,19 @@ is_protected() {  # <path>
 
 reaped=0
 reaped_kb=0
+unknown=0
 # Session dirs are named as UUIDs (8-4-4-4-12) at depth 1 or 2 under the root, so
 # the glob naturally skips non-session siblings like bundled-skills/<version>.
 while IFS= read -r d; do
   [ -n "$d" ] || continue
   is_protected "$d" && continue
-  # A single file newer than the cutoff means the session is still active: spare it.
-  if [ -n "$(find "$d" -type f -newermt "@$cutoff" -print -quit 2>/dev/null)" ]; then
-    continue
-  fi
+  # A single file modified inside the window means the session is still active, and
+  # an unanswerable probe is treated the same way. Only a definite "dead" falls through.
+  probe=0; has_recent_file "$d" || probe=$?
+  case "$probe" in
+    0) continue ;;
+    2) unknown=$((unknown + 1)); continue ;;
+  esac
   kb=$(du -sk "$d" 2>/dev/null | cut -f1); kb=${kb:-0}
   if [ "$DRY_RUN" = 1 ]; then
     echo "SCRATCH_REAP: would reap $d (~${kb}K, untouched >${MAX_AGE_HOURS}h)"
@@ -119,6 +164,12 @@ done < <(find "$ROOT" -mindepth 1 -maxdepth 2 -type d \
 # Best-effort: drop now-empty project-encoded parent dirs left behind.
 [ "$DRY_RUN" = 1 ] || find "$ROOT" -mindepth 1 -maxdepth 1 -type d -empty -exec rmdir {} + 2>/dev/null || true
 
+# A spared-on-unknown is never silent: a probe that cannot run means the reaper has
+# stopped doing its job, and the whole point of rail 4 is that it says so instead of
+# guessing. On stdout, not stderr, because bin/fm-bootstrap.sh discards stderr.
+if [ "$unknown" -gt 0 ]; then
+  echo "SCRATCH_REAP: spared $unknown session scratch dir(s) - liveness probe failed, refusing to reap on an unknown answer"
+fi
 if [ "$reaped" -gt 0 ]; then
   verb=$([ "$DRY_RUN" = 1 ] && echo "would reclaim" || echo "reclaimed")
   echo "SCRATCH_REAP: $verb $reaped session scratch dir(s), ~$((reaped_kb / 1024))M (untouched >${MAX_AGE_HOURS}h)"

@@ -7,11 +7,9 @@
 #        fm-pool-warm.sh <project>  one project (a name under projects/, or a path)
 #        fm-pool-warm.sh --status   print each pool's headroom and exit (no warming)
 #
-# WHY. A cold slot's post_create hook installs the project's dependencies before
-# treehouse hands it over: a measured 137s for optiroq on this box, versus 2s for
-# a warm slot (bin/fm-provision-lib.sh records the measurement). Paying that on
-# the spawn path means a crew - and the user - waits. So pay it EARLY, in the
-# background, on firstmate's time.
+# WHY. A crew handed an EMPTY slot installs the project's dependencies itself
+# before it can build or test anything - minutes of the user's time, on the spawn
+# path. So pay it EARLY, in the background, on firstmate's time.
 #
 # THE INVARIANT: always-plus-one. For each project with work in flight, at least
 # one slot must sit AVAILABLE and warm. When the last free slot is taken, the
@@ -19,19 +17,46 @@
 # user who habitually runs 4 tasks settles at 5 slots and stops growing,
 # because the 5th is never consumed.
 #
-# WARMING IS THIN - IT IS TREEHOUSE, NOT A REIMPLEMENTATION. To warm a slot:
+# WARMING IS TWO STEPS, and the second one is not optional:
 #
-#   treehouse get --lease --lease-holder fm-warm-<project>   # create-or-reset,
-#                                                            # runs post_create
-#                                                            # (i.e. installs deps)
+#   treehouse get --lease --lease-holder fm-warm-<project>   # create-or-reset
+#   bin/fm-worktree-provision.sh <path>                      # populate the deps
 #   treehouse return <path>                                  # release the lease
 #
-# and the slot is then both AVAILABLE and warm. Verified end to end on 2026-07-14
+# TREEHOUSE INSTALLS NOTHING. It hands over an empty worktree, and it CANNOT be
+# made to install from a repo's own treehouse.toml: treehouse ignores hooks there
+# by design, and its only working hook home is the user's global config, which
+# firstmate does not write. docs/treehouse-backend.md records that finding and its
+# evidence - read it before proposing a repo-level hook again. This header used to
+# claim a post_create hook did the install, and cited 137s cold versus 2s warm
+# from bin/fm-provision-lib.sh on that basis. No such hook has ever existed on
+# this box, so a "warmed" slot was merely a CREATED one and the first crew still
+# paid the whole install.
+#
+# fm-worktree-provision.sh closes that gap by APFS-cloning each dependency tree
+# from a per-pool cache and reconciling it with the project's own installer; its
+# header owns that contract. Measured on optiroq (2026-07-27, treehouse v2.1.0,
+# `df` deltas - `du` cannot see a clone saving because it counts shared blocks):
+#
+#   cold install, 3 roots  ..... 56 s, 2.70 GB of real disk
+#   clone + reconcile      ..... 53 s,   96 MB of real disk
+#
+# So this buys DISK, not time: 96.5% less per additional slot, with the install
+# time essentially unchanged because npm install dominates and the npm cache is
+# already shared. The time win is the one warming already gave - it is paid here
+# instead of on the spawn path.
+#
+# THE COLD-SPAWN GAP IS ACCEPTED. A `treehouse get` that finds no warm slot still
+# hands over an empty one and the crew installs for itself. That is exactly the
+# behavior that predates this script, not a regression, and always-plus-one closes
+# it in steady state. Provisioning on the spawn path would need the global hook
+# this design deliberately declines.
+#
+# WHY THE DEPS SURVIVE THE RETURN: treehouse's reset is `git clean -fd` with NO
+# -x, so gitignored trees are never removed. Verified end to end on 2026-07-14
 # (treehouse v2.0.0, optiroq): after the return, node_modules/, src/portal-ui/
 # node_modules/ and src/admin-app/node_modules/ all survived - 2.7 GB intact.
-# They survive because treehouse's reset is `git clean -fd` with NO -x, so
-# gitignored build output is never removed. That is the whole reason a returned
-# slot stays warm, and the reason this script can be so thin.
+# That is the whole reason a returned slot stays warm.
 #
 # THE LEASE IS WHAT MAKES IT SAFE. It is held for the WHOLE install, so a
 # concurrent `treehouse get` can never be handed a half-installed slot, and it is
@@ -130,7 +155,7 @@ release_warm_resources() {
   if [ -n "${WARM_LEASE_PROJECT:-}" ]; then
     slot=${WARM_LEASE:-}
     # Killed mid-install? Then treehouse holds a lease whose path we never learned
-    # (it prints the path only after post_create finishes). Ask treehouse which slot
+    # (it prints the path only at the very end). Ask treehouse which slot
     # our holder owns rather than walk away from a lease we cannot name.
     [ -n "$slot" ] || \
       slot=$(fm_pool_leased_by "$WARM_LEASE_PROJECT" "fm-warm-$(basename "$WARM_LEASE_PROJECT")" 2>/dev/null || true)
@@ -148,7 +173,7 @@ release_pool_lock() { release_warm_resources; }
 
 # warm_one <project-real-path>: enforce always-plus-one for ONE pool.
 warm_one() {  # <project-real-path>
-  local project=$1 name avail slots max_trees pool_dir used_kb est_kb budget_kb path rc timeout_secs
+  local project=$1 name avail slots max_trees pool_dir used_kb est_kb budget_kb path rc timeout_secs line
   name=$(basename "$project")
 
   fm_pool_read "$project" || {
@@ -205,9 +230,9 @@ warm_one() {  # <project-real-path>
   # Warm it. The lease is held across the whole install, so no crew can be handed
   # this slot half-installed.
   #
-  # BOUNDED, because an unbounded warm is the worst failure in this system: the
-  # hung post_create the provisioning wait already guards against (a hung network
-  # call, a hook prompting for input) would hang the warmer forever while it holds
+  # BOUNDED, because an unbounded warm is the worst failure in this system: a hung
+  # install (a dead registry, a lockfile that never resolves) would hang the warmer
+  # forever while it holds
   # BOTH the pool lock - with a live pid, so no other warmer may ever reclaim it -
   # and the treehouse lease, whose slot then leaves the pool permanently. And a
   # live-pid lock makes fm-pool-status.sh's warmer_is_live() true, so the leaked
@@ -234,6 +259,20 @@ warm_one() {  # <project-real-path>
     return 0
   fi
   WARM_LEASE=$path
+
+  # THIS is what makes a warm slot warm. treehouse hands over an EMPTY worktree -
+  # it installs nothing, and cannot be made to from a repo's own treehouse.toml
+  # (see the header) - so without this step "warmed" would mean nothing more than
+  # "created", and the first crew would still pay the whole install.
+  #
+  # It shares this warm's single deadline, so three install roots cannot hold the
+  # lease and the pool lock for three times the bound. It always exits 0: a failed
+  # provision leaves a merely-cold slot, which is exactly what the pool held
+  # before this existed, and must never fail the warm or leak the lease.
+  while IFS= read -r line; do
+    [ -n "$line" ] && log "PROVISION $name: $line"
+  done < <(FM_PROVISION_DEADLINE=$(( $(date +%s) + timeout_secs )) \
+             "$SCRIPT_DIR/fm-worktree-provision.sh" "$path" 2>&1)
 
   # Release the lease: the slot is now AVAILABLE *and* warm. Its deps survive the
   # return (git clean -fd, no -x) - that is what makes it warm for the next crew.

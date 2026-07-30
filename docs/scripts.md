@@ -40,6 +40,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-pool-warm.sh`        | Keep one free warm treehouse slot ready per in-flight project, inside a disk budget  |
 | `fm-pool-lib.sh`         | Shared reader for a project's treehouse pool state, budget, and lease operations     |
 | `fm-provision-lib.sh`    | Progress-aware wait for `treehouse get`: tell a warming cold slot from a stuck pane  |
+| `fm-worktree-provision.sh` | Populate a pooled worktree's dependencies by APFS clone from a per-pool cache, then reconcile |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
 | `fm-afk-launch.sh`       | Own away-mode entry, exit, rollback, and the daemon terminal lifecycle                  |
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target for the daemon and launcher                   |

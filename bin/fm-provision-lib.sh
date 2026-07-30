@@ -9,8 +9,8 @@
 # Measured on this box (2026-07-14, treehouse v2.0.0, optiroq, WARM shared npm
 # cache at ~/.npm-cache-shared):
 #
-#   warm slot (deps already present, post_create fast-exits)  ...........   2 s
-#   COLD slot (fresh worktree + post_create npm install)      ........... 137 s
+#   warm slot (deps already present)  ...........   2 s
+#   COLD slot (deps installed from scratch)  ..... 137 s
 #
 # 137 s is 2.3x the old 60 s cliff, so the FIRST spawn against a project whose
 # pool has no warm slot - a fresh box, a new project, or an exhausted pool - was
@@ -18,21 +18,28 @@
 # is slower still. (bin/fm-pool-warm.sh exists to keep a warm slot ready so this
 # wait normally costs the 2 s path; this lib is the floor for when it does not.)
 #
+# Those two lines used to credit a treehouse `post_create` hook for the install.
+# No such hook has ever run on this box, and one in a repo's own treehouse.toml
+# never could - treehouse ignores hooks there by design (docs/treehouse-backend.md
+# records the evidence). The stopwatch numbers stand; only the attribution was
+# wrong. Dependencies get installed either by fm-pool-warm.sh before handover or
+# by the crew itself afterwards, never by treehouse.
+#
 # THE FIX IS NOT A BIGGER NUMBER. Raising 60 to 600 just fails later and still
 # cannot tell "installing" from "wedged". Instead, every tick classifies the pane
 # into one of three states, and only the middle one is allowed to consume time:
 #
 #   ENTERED   the pane's cwd left the project => the worktree is ours. Done.
-#   BUSY      the pane's shell still has a live descendant (treehouse itself, the
-#             post_create hook, npm, node). Something is running, so WAIT - this
-#             is the cold-install case, and killing it is the old bug.
+#   BUSY      the pane's shell still has a live descendant (treehouse itself, or
+#             the crew's own npm/node). Something is running, so WAIT - this is
+#             the cold-install case, and killing it is the old bug.
 #   EXITED    no descendant and the cwd never moved => treehouse RETURNED without
 #             handing over a worktree. It failed. Fail FAST (in seconds, not at a
 #             timeout) and say WHY, read from the pane's own last words.
 #
 # A live descendant is the progress signal because it is structural, not scraped:
 # an idle shell at a prompt has no children, and treehouse's whole pipeline
-# (fetch, reset, clean, post_create) runs as one. Two bounds still apply so a
+# (fetch, reset, clean) runs as one. Two bounds still apply so a
 # genuinely wedged pane cannot hang a spawn forever:
 #
 #   STALL    BUSY but producing NOTHING - no new pane output and no churn in its
