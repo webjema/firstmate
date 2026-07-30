@@ -642,10 +642,25 @@ exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
   [ -n "$EXCL" ] || return 0
+  # --git-path answers RELATIVE to the repo it was asked about (a plain clone says
+  # `.git/info/exclude`), and this script's cwd is not that repo - so resolve it
+  # against $WT rather than creating a stray .git/ wherever the spawn happens to
+  # be standing. A linked worktree answers with an absolute path and is untouched.
+  case "$EXCL" in /*) ;; *) EXCL="$WT/$EXCL" ;; esac
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 if [ "$KIND" != secondmate ]; then
+  # The crew's own scratch dir, excluded for the same reason as the harness hook
+  # files below: bin/fm-brief.sh tells every crew to keep a running plan at
+  # .fm/progress.md and never to commit it, so a crew that follows the brief leaves
+  # its worktree with an untracked file in it - and bin/fm-teardown.sh reads
+  # untracked files as unlanded work and REFUSES to release the worktree.
+  # Following instructions must not cost a forced teardown. The whole directory,
+  # not just progress.md, because it is the crew's scratch: whatever else it puts
+  # there is scratch too. Outside the harness case below, because every crew gets
+  # the brief regardless of which harness runs it.
+  exclude_path '.fm/'
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"

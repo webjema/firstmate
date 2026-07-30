@@ -11,6 +11,11 @@
 #   (f) an emptied project-encoded parent dir is cleaned up
 #   (g) a LIVE session survives a find that rejects the GNU-only primaries (BSD/macOS)
 #   (h) a probe that cannot run spares the dir - the reaper fails CLOSED - and says so
+#   (i) a per-directory traversal error spares that dir, names it, and keeps reaping
+#       the dirs that DID answer - an unreadable subdir is not a broken probe
+#   (j) ... but that sparing is not forever: past the hard ceiling it is reaped
+#   (k) --max-age-hours 0 is refused, because -mmin -0 matches nothing and would
+#       make every session dir, live ones included, read as dead
 #
 # (g) and (h) are regression tests for a defect that deleted live sessions' scratch on
 # every macOS run, so neither may be satisfied by a GNU-only path: both drive the
@@ -86,6 +91,47 @@ exec $real "\$@"
 EOF
   chmod +x "$dir/find"
   printf '%s\n' "$dir"
+}
+
+# Put a stub `find` first on PATH that fails the way a real walk fails on ONE bad
+# entry - a diagnostic on stderr, non-zero exit, nothing on stdout - but only for a
+# path matching <substr>, and only for a RECURSIVE walk. Anything carrying -maxdepth
+# is delegated untouched, so the reaper's own one-directory probes (the capability
+# gate and the hard-ceiling stat) still answer. That is the whole point: a single
+# unreadable subdir must not read as "find is broken".
+make_find_walk_error_stub() {  # <name> <path-substr>
+  local name=$1 substr=$2 dir real
+  dir="$TMP_ROOT/stub-$name"
+  mkdir -p "$dir"
+  real=$(PATH=/usr/bin:/bin command -v find) || fail "no real find to delegate to"
+  cat > "$dir/find" <<EOF
+#!/usr/bin/env bash
+# Stub find: one unreadable entry inside any recursive walk of *$substr*.
+shallow=0
+for a in "\$@"; do [ "\$a" = -maxdepth ] && shallow=1; done
+if [ "\$shallow" = 0 ]; then
+  for a in "\$@"; do
+    case "\$a" in
+      *$substr*) echo "find: \$a/unreadable: Permission denied" >&2; exit 1 ;;
+    esac
+  done
+fi
+exec $real "\$@"
+EOF
+  chmod +x "$dir/find"
+  printf '%s\n' "$dir"
+}
+
+# Add a third session dir whose tree the stub above will fail to walk. Aged <days>
+# on both its file and the dir itself, so the hard-ceiling backstop is exercisable.
+add_unwalkable() {  # <root> <days>
+  local root=$1 days=$2 d
+  d="$root/-proj-c/99999999-8888-7777-6666-555555555555"
+  mkdir -p "$d/scratchpad"
+  echo unwalkable > "$d/scratchpad/f"
+  age_days "$d/scratchpad/f" "$days"
+  age_days "$d" "$days"   # last: creating entries below would bump it again
+  printf '%s\n' "$d"
 }
 
 DEAD=-proj-a/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
@@ -170,7 +216,9 @@ test_live_session_survives_bsd_find() {
 }
 
 # Rail 4, independent of any syntax: when the probe itself cannot run, the answer is
-# unknown, and an unknown answer must never clear a deletion.
+# unknown, and an unknown answer must never clear a deletion. This is the GLOBAL
+# half - a find that cannot evaluate the question is broken for every directory
+# alike, so nothing at all is reaped. The per-directory half is (i) and (j).
 test_fails_closed_when_probe_cannot_run() {
   local root stub out
   root=$(make_scratch failclosed)
@@ -184,6 +232,55 @@ test_fails_closed_when_probe_cannot_run() {
   pass "a probe that cannot run spares the dir and says so"
 }
 
+# The overshoot this guards: treating every non-zero find status as "the probe is
+# broken" exempted a dir with one unreadable entry on every run, forever, behind a
+# bare count. It must be spared THIS run, named, and the rest of the sweep must
+# carry on - a bad entry in one tree says nothing about any other tree.
+test_traversal_error_spares_that_dir_only() {
+  local root stub bad out
+  root=$(make_scratch walkerr)
+  bad=$(add_unwalkable "$root" 3)
+  stub=$(make_find_walk_error_stub walkerr 99999999)
+  out=$(PATH="$stub:$PATH" FM_SCRATCH_ROOT="$root" "$REAP" 2>/dev/null)
+  [ -e "$bad" ] || fail "a dir whose walk errored was reaped anyway"
+  [ ! -e "$root/$DEAD" ] ||
+    fail "one unwalkable dir stopped the whole sweep - the other dirs answered fine"
+  [ -e "$root/$LIVE" ] || fail "the live session was reaped"
+  assert_contains "$out" 'could not be fully walked' "the spare states its reason"
+  assert_contains "$out" '99999999' "the spare NAMES the dir, not just a count"
+  pass "a traversal error spares only that dir, names it, and the sweep continues"
+}
+
+# ... and the sparing is transient, not a permanent exemption: past the hard ceiling
+# the dir's own mtime answers on its own, and scratch stops growing without bound.
+test_hard_ceiling_reaps_an_unwalkable_dir() {
+  local root stub bad out
+  root=$(make_scratch ceiling)
+  bad=$(add_unwalkable "$root" 3)
+  stub=$(make_find_walk_error_stub ceiling 99999999)
+  # Ceiling = 1x the window, so the 3-day-old dir is past a 48h window.
+  out=$(PATH="$stub:$PATH" FM_SCRATCH_HARD_CEILING_MULTIPLE=1 \
+        FM_SCRATCH_ROOT="$root" "$REAP" 2>/dev/null)
+  [ ! -e "$bad" ] ||
+    fail "an unwalkable dir untouched past the hard ceiling was spared forever"
+  [ -e "$root/$LIVE" ] || fail "the live session was reaped"
+  assert_contains "$out" 'hard ceiling' "the ceiling reap says why it went ahead"
+  pass "an unwalkable dir past the hard ceiling is reaped rather than exempt forever"
+}
+
+# -mmin -0 matches no file at all, so a 0 window would report every session dir -
+# including the live callers' - as having nothing recent in it, and delete them all.
+test_rejects_zero_max_age() {
+  local root rc=0 out
+  root=$(make_scratch zeroage)
+  out=$(FM_SCRATCH_ROOT="$root" "$REAP" --max-age-hours 0 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "--max-age-hours 0 was accepted (rc=$rc)"
+  [ -e "$root/$LIVE" ] || fail "--max-age-hours 0 deleted the live session"
+  [ -e "$root/$DEAD" ] || fail "--max-age-hours 0 deleted a session dir despite refusing"
+  assert_contains "$out" 'greater than 0' "the refusal says what is wrong"
+  pass "--max-age-hours 0 is refused rather than silently reaping everything"
+}
+
 test_reaps_dead_spares_fresh
 test_cleans_emptied_parent
 test_protect_spares_regardless_of_age
@@ -192,3 +289,6 @@ test_refuses_non_harness_root
 test_max_age_threshold_respected
 test_live_session_survives_bsd_find
 test_fails_closed_when_probe_cannot_run
+test_traversal_error_spares_that_dir_only
+test_hard_ceiling_reaps_an_unwalkable_dir
+test_rejects_zero_max_age
