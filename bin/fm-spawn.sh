@@ -778,6 +778,8 @@ fi
 # local edit, and silently overwriting a credential is worse than the drift, so it
 # is left alone and named in a warn: line. docs/configuration.md owns the
 # directory's layout convention and its secret-handling contract.
+# <dest-worktree> is always $WT, which is what exclude_path scopes its
+# .git/info/exclude write to; it stays a parameter so the copy logic reads on its own.
 seed_project_env() {  # <src-root> <dest-worktree> <project-name>
   local src=$1 dest=$2 name=$3 rel seeded=0 unchanged=0 conflict=0
   if [ -d "$src" ]; then
@@ -802,10 +804,13 @@ seed_project_env() {  # <src-root> <dest-worktree> <project-name>
         echo "warn: env-seed: $rel is tracked by the project; refusing to seed a credential into git's view" >&2
         continue
       fi
+      # find -L above, so a canonical entry an operator symlinked at some other
+      # file is still seeded by CONTENT. Skipping it silently would recreate the
+      # very "credential absent" failure this seeding closes.
       mkdir -p "$(dirname "$dest/$rel")"
       # install -m 600 sets the mode as the file is created, so a credential is
       # never briefly world-readable the way copy-then-chmod would leave it.
-      if install -m 600 "$src/$rel" "$dest/$rel" 2>/dev/null; then
+      if install -m 600 "$src/$rel" "$dest/$rel"; then
         # Belt and braces alongside the project's own ignore rules: git must not see
         # a seeded credential even if the project forgot to ignore it.
         exclude_path "$rel"
@@ -815,7 +820,7 @@ seed_project_env() {  # <src-root> <dest-worktree> <project-name>
         echo "warn: env-seed: could not write $rel into the worktree" >&2
       fi
     done <<EOF
-$(cd "$src" && find . -type f 2>/dev/null | sed 's|^\./||' | LC_ALL=C sort)
+$(cd "$src" && find -L . -type f 2>/dev/null | sed 's|^\./||' | LC_ALL=C sort)
 EOF
   fi
   # One line per spawn, always: the behaviour is visible in the spawn output rather

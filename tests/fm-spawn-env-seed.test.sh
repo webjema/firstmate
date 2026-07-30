@@ -78,6 +78,27 @@ seed_canonical_dir() {
   printf '%s\n' "$src"
 }
 
+# A canonical entry an operator symlinked at some other file must still be seeded by
+# content. Skipping it silently would recreate the very "credential absent" failure
+# this seeding closes.
+test_symlinked_canonical_entry_is_seeded() {
+  local rec case_dir home proj wt fakebin id src out
+  rec=$(make_spawn_case symlink delta)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  src="$home/config/project-env/delta"
+  mkdir -p "$src"
+  printf 'LINKED=dummy-linked\n' > "$case_dir/elsewhere.env"
+  ln -s "$case_dir/elsewhere.env" "$src/.env.e2e"
+  out=$(run_spawn "$home" "$proj" "$wt" "$fakebin" "$id")
+  assert_contains "$out" "env-seed: project=delta seeded=1 unchanged=0 conflict=0" \
+    "a symlinked canonical entry was not seeded"
+  assert_grep 'LINKED=dummy-linked' "$wt/.env.e2e" "symlinked canonical entry was not copied by content"
+  [ ! -L "$wt/.env.e2e" ] || fail "seeded file is a symlink, not a real copy"
+  pass "spawn seeds a symlinked canonical entry by content"
+}
+
 # The headline case: a slot that lacks the key gets the complete tree, at mode 600,
 # and git never sees the seeded files.
 test_seeds_complete_tree_into_bare_slot() {
@@ -176,6 +197,7 @@ EOF
 }
 
 test_seeds_complete_tree_into_bare_slot
+test_symlinked_canonical_entry_is_seeded
 test_no_canonical_dir_is_a_no_op
 test_existing_file_is_never_clobbered
 test_tracked_path_is_refused
