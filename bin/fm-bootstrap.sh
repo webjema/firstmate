@@ -394,5 +394,11 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # untouched-age threshold spares any live crew's scratch. It stays silent unless
   # it actually reclaimed something.
   [ -x "$FM_ROOT/bin/fm-scratch-reap.sh" ] && "$FM_ROOT/bin/fm-scratch-reap.sh" 2>/dev/null || true
+
+  # Globally prune idle treehouse worktrees across all projects to reclaim disk space.
+  # treehouse prune is safe by default and only deletes disposable worktrees (merged, clean, idle).
+  if command -v treehouse >/dev/null 2>&1; then
+    treehouse prune --global --yes >/dev/null 2>&1 &
+  fi
 fi
 exit 0

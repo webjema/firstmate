@@ -164,6 +164,14 @@ done < <(find "$ROOT" -mindepth 1 -maxdepth 2 -type d \
 # Best-effort: drop now-empty project-encoded parent dirs left behind.
 [ "$DRY_RUN" = 1 ] || find "$ROOT" -mindepth 1 -maxdepth 1 -type d -empty -exec rmdir {} + 2>/dev/null || true
 
+# Reclaim orphaned firstmate task temp directories (/tmp/fm-<id>) untouched for >24h.
+# This prevents buildup of tasktmp folders left by tasks that crashed or were killed before teardown.
+if [ "$DRY_RUN" = 1 ]; then
+  find /tmp -maxdepth 1 -type d -name "fm-*" -mmin +1440 -exec echo "SCRATCH_REAP: would reap {} (firstmate tmp)" \; 2>/dev/null || true
+else
+  find /tmp -maxdepth 1 -type d -name "fm-*" -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+fi
+
 # A spared-on-unknown is never silent: a probe that cannot run means the reaper has
 # stopped doing its job, and the whole point of rail 4 is that it says so instead of
 # guessing. On stdout, not stderr, because bin/fm-bootstrap.sh discards stderr.
