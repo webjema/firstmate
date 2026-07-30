@@ -577,9 +577,13 @@ test_teardown_conformance_old_vs_new() {
   out_new=$(run_teardown_case "$ROOT/bin/fm-teardown.sh" "$old_bin" "$fb" "$log_new" "$state_new" "$data" "$config_new" "$id" 2>&1)
   rc_new=$?
 
+  # The new fm-teardown.sh adds an async `treehouse prune --yes` at the end to reclaim space.
+  # We strip this exact line from the new log before comparing it byte-for-byte against the old log.
+  grep -v "^treehouse"$'\x1f'"prune"$'\x1f'"--yes$" "$log_new" > "$log_new.filtered" || true
+
   expect_code 0 "$rc_old" "old fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_old"
   expect_code 0 "$rc_new" "new fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/teardown-diff.txt" 2>&1 \
+  diff -u "$log_old" "$log_new.filtered" > "$TMP_ROOT/teardown-diff.txt" 2>&1 \
     || fail "fm-teardown.sh: tmux+treehouse command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/teardown-diff.txt")"
   assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" \
     "teardown did not call treehouse return --force <worktree>"

@@ -1012,6 +1012,12 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+rm -rf "/tmp/fm-$ID" 2>/dev/null || true
+
+# Asynchronously prune stale treehouse worktrees for this project to reclaim disk space
+if command -v treehouse >/dev/null 2>&1 && [ -n "$PROJ" ] && [ -d "$PROJ" ]; then
+  (cd "$PROJ" && treehouse prune --yes) >/dev/null 2>&1 &
+fi
 
 if pr_is_still_open; then
   # A re-run on an already-released task with the PR still open has nothing to do:
