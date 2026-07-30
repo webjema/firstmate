@@ -15,6 +15,9 @@
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
+# A clone whose default branch actually moved also gets its codebase-memory
+# knowledge graph refreshed, best-effort, via bin/fm-graph-reindex.sh; see
+# refresh_graph and that script's header. It never affects the sync's outcome.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
@@ -244,6 +247,20 @@ prune_gone_branches() {
     --format='%(refname:short) %(upstream:track)' refs/heads 2>/dev/null)
 }
 
+# Refresh $PROJ's codebase-memory knowledge graph, best-effort. Called ONLY after
+# the clone's default branch actually moved: the graph is pinned to one commit, so
+# an "already current" clone or a re-attach at the same sha has nothing to refresh,
+# and an unindexed project is skipped rather than indexed (bin/fm-graph-reindex.sh
+# owns that contract and never fails a caller).
+# Run in the FOREGROUND, bounded by the reindex script's own timeout, because fleet
+# sync is called from the wake-handling path: a synchronous bounded call is reaped
+# by the process that started it, where a detached one could still be indexing long
+# after this supervision cycle ended. Measured refresh of a 14,735-node clone is
+# 0.1-4.4s, so the bound is headroom, not a working limit.
+refresh_graph() {
+  "$FM_ROOT/bin/fm-graph-reindex.sh" "$PROJ" || true
+}
+
 # True when some worktree of $PROJ has $DEFAULT checked out (so we cannot attach
 # to it here). The current worktree is detached when this is consulted, so any
 # match is necessarily another worktree.
@@ -414,6 +431,7 @@ sync_project() {
   else
     echo "$label: synced $before..$after"
   fi
+  refresh_graph
   return 0
 }
 
