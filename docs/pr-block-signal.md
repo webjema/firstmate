@@ -143,3 +143,22 @@ bug, documentation, duplicate, enhancement, good first issue, help wanted, inval
 
 Only the nine stock labels.
 The label must be created per repo on first use, with the `gh label create ... --force` command above.
+
+**4. Does the bot-versus-firstmate discriminator actually separate the two paths?**
+
+Yes, on live PRs of both kinds:
+
+```console
+$ gh pr view 44 --repo webjema/firstmate --json author --jq '.author | .login, .is_bot'
+ignovak
+false
+$ gh pr view 177523 --repo home-assistant/core --json author --jq '.author | .login, .is_bot'
+app/dependabot
+true
+```
+
+`.author.is_bot` is the field to branch on; a bot's `login` also carries the `app/` prefix.
+
+The one step not exercised live is the draft conversion itself, for the reason given under verification 1.
+Any open firstmate PR closes that gap in two commands: `gh pr ready --undo <pr-url>` and then `gh pr ready <pr-url>`, checking that the merge button goes away and comes back.
+If that ever comes back refused, record it here and switch the firstmate path to the label mechanism too.
