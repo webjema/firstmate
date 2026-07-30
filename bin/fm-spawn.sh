@@ -57,6 +57,12 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+# Ship/scout spawns seed the crew's checkout from config/project-env/<project>/ (the
+# firstmate-held canonical copy of that project's gitignored local env files),
+# preserving the relative layout, mode 600, never clobbering a file that already
+# exists and differs. A project with no such directory is a silent no-op. Every
+# ship/scout spawn prints one `env-seed: project=<name> seeded=N unchanged=N conflict=N`
+# line; docs/configuration.md owns the directory contract.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -68,7 +74,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -758,6 +764,67 @@ else
   read -r MODE YOLO <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
+fi
+
+# Per-project local env seeding: copy the firstmate-held canonical local env tree
+# for this project into the crew's checkout, preserving the relative layout.
+# These files are gitignored, so a treehouse pool slot cannot inherit them: a
+# workspace reset runs `git clean -fd` with no -x (bin/fm-pool-warm.sh), so a slot
+# keeps forever whatever ignored files it happened to be warmed with. Slots
+# therefore drift permanently, and a crew that lands in a bare one honestly reports
+# a credential absent that the box already holds. Seeding at spawn makes every slot
+# correct the next time it is used, rather than by a one-off repair that re-rots.
+# Never clobbers: a file that is already present and different is the crew's own
+# local edit, and silently overwriting a credential is worse than the drift, so it
+# is left alone and named in a warn: line. docs/configuration.md owns the
+# directory's layout convention and its secret-handling contract.
+seed_project_env() {  # <src-root> <dest-worktree> <project-name>
+  local src=$1 dest=$2 name=$3 rel seeded=0 unchanged=0 conflict=0
+  if [ -d "$src" ]; then
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      # -L as well as -e: a dangling symlink is not "absent". Writing through one
+      # would follow it and land the credential wherever it points.
+      if [ -e "$dest/$rel" ] || [ -L "$dest/$rel" ]; then
+        if cmp -s "$src/$rel" "$dest/$rel"; then
+          unchanged=$((unchanged + 1))
+        else
+          conflict=$((conflict + 1))
+          echo "warn: env-seed: $rel already exists in the worktree and differs from the canonical copy; left unchanged" >&2
+        fi
+        continue
+      fi
+      # A path the project TRACKS is never a local env file, and seeding one would
+      # stage a credential for commit. Refuse rather than risk the one unrecoverable
+      # failure here.
+      if git -C "$dest" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
+        conflict=$((conflict + 1))
+        echo "warn: env-seed: $rel is tracked by the project; refusing to seed a credential into git's view" >&2
+        continue
+      fi
+      mkdir -p "$(dirname "$dest/$rel")"
+      # install -m 600 sets the mode as the file is created, so a credential is
+      # never briefly world-readable the way copy-then-chmod would leave it.
+      if install -m 600 "$src/$rel" "$dest/$rel" 2>/dev/null; then
+        # Belt and braces alongside the project's own ignore rules: git must not see
+        # a seeded credential even if the project forgot to ignore it.
+        exclude_path "$rel"
+        seeded=$((seeded + 1))
+      else
+        conflict=$((conflict + 1))
+        echo "warn: env-seed: could not write $rel into the worktree" >&2
+      fi
+    done <<EOF
+$(cd "$src" && find . -type f 2>/dev/null | sed 's|^\./||' | LC_ALL=C sort)
+EOF
+  fi
+  # One line per spawn, always: the behaviour is visible in the spawn output rather
+  # than invisible. A project with no canonical dir reports all-zero and is otherwise
+  # a no-op.
+  echo "env-seed: project=$name seeded=$seeded unchanged=$unchanged conflict=$conflict"
+}
+if [ "$KIND" != secondmate ]; then
+  seed_project_env "$CONFIG/project-env/$PROJ_NAME" "$WT" "$PROJ_NAME"
 fi
 
 META_WINDOW=$T
