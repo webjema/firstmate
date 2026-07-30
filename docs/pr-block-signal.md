@@ -19,7 +19,7 @@ Prefer the mechanism that blocks.
 
 ## firstmate-authored PRs
 
-Convert the PR to draft, which disables GitHub's merge button outright, and comment the verdict so the reason travels with the PR:
+Convert the PR to draft, which disables merging outright - GitHub's own docs put it as "No one can merge the pull request until you mark the pull request as ready for review again" - and comment the verdict so the reason travels with the PR:
 
 ```sh
 gh pr ready --undo <pr-url>                    # blocks the merge button
@@ -72,8 +72,8 @@ $ gh repo view webjema/firstmate --json visibility,isPrivate
 {"isPrivate":false,"visibility":"PUBLIC"}
 ```
 
-GitHub offers draft pull requests on every plan for public repositories; the plan gate bites on private repositories on Free.
-This repo is public, and the underlying mutation is present in the API:
+GitHub's current documentation for changing a PR's stage states no plan or visibility restriction on draft pull requests at all, so `gh`'s "If supported by your plan" caveat is at best conservative.
+This repo is public in any case - the visibility that has always carried draft support - and the underlying mutation is present in the API:
 
 ```console
 $ gh api graphql -f query='{ __type(name:"Mutation"){ fields{ name } } }' --jq '.data.__type.fields[].name' | grep -i draft
@@ -110,9 +110,24 @@ $ echo $?
 1
 ```
 
-The `pull_request` trigger carries no `types:` filter, so it uses the default activity types `opened`, `synchronize`, and `reopened`, all of which fire for draft PRs.
-The workflow has no draft guard at all - the `if: github.event.pull_request.draft == false` idiom that repos use to opt out of draft CI is absent, and it exists precisely because draft PRs run workflows by default.
-So Lint shell scripts, Behavior tests, and Repo invariants all keep running on every fix push while the PR is drafted.
+The `pull_request` trigger carries no `types:` filter, so it uses the default activity types `opened`, `synchronize`, and `reopened`, and the workflow has no draft guard at all - the `if: github.event.pull_request.draft == false` idiom repos use to opt out of draft CI is absent.
+
+GitHub's own event reference does not spell out draft behavior, so this was checked against a live draft PR in a public repo whose workflow has the same trigger shape as ours:
+
+```console
+$ gh api repos/cli/cli/contents/.github/workflows/go.yml -H "Accept: application/vnd.github.raw" | head -6
+name: Unit and Integration Tests
+on:
+  push:
+    branches:
+      - trunk
+  pull_request:
+$ gh pr view 14013 -R cli/cli --json isDraft,statusCheckRollup --jq '{isDraft, total:(.statusCheckRollup|length)}'
+{"isDraft":true,"total":15}
+```
+
+That PR is a draft and carries 15 completed check runs, `build (ubuntu-latest)` among them, from a bare `pull_request:` trigger.
+So a draft PR does run this shape of workflow, and firstmate's Lint shell scripts, Behavior tests, and Repo invariants all keep running on every fix push while the PR is drafted.
 
 One nuance worth knowing: `converted_to_draft` and `ready_for_review` are not default activity types, so neither drafting the PR nor marking it ready spawns a run by itself.
 CI runs on the fix push, which is exactly when the gate matters.
