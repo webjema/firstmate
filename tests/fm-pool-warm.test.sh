@@ -30,6 +30,9 @@
 #   (n) a live pid from a PREVIOUS boot          -> not a live warmer; lock reclaimed
 #   (o) no `timeout` binary on the box           -> the bound still holds (macOS)
 #   (p) the leased slot is PROVISIONED before handover, under the warm's deadline
+#   (q) a slot whose install FAILED is logged COLD, never as warmed
+#   (r) ONE deadline for the whole warm, taken BEFORE the lease is asked for
+#   (s) an installer that rewrites a TRACKED file leaves the slot CLEAN, not dirty
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -447,6 +450,100 @@ assert_grep "/pool/9/proj deadline=set" "$C/npm.log" \
 assert_contains "$(warm_log "$C")" "PROVISION proj" "(p) and the step is reported in the warm log"
 assert_contains "$(th_log "$C")" "return" "(p) the lease is still released afterwards"
 pass "(p) the warm provisions the slot it leased, under its own time budget"
+
+# --- (q) a slot whose install FAILED is not a warm slot -----------------------
+# The provision step's status must reach this log. Before that step existed, an
+# install failure surfaced through the `treehouse get` rc as `FAILED <name>`; a warm
+# that discards the provisioner's status leaves a permanently failing install
+# invisible in the only place it is recorded, and tells the disk-budget rail the
+# warm succeeded. A cold slot is survivable; calling it warm is not.
+C=$(new_case qcold)
+in_flight "$C"
+printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+SLOT="$C/th-root/pool/9/proj"
+mkdir -p "$SLOT"
+printf '{"name":"proj"}\n' > "$SLOT/package.json"
+cat > "$C/fakebin/npm" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$C/fakebin/npm"
+run_warm "$C" || fail "(q) a failed install must still never fail the warm"
+assert_contains "$(warm_log "$C")" "is free but COLD" "(q) the cold slot is named as cold"
+assert_not_contains "$(warm_log "$C")" "WARMED proj" "(q) and is NOT reported as warm"
+assert_contains "$(th_log "$C")" "return" "(q) the lease is released either way"
+[ "$(lease_state "$C")" = free ] || fail "(q) a cold slot must still go back to the pool"
+pass "(q) a slot whose install failed is logged COLD, never as warmed"
+
+# --- (r) ONE deadline for the whole warm, taken BEFORE the lease --------------
+# The pool lock is shared with every secondmate home pointing at this pool. A
+# deadline computed AFTER `treehouse get` returned restarts the clock, so a slow get
+# plus a full install budget holds that lock for up to twice the bound, blocking the
+# other warmer for the whole doubled window.
+C=$(new_case rdeadline)
+in_flight "$C"
+printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+SLOT="$C/th-root/pool/9/proj"
+mkdir -p "$SLOT"
+printf '{"name":"proj"}\n' > "$SLOT/package.json"
+printf '4\n' > "$C/get-delay"          # a `treehouse get` that takes real time
+cat > "$C/fakebin/npm" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\${FM_PROVISION_DEADLINE:-none}" > "$C/deadline"
+mkdir -p node_modules/pkg && printf 'x\n' > node_modules/pkg/index.js
+exit 0
+SH
+chmod +x "$C/fakebin/npm"
+BEFORE=$(date +%s)
+FM_POOL_WARM_TIMEOUT=20 run_warm "$C" || fail "(r) must exit 0"
+DEADLINE=$(cat "$C/deadline")
+case "$DEADLINE" in
+  ''|*[!0-9]*) fail "(r) the provisioner got no deadline at all ('$DEADLINE')" ;;
+esac
+# 20s bound, a 4s get: taken before the lease this is ~20s out, taken after it ~24s.
+[ "$((DEADLINE - BEFORE))" -le 21 ] \
+  || fail "(r) the provision deadline is $((DEADLINE - BEFORE))s out on a 20s bound - the get's time was not counted against it"
+pass "(r) the whole warm shares one deadline, so a slow get cannot double the lock hold"
+
+# --- (s) the slot must come back CLEAN, end to end ----------------------------
+# npm rewrites the lockfile it installs from, and that lockfile is TRACKED.
+# treehouse's reset is `git clean -fd` - no -x, no checkout - so it cannot revert
+# that edit: the slot returns `dirty`, treehouse skips it on every later get and
+# refuses to prune it, and each warm retires one slot permanently. Case (p) could
+# not see this, because its fake npm never touched a tracked file.
+#
+# The rewrite here is CRLF-only, under a repo that normalizes line endings -
+# optiroq's real shape, and the one `git diff` reports as no change at all while
+# `git status` still calls the slot modified (verified 2026-07-30). The plain
+# content rewrite is covered by tests/fm-worktree-provision.test.sh (q).
+C=$(new_case sclean)
+in_flight "$C"
+printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+SLOT="$C/th-root/pool/9/proj"
+mkdir -p "$SLOT"
+printf '{"name":"proj"}\n' > "$SLOT/package.json"
+printf '{\n  "lockfileVersion": 3\n}\n' > "$SLOT/package-lock.json"
+printf 'node_modules/\n' > "$SLOT/.gitignore"
+printf '* text=auto eol=lf\n' > "$SLOT/.gitattributes"
+git -C "$SLOT" init -q
+git -C "$SLOT" add -A
+git -C "$SLOT" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm fixture
+cat > "$C/fakebin/npm" <<'SH'
+#!/usr/bin/env bash
+if [ -f package-lock.json ]; then
+  awk '{ printf "%s\r\n", $0 }' package-lock.json > .lock.crlf && mv .lock.crlf package-lock.json
+fi
+mkdir -p node_modules/pkg && printf 'x\n' > node_modules/pkg/index.js
+exit 0
+SH
+chmod +x "$C/fakebin/npm"
+run_warm "$C" || fail "(s) must exit 0"
+assert_contains "$(warm_log "$C")" "WARMED proj" "(s) the slot really was warmed"
+[ -f "$SLOT/node_modules/pkg/index.js" ] || fail "(s) the install did not run"
+DIRTY=$(git -C "$SLOT" status --porcelain --untracked-files=no)
+[ -z "$DIRTY" ] \
+  || fail "(s) the warmed slot came back DIRTY ($DIRTY) - treehouse will skip it on every later get and refuse to prune it"
+pass "(s) a warm whose installer rewrites a tracked file returns the slot clean"
 
 # --- (m) five concurrent warmers must produce exactly ONE warm ----------------
 # The lock exists to stop two warmers over-provisioning a pool by GBs. The earlier

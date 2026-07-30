@@ -1,0 +1,164 @@
+# Blocking a merge from the PR itself
+
+`AGENTS.md` section 6, step 3 owns the rule: when firstmate's review of an already-open PR finds a merge-stopping defect, the verdict goes on the PR, not only into the chat.
+This doc owns the mechanics, the per-repo setup, and the verification record behind them.
+
+## The incident this exists for
+
+On 2026-07-30, PR #44 in this repo (`webjema/firstmate`) merged carrying seven confirmed defects while its crew was still fixing them.
+An independent review had found all seven and firstmate had told the user not to merge.
+The verdict existed only in that firstmate session's chat, so the person clicking merge acted without it.
+One of the seven bricks a worktree pool slot on every warm, on Linux as well as macOS.
+
+The generalizable failure is not "the review was late" - the review was on time and correct.
+It is that a review verdict living only in chat does not reach the person who merges, including a collaborator who never sees that session at all.
+Firstmate's normal review sits before the PR exists, which keeps this rare, but once a PR is open the chat is no longer where the merge decision happens.
+
+An advisory mark - a title prefix, or a comment on its own - is what already failed: it informs a reader who looks, and the merge button stays live for one who does not.
+Prefer the mechanism that blocks.
+
+## firstmate-authored PRs
+
+Convert the PR to draft, which disables merging outright - GitHub's own docs put it as "No one can merge the pull request until you mark the pull request as ready for review again" - and comment the verdict so the reason travels with the PR:
+
+```sh
+gh pr ready --undo <pr-url>                    # blocks the merge button
+gh pr comment <pr-url> --body-file verdict.md  # carries the reason
+```
+
+Restore it with `gh pr ready <pr-url>` once the fix lands and the re-review is clean.
+
+`--undo` is plan-gated (`gh pr ready --help`: "If supported by your plan").
+It fails loudly - a GitHub API error and a non-zero exit - never silently, so treat a non-zero exit as the signal to fall back to the bot-authored path below on the same PR.
+
+Two things hold while a PR sits drafted:
+
+- PR CI keeps running on every push, so the fix loop keeps its gate (see the verification record).
+- `bin/fm-pr-merge.sh` fails closed, because GitHub refuses to merge a draft PR at the API. That is defense in depth, not a bug to route around: mark the PR ready first, then merge on the user's word.
+
+## Bot-authored PRs
+
+Never draft a bot's PR - Dependabot and similar bots act on their own PR's state, and drafting can interfere with that handling.
+Use a comment plus a blocking label:
+
+```sh
+gh pr comment <pr-url> --body-file verdict.md
+gh pr edit <pr-url> --add-label do-not-merge
+```
+
+The label is advisory by itself; make it bite by requiring its absence in the repo's branch protection or merge-queue rules where that is configured.
+Remove it with `gh pr edit <pr-url> --remove-label do-not-merge`.
+
+`do-not-merge` is not a stock GitHub label and does not exist in most repos.
+Create it once per repo, on first use:
+
+```sh
+gh label create do-not-merge --color B60205 --description "Blocking review defect - do not merge" --force
+```
+
+`--force` updates an existing label instead of failing, so the command is safe to re-run.
+
+Authorship and current draft state both come out of the `gh-axi pr view <pr>` firstmate already reads (`author:` and `draft:` lines); `gh pr view <pr-url> --json author --jq .author.is_bot` is the exact read when the distinction is not obvious from the login.
+Every mark above is a mutation, so it runs on plain `gh`, per section 6's read/mutate split.
+
+## Verification record
+
+Run 2026-07-30 in `webjema/firstmate`, `gh version 2.96.0 (2026-07-02)`, authenticated as `ignovak` with `push` on the repo.
+
+**1. Is `gh pr ready --undo` supported here, and how does it fail when it is not?**
+
+```console
+$ gh repo view webjema/firstmate --json visibility,isPrivate
+{"isPrivate":false,"visibility":"PUBLIC"}
+```
+
+GitHub's current documentation for changing a PR's stage states no plan or visibility restriction on draft pull requests at all, so `gh`'s "If supported by your plan" caveat is at best conservative.
+This repo is public in any case - the visibility that has always carried draft support - and the underlying mutation is present in the API:
+
+```console
+$ gh api graphql -f query='{ __type(name:"Mutation"){ fields{ name } } }' --jq '.data.__type.fields[].name' | grep -i draft
+convertPullRequestToDraft
+...
+```
+
+The failure mode is loud, not silent:
+
+```console
+$ gh pr ready --undo 99999 --repo webjema/firstmate
+GraphQL: Could not resolve to a PullRequest with the number of 99999. (repository.pullRequest)
+$ echo $?
+1
+```
+
+Not proven directly: a live draft conversion on this repo.
+Doing that needs an open PR, and a crewmate may not open one before firstmate approves its branch.
+The instruction is therefore written to key its fallback on the non-zero exit rather than on an assumption that the plan allows drafts, which makes it correct on either kind of plan.
+
+**2. Does drafting suppress this repo's PR CI?**
+
+No - which is what makes the draft path usable, and this was the check with the power to kill it.
+
+```console
+$ grep -n -A 5 "^on:" .github/workflows/ci.yml
+9:on:
+10-  push:
+11-    branches: [main]
+12-  pull_request:
+13-    branches: [main]
+$ grep -n "draft\|if:" .github/workflows/ci.yml
+$ echo $?
+1
+```
+
+The `pull_request` trigger carries no `types:` filter, so it uses the default activity types `opened`, `synchronize`, and `reopened`, and the workflow has no draft guard at all - the `if: github.event.pull_request.draft == false` idiom repos use to opt out of draft CI is absent.
+
+GitHub's own event reference does not spell out draft behavior, so this was checked against a live draft PR in a public repo whose workflow has the same trigger shape as ours:
+
+```console
+$ gh api repos/cli/cli/contents/.github/workflows/go.yml -H "Accept: application/vnd.github.raw" | head -6
+name: Unit and Integration Tests
+on:
+  push:
+    branches:
+      - trunk
+  pull_request:
+$ gh pr view 14013 -R cli/cli --json isDraft,statusCheckRollup --jq '{isDraft, total:(.statusCheckRollup|length)}'
+{"isDraft":true,"total":15}
+```
+
+That PR is a draft and carries 15 completed check runs, `build (ubuntu-latest)` among them, from a bare `pull_request:` trigger.
+So a draft PR does run this shape of workflow, and firstmate's Lint shell scripts, Behavior tests, and Repo invariants all keep running on every fix push while the PR is drafted.
+
+One nuance worth knowing: `converted_to_draft` and `ready_for_review` are not default activity types, so neither drafting the PR nor marking it ready spawns a run by itself.
+CI runs on the fix push, which is exactly when the gate matters.
+
+**3. Does a `do-not-merge` label exist?**
+
+No.
+
+```console
+$ gh label list --repo webjema/firstmate
+bug, documentation, duplicate, enhancement, good first issue, help wanted, invalid, question, wontfix
+```
+
+Only the nine stock labels.
+The label must be created per repo on first use, with the `gh label create ... --force` command above.
+
+**4. Does the bot-versus-firstmate discriminator actually separate the two paths?**
+
+Yes, on live PRs of both kinds:
+
+```console
+$ gh pr view 44 --repo webjema/firstmate --json author --jq '.author | .login, .is_bot'
+ignovak
+false
+$ gh pr view 177523 --repo home-assistant/core --json author --jq '.author | .login, .is_bot'
+app/dependabot
+true
+```
+
+`.author.is_bot` is the field to branch on; a bot's `login` also carries the `app/` prefix.
+
+The one step not exercised live is the draft conversion itself, for the reason given under verification 1.
+Any open firstmate PR closes that gap in two commands: `gh pr ready --undo <pr-url>` and then `gh pr ready <pr-url>`, checking that the merge button goes away and comes back.
+If that ever comes back refused, record it here and switch the firstmate path to the label mechanism too.

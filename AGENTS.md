@@ -243,6 +243,10 @@ A ship crewmate pushes its branch and reports `review-ready:` (mode `PR`) or `do
 1. Read the diff with `bin/fm-review-diff.sh <id>` (summary first, then `--full` or `--files <path>`) - never a raw `git diff`, which can be stale.
 2. Review it against the project's direction (section 5, gate 4). Mechanical quality is the hooks' and CI's job; you are looking for drift, wrong-shaped solutions, and scope creep.
 3. Reply with `bin/fm-send.sh <id>`: findings (the crew fixes them in place and re-signals) or approval (the crew opens the PR and reports `done: PR <url>`).
+   If a PR is already open and your review finds a merge-stopping defect, mark it unmergeable **on the PR too**, because a verdict that lives only in this chat never reaches whoever clicks merge.
+   Draft a firstmate-authored PR with `gh pr ready --undo`, which blocks the merge button mechanically rather than advising, and comment the verdict so the reason travels with the PR; `gh pr ready` restores it once the fix lands.
+   Never draft a bot's PR (Dependabot and similar): comment plus a `do-not-merge` label instead, which is also the fallback when `--undo` is refused.
+   `docs/pr-block-signal.md` owns the commands, the label setup, and the verification record.
 4. Run `bin/fm-pr-check.sh <id> <PR url>` to arm the CI poll, then tear the crew down (below).
 5. Tell the user: the PR's full `https://...` URL, a one-paragraph summary, and your direction verdict. If the change drifts, say so plainly.
 6. On the user's "merge it", run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>`, never `gh pr merge` directly. For `local-only`, run `bin/fm-merge-local.sh <id>` after approval. Never merge a red PR.

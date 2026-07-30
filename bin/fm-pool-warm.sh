@@ -58,9 +58,30 @@
 # node_modules/ and src/admin-app/node_modules/ all survived - 2.7 GB intact.
 # That is the whole reason a returned slot stays warm.
 #
+# AND WHY IT MUST COME BACK CLEAN. That same `git clean -fd` has no checkout in
+# it, so it cannot revert a TRACKED file - and npm rewrites the lockfile it
+# installed from. A warm that leaves that edit behind returns a `dirty` slot, which
+# treehouse skips on every later `get` and refuses to prune: each warm would retire
+# one slot permanently, and bin/fm-pool-status.sh would report the wreckage as a
+# dead crew's unlanded work. fm-worktree-provision.sh restores exactly what its
+# installer dirtied, on the kill path too; its header owns that contract.
+#
 # THE LEASE IS WHAT MAKES IT SAFE. It is held for the WHOLE install, so a
 # concurrent `treehouse get` can never be handed a half-installed slot, and it is
-# released the moment the slot is warm.
+# released the moment the warm is done - warm or cold.
+#
+# ONE TIME BUDGET FOR THE WHOLE WARM, taken BEFORE the lease is asked for and
+# handed to the provisioner as FM_PROVISION_DEADLINE. The `treehouse get` is
+# bounded by the same number, so a deadline computed after it returned would let a
+# slow get plus a full install hold the POOL LOCK - shared with every secondmate
+# home pointing at this pool - for twice the bound, blocking the other warmer for
+# that whole doubled window.
+#
+# A COLD SLOT IS LOGGED AS COLD. The provisioner's exit status is propagated: only
+# a provision that exited 0 is logged `WARMED` and clears the blocked sentinel.
+# Before the provision step existed, an install failure surfaced through the
+# `treehouse get` rc as `FAILED <name>`; swallowing it here instead would leave a
+# permanently failing install invisible in the only log that records it.
 #
 # SINGLE WARMER PER POOL. Secondmate homes share pools, and two warmers racing
 # would over-provision by GBs. The lock is scoped to the POOL (keyed by the
@@ -174,6 +195,7 @@ release_pool_lock() { release_warm_resources; }
 # warm_one <project-real-path>: enforce always-plus-one for ONE pool.
 warm_one() {  # <project-real-path>
   local project=$1 name avail slots max_trees pool_dir used_kb est_kb budget_kb path rc timeout_secs line
+  local warm_deadline prov_rc prov_out
   name=$(basename "$project")
 
   fm_pool_read "$project" || {
@@ -241,6 +263,12 @@ warm_one() {  # <project-real-path>
   # simply tries again.
   log "WARM $name: no free slot ($slots in use); provisioning one preventively"
   timeout_secs=$(fm_pool_warm_timeout)
+  # ONE deadline for the WHOLE warm, taken before the lease is asked for. Taking it
+  # after `treehouse get` returned would restart the clock: the get is itself bounded
+  # by timeout_secs, so a slow one plus a full provision budget held the pool lock -
+  # which is shared with every secondmate home pointing at this pool - for up to
+  # twice the bound the header promises.
+  warm_deadline=$(( $(date +%s) + timeout_secs ))
   # Record the intent to lease BEFORE leasing: if we are killed between treehouse
   # taking the lease and printing the path, the trap must still know which pool to
   # release. fm_pool_release on a pool with no lease held is a harmless no-op.
@@ -265,27 +293,44 @@ warm_one() {  # <project-real-path>
   # (see the header) - so without this step "warmed" would mean nothing more than
   # "created", and the first crew would still pay the whole install.
   #
-  # It shares this warm's single deadline, so three install roots cannot hold the
-  # lease and the pool lock for three times the bound. It always exits 0: a failed
-  # provision leaves a merely-cold slot, which is exactly what the pool held
-  # before this existed, and must never fail the warm or leak the lease.
+  # It shares this warm's single deadline (warm_deadline above), so three install
+  # roots cannot hold the lease and the pool lock for three times the bound.
+  #
+  # ITS STATUS IS NOT DISCARDED. A failed provision leaves a merely-COLD slot -
+  # survivable, and exactly what the pool held before this existed - but it is not
+  # a warm one, and calling it warm is worse than the cold slot itself: this log is
+  # the only place a permanently failing install is visible, and `clear_blocked`
+  # would tell the disk-budget rail the warm succeeded. Before this step existed the
+  # failure surfaced through the `treehouse get` rc as `FAILED <name>`; it surfaces
+  # here now. Capturing rather than reading from a process substitution is what makes
+  # that possible at all - `< <(...)` throws the child's status away.
+  prov_rc=0
+  prov_out=$(FM_PROVISION_DEADLINE=$warm_deadline \
+               "$SCRIPT_DIR/fm-worktree-provision.sh" "$path" 2>&1) || prov_rc=$?
   while IFS= read -r line; do
     [ -n "$line" ] && log "PROVISION $name: $line"
-  done < <(FM_PROVISION_DEADLINE=$(( $(date +%s) + timeout_secs )) \
-             "$SCRIPT_DIR/fm-worktree-provision.sh" "$path" 2>&1)
+  done <<EOF
+$prov_out
+EOF
 
-  # Release the lease: the slot is now AVAILABLE *and* warm. Its deps survive the
-  # return (git clean -fd, no -x) - that is what makes it warm for the next crew.
+  # Release the lease: the slot is now AVAILABLE, and warm if the provision said so.
+  # Its deps survive the return (git clean -fd, no -x) - that is what makes it warm
+  # for the next crew. The lease is released either way: a cold slot still belongs
+  # back in the pool, and holding it would cost more than the failed install did.
   if fm_pool_release "$project" "$path"; then
     WARM_LEASE=""
     WARM_LEASE_PROJECT=""
-    log "WARMED $name: $path is free and warm"
-    clear_blocked "$project"
+    if [ "$prov_rc" -eq 0 ]; then
+      log "WARMED $name: $path is free and warm"
+      clear_blocked "$project"
+    else
+      log "FAILED $name: $path is free but COLD (provision exited $prov_rc); the next crew installs for itself"
+    fi
   else
-    # The install succeeded but the lease is still held. Do NOT hide that: a
+    # The lease is still held, whatever the install did. Do NOT hide that: a
     # still-leased slot is one the pool cannot hand out. Leave WARM_LEASE set so
     # the EXIT trap tries once more.
-    log "FAILED $name: warmed $path but treehouse return failed; the slot is still LEASED"
+    log "FAILED $name: treehouse return failed for $path; the slot is still LEASED"
   fi
   release_warm_resources
   return 0

@@ -6,8 +6,10 @@
 # Usage: fm-worktree-provision.sh <worktree-path>   provision it (clone + reconcile)
 #        fm-worktree-provision.sh <worktree-path> --harvest
 #                                                  only refresh the cache FROM it
-#        fm-worktree-provision.sh --probe <dir>    print whether <dir>'s volume
-#                                                  supports cloning, and exit
+#        fm-worktree-provision.sh --probe <src> [<dst>]
+#                                                  print whether a clone from <src>
+#                                                  to <dst> (default <src>) is
+#                                                  possible, and exit 0/1
 #
 # WHY. Every pooled worktree used to grow its own full, independent node_modules,
 # because nothing installed dependencies on creation and each crew installed from
@@ -37,6 +39,25 @@
 # deliberately: `cp -c` clones only WITHIN one APFS volume, and this placement
 # makes same-volume structural rather than something to hope for.
 #
+# ONLY A POOLED WORKTREE IS EVER PROVISIONED, and that guard is structural rather
+# than advisory: the path must resolve INSIDE $TREEHOUSE_ROOT and match the
+# <pool>/<slot>/<repo> shape treehouse lays a slot out in, with a numeric slot.
+# See pool_key_of. An earlier version derived the pool key from `cd "$wt/../.."`,
+# which succeeds for very nearly any path - so the guard never fired and the
+# script would happily run `npm install` in projects/<repo>, the read-only clone
+# AGENTS.md rail 1 forbids writing to. A guard that cannot fail is not a guard.
+#
+# A PROVISIONED SLOT MUST COME BACK CLEAN. npm rewrites the lockfile it installed
+# from, and that lockfile is a TRACKED file. treehouse's reset is `git clean -fd` -
+# no -x, no checkout - so it removes untracked cruft but CANNOT revert a tracked
+# edit: the returned slot is `dirty`, and treehouse then skips it on every later
+# `get` and refuses to prune it. Every warm would retire another slot permanently.
+# So the provision records which tracked paths were already modified before it
+# started, and restores from HEAD exactly those the installer added - never a
+# blanket checkout, which would discard work that was already there. See
+# restore_tracked, and note that it runs on the kill path too: a warm killed
+# mid-install must not brick the slot either.
+#
 # THE CACHE SEEDS ITSELF, and that is why nothing under projects/ is ever
 # written. The first worktree that ends up with a correct node_modules - a crew
 # that installed for itself, or a reconcile here - is HARVESTED into the cache,
@@ -59,11 +80,20 @@
 # clone on it instead made every dependency change pay a full cold install, and
 # an installer that rewrites its own lockfile (npm does) never matched at all.
 #
-# DEGRADING IS DETECTED, NEVER ASSUMED. `cp -c` needs APFS; a non-APFS volume or
-# a non-macOS cp does not have it. can_clone PROBES the destination with a real
-# one-byte clone rather than testing the OS name. When the probe fails, the clone
-# is SKIPPED and the plain install runs - never a `cp -R`, which would copy every
-# byte for real and double the very disk this script exists to save.
+# DEGRADING IS DETECTED, NEVER ASSUMED - AND `cp -c` EXITING 0 IS NOT DETECTION.
+# On macOS `cp -c` falls back to copyfile(2) and exits 0 when it cannot clone, so
+# a one-byte probe reports "supported" on HFS+, exFAT, an external drive and a
+# network mount alike, and every later copy is a real full-byte copy logged as a
+# clone. The operator would read 96 MB per slot while paying 2.7 GB. So can_clone
+# asks the three questions that actually decide it, of the src/dst PAIR:
+#   1. do both paths sit on the SAME volume? (`cp -c` never clones across one)
+#   2. is that volume APFS? (the only filesystem here that clones at all)
+#   3. does this cp implement -c at all? (GNU cp does not, so Linux fails cleanly
+#      right here, which is the property that keeps this honest on CI)
+# Any question it cannot answer means NO CLONE - the plain install runs and the
+# reason is printed. It never falls back to a `cp -R`, which would copy every byte
+# for real and double the very disk this script exists to save, and it never
+# claims a clone it has not established.
 #
 # pnpm IS ALREADY BETTER THAN THIS and is left alone: it hardlinks from a global
 # store, so its node_modules is near-zero on disk already and cloning it would add
@@ -81,10 +111,11 @@
 # its only working hook home is the user's GLOBAL config. docs/treehouse-backend.md
 # records the evidence. Read it before proposing a repo-level hook again.
 #
-# ALWAYS EXITS 0 for a failed provision, and says why. It runs on the warm path,
-# in the background, on firstmate's time. A slot that failed to pre-warm is merely
-# cold - the crew installs for itself, as it always did - and that must never fail
-# a warm, leak a lease, or wake the user. A usage error still exits 2.
+# THE EXIT STATUS IS THE ANSWER: 0 every root is installed, 1 at least one root is
+# COLD (or the path was refused), 2 a usage error. Its caller is what must never
+# fail: bin/fm-pool-warm.sh exits 0 either way, releases the lease either way, and
+# merely logs a cold slot differently from a warm one. Swallowing the status here
+# instead is how a warm whose every install failed still reported "free and warm".
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -102,32 +133,95 @@ say() { printf '%s\n' "$*"; }
 
 # --- clone support ----------------------------------------------------------
 
-# can_clone <dir>: can this volume clone with `cp -c`? PROBED, not assumed - the
-# answer is a property of the destination's filesystem (APFS yes, HFS+/exFAT/a
-# network mount no) and of cp itself (GNU cp has no -c at all), and neither is
-# readable from `uname`. One real clone of one real byte answers all of it.
-can_clone() {  # <dir>
-  local dir=$1 probe rc=0
-  probe=$(mktemp -d "$dir/.fm-clone-probe.XXXXXX" 2>/dev/null) || return 1
-  printf 'x' > "$probe/src" 2>/dev/null || { rm -rf "$probe"; return 1; }
-  cp -c "$probe/src" "$probe/dst" 2>/dev/null || rc=1
+# device_of <path>: the device backing <path>, as df names it. df -P is POSIX and
+# its second line's first field is the device on both platforms.
+device_of() {  # <path>
+  df -P "$1" 2>/dev/null | awk 'NR==2 { print $1 }'
+}
+
+# fs_type_of <device>: that device's filesystem type, lowercased by the OS already,
+# or empty when it cannot be read - which callers must treat as "no clone".
+# macOS: "/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, ...)"
+# Linux: "/dev/sda1 on / type ext4 (rw,relatime)"
+# The macOS form is the one that decides anything here (nothing else clones), but
+# both are read so the answer is never a silent empty on a GNU box.
+fs_type_of() {  # <device>
+  mount 2>/dev/null | awk -v d="$1" '
+    $1 == d {
+      for (i = 2; i <= NF; i++) {
+        if ($i == "type" && i < NF) { print $(i + 1); exit }
+        if ($i ~ /^\(/) { t = substr($i, 2); sub(/[,)]$/, "", t); print t; exit }
+      }
+    }'
+}
+
+# can_clone <src-dir> <dst-dir>: will a `cp -c` from src to dst be a REAL
+# copy-on-write clone? The header owns why exiting 0 is not evidence of one. On a
+# no, CLONE_WHY carries the reason, because a silent degrade is what let this
+# overstate the saving by 28x in the first place.
+CLONE_WHY=""
+can_clone() {  # <src-dir> <dst-dir>
+  local src=$1 dst=$2 sdev ddev fs probe rc=0
+  CLONE_WHY=""
+
+  sdev=$(device_of "$src")
+  ddev=$(device_of "$dst")
+  if [ -z "$sdev" ] || [ -z "$ddev" ]; then
+    CLONE_WHY="the volume behind $src or $dst could not be read"
+    return 1
+  fi
+  if [ "$sdev" != "$ddev" ]; then
+    CLONE_WHY="$src ($sdev) and $dst ($ddev) are on different volumes, and cp -c never clones across one"
+    return 1
+  fi
+
+  fs=$(fs_type_of "$sdev")
+  if [ "$fs" != apfs ]; then
+    CLONE_WHY="$sdev is ${fs:-of an unreadable type}, not APFS - cp -c would silently copy every byte instead of cloning"
+    return 1
+  fi
+
+  # Last, and only now that a clone is possible at all: does this cp implement -c?
+  # GNU cp does not, which is where a Linux box fails, cleanly and with a reason.
+  probe=$(mktemp -d "$dst/.fm-clone-probe.XXXXXX" 2>/dev/null) || {
+    CLONE_WHY="no probe could be written into $dst"
+    return 1
+  }
+  printf 'x' > "$probe/src" 2>/dev/null || rc=1
+  [ "$rc" -eq 0 ] && { cp -c "$probe/src" "$probe/dst" 2>/dev/null || rc=1; }
   rm -rf "$probe" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || CLONE_WHY="this cp has no working -c (GNU cp has no such flag)"
   return $rc
 }
 
-# clone_tree <src-dir> <dst-dir>: CoW-clone a whole directory. Returns non-zero
-# without leaving a partial tree behind, so a caller can fall back to a plain
-# install and never hand a crew a half-populated node_modules.
+# clone_tree <src-dir> <dst-dir>: CoW-clone a whole directory, atomically from the
+# destination's point of view. It clones into a temp sibling and only then swaps,
+# because <dst> is sometimes the CACHE ENTRY a later slot will clone FROM: the
+# earlier `rm -rf "$dst"` first meant a refresh interrupted by the warm's timeout,
+# a full disk, or a kill destroyed a still-usable cache and left the pool with
+# nothing to clone from. The temp lives beside the destination so the swap is a
+# rename on the same volume, never a copy.
 clone_tree() {  # <src-dir> <dst-dir>
-  local src=$1 dst=$2
+  local src=$1 dst=$2 parent tmp
   [ -d "$src" ] || return 1
-  mkdir -p "$(dirname "$dst")" 2>/dev/null || return 1
-  rm -rf "$dst" 2>/dev/null || true
-  if cp -c -R "$src" "$dst" 2>/dev/null; then
-    return 0
+  parent=$(dirname "$dst")
+  mkdir -p "$parent" 2>/dev/null || return 1
+  tmp=$(mktemp -d "$parent/.fm-clone.XXXXXX" 2>/dev/null) || return 1
+  if ! cp -c -R "$src" "$tmp/new" 2>/dev/null; then
+    rm -rf "$tmp" 2>/dev/null || true
+    return 1
   fi
-  rm -rf "$dst" 2>/dev/null || true
-  return 1
+  if [ -e "$dst" ] && ! mv "$dst" "$tmp/old" 2>/dev/null; then
+    rm -rf "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv "$tmp/new" "$dst" 2>/dev/null; then
+    [ -e "$tmp/old" ] && mv "$tmp/old" "$dst" 2>/dev/null   # put the old one back
+    rm -rf "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  rm -rf "$tmp" 2>/dev/null || true
+  return 0
 }
 
 # --- discovery --------------------------------------------------------------
@@ -197,15 +291,90 @@ fingerprint() {  # <dir>
 
 # --- the cache --------------------------------------------------------------
 
-# pool_key_of <worktree>: the pool this worktree belongs to. A slot lives at
-# <pool>/<slot>/<repo>, so the pool directory's own name - which treehouse
-# already derives per repo - is a stable, collision-free key, and needs no
-# knowledge of where the project clone is.
-pool_key_of() {  # <worktree>
-  local wt=$1 pool
-  pool=$(cd "$wt/../.." 2>/dev/null && pwd -P) || return 1
-  [ -n "$pool" ] || return 1
-  basename "$pool"
+# pool_key_of <resolved-worktree>: the pool this worktree belongs to, or a refusal
+# with a reason in POOL_WHY. This is the guard that keeps an installer out of
+# projects/<repo>, so it verifies CONTAINMENT and SHAPE rather than deriving a name
+# from whatever it was handed: the path must resolve inside the treehouse root and
+# be exactly <pool>/<slot>/<repo> below it, with a numeric slot, which is how
+# treehouse lays a pool out. The pool directory's own name - treehouse derives one
+# per repo - is then a stable, collision-free key needing no knowledge of where the
+# project clone is.
+POOL_WHY=""
+pool_key_of() {  # <resolved-worktree>
+  local wt=$1 root rest pool slot repo
+  POOL_WHY=""
+  root=$(cd "$TREEHOUSE_ROOT" 2>/dev/null && pwd -P) || {
+    POOL_WHY="the treehouse root $TREEHOUSE_ROOT does not exist"
+    return 1
+  }
+  case "$wt/" in
+    "$root"/*) ;;
+    *) POOL_WHY="$wt is not inside the treehouse root $root"; return 1 ;;
+  esac
+  rest=${wt#"$root"/}
+  pool=${rest%%/*}
+  rest=${rest#*/}
+  slot=${rest%%/*}
+  repo=${rest#*/}
+  if [ "$pool" = "$rest" ] || [ "$slot" = "$repo" ] || [ -z "$repo" ]; then
+    POOL_WHY="$wt is under the treehouse root but is not a <pool>/<slot>/<repo> slot"
+    return 1
+  fi
+  case "$repo" in
+    */*) POOL_WHY="$wt is deeper than a treehouse slot"; return 1 ;;
+  esac
+  case "$slot" in
+    ''|*[!0-9]*) POOL_WHY="'$slot' is not a treehouse slot number"; return 1 ;;
+  esac
+  printf '%s' "$pool"
+}
+
+# --- keeping the slot clean --------------------------------------------------
+
+# git_worktree <dir>: is this a git worktree with a HEAD to restore from? A slot
+# always is; a hand-run against something else may not be, and that is not an error.
+git_worktree() {  # <dir>
+  git -C "$1" rev-parse --verify -q HEAD >/dev/null 2>&1
+}
+
+# tracked_modified <worktree>: every TRACKED path the slot currently reports as
+# modified, one per line.
+#
+# It has to be `git status`, not `git diff --name-only HEAD`, because the two
+# disagree on exactly the case that bricks slots in practice. Verified on optiroq
+# (2026-07-30): its .gitattributes sets `text=auto eol=lf`, npm rewrote
+# src/admin-app/package-lock.json with CRLF, and `git diff` - which normalizes line
+# endings before comparing - reported NO change, while `git status` reported ` M`
+# and treehouse retired the slot as dirty. A restore keyed on diff saw nothing to
+# do and left the slot bricked. `git checkout HEAD -- <path>` still repairs it: it
+# rewrites the file from the blob regardless of what diff thinks.
+#
+# -z so git never quotes an exotic name into something checkout cannot take back;
+# --no-renames so every record carries exactly one path; untracked files excluded
+# because treehouse's own `git clean -fd` removes those on the return, so they
+# never make a slot dirty.
+tracked_modified() {  # <worktree>
+  git -C "$1" status --porcelain -z --untracked-files=no --no-renames 2>/dev/null \
+    | tr '\0' '\n' | sed 's/^...//'
+}
+
+# restore_tracked <worktree> <before-list-file>: undo the tracked-file edits THIS
+# provision caused, and nothing else. The header owns why it has to happen at all
+# (a dirty slot is retired from the pool permanently). Only paths that were clean
+# when we started are restored - a blanket `git checkout -- .` would discard
+# whatever was already in the slot, which is exactly the destructive move firstmate
+# must never make. Prints the count restored, or nothing.
+restore_tracked() {  # <worktree> <before-list-file>
+  local wt=$1 before=$2 p n=0
+  [ -n "$wt" ] && [ -f "$before" ] || return 0
+  git_worktree "$wt" || return 0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    grep -qxF -- "$p" "$before" && continue   # already modified before we ran
+    git -C "$wt" checkout HEAD -- "$p" 2>/dev/null && n=$((n + 1))
+  done < <(tracked_modified "$wt")
+  [ "$n" -gt 0 ] && printf '%s' "$n"
+  return 0
 }
 
 cache_root() {  # <pool-key>
@@ -342,7 +511,25 @@ provision_root() {  # <worktree> <subpath> <pool-key> <clone-ok>
 
 usage() {
   echo "usage: fm-worktree-provision.sh <worktree-path> [--harvest]" >&2
-  echo "       fm-worktree-provision.sh --probe <dir>" >&2
+  echo "       fm-worktree-provision.sh --probe <src-dir> [<dst-dir>]" >&2
+}
+
+# What the cleanup must undo, as globals, because a signal handler cannot see a
+# `local` in main - the same reason bin/fm-pool-warm.sh keeps its lease global.
+RESTORE_WT=""
+RESTORE_BEFORE=""
+
+# cleanup: leave the slot exactly as clean as we found it, then drop the lock.
+# Restoring FIRST matters on the kill path: the lock is worthless next to a slot
+# treehouse will never hand out again.
+cleanup() {
+  local n
+  n=$(restore_tracked "$RESTORE_WT" "$RESTORE_BEFORE")
+  [ -n "$n" ] && say "  restored $n tracked file(s) the installer rewrote - a warmed slot must come back clean, not dirty"
+  [ -n "$RESTORE_BEFORE" ] && rm -f "$RESTORE_BEFORE" 2>/dev/null
+  RESTORE_WT=""
+  RESTORE_BEFORE=""
+  fm_pool_lock_release
 }
 
 main() {
@@ -352,8 +539,8 @@ main() {
     ''|-h|--help) usage; return 2 ;;
     --probe)
       [ -n "${2:-}" ] || { usage; return 2; }
-      if can_clone "$2"; then say "clone: supported"; return 0; fi
-      say "clone: unsupported"
+      if can_clone "$2" "${3:-$2}"; then say "clone: supported"; return 0; fi
+      say "clone: unsupported - $CLONE_WHY"
       return 1
       ;;
   esac
@@ -365,7 +552,13 @@ main() {
     *) usage; return 2 ;;
   esac
 
-  key=$(pool_key_of "$wt") || { say "provision: $wt is not inside a treehouse pool; nothing to do"; return 0; }
+  # Rail 1 of AGENTS.md lives here in code: nothing outside a pooled worktree is
+  # ever installed into. A refusal is a FAILURE to report, not a quiet success -
+  # the caller asked for a warm slot and did not get one.
+  key=$(pool_key_of "$wt") || {
+    say "provision: refusing - $POOL_WHY. Only a pooled worktree is ever provisioned"
+    return 1
+  }
   roots=$(discover_roots "$wt")
   if [ -z "$roots" ]; then
     say "provision: no dependency roots found under $wt; nothing to do"
@@ -377,21 +570,26 @@ main() {
   # contract; do not re-roll one here.
   lock_base="$TREEHOUSE_ROOT/.fm-warm-locks/dep-cache-$key"
   fm_pool_lock_acquire "$lock_base" || {
-    say "provision: another provisioner holds this pool's cache; skipping"
-    return 0
+    say "provision: another provisioner holds this pool's cache; this slot stays cold"
+    return 1
   }
-  trap fm_pool_lock_release EXIT INT TERM
+  # A signal handler that only releases and RETURNS lets the script carry on
+  # cloning and installing with its lock already gone - so each handler exits, and
+  # clears the EXIT trap first so the cleanup runs exactly once.
+  trap cleanup EXIT
+  trap 'trap - EXIT; cleanup; exit 130' INT
+  trap 'trap - EXIT; cleanup; exit 143' TERM
 
-  if can_clone "$TREEHOUSE_ROOT"; then
+  if can_clone "$TREEHOUSE_ROOT" "$wt"; then
     clone_ok=yes
   else
-    say "provision: this volume does not support cp -c clones (not APFS?); installing without cloning"
+    say "provision: no copy-on-write clone is possible here ($CLONE_WHY); installing without cloning"
   fi
 
   if [ "$mode" = harvest ]; then
     if [ "$clone_ok" != yes ]; then
       say "provision: cannot harvest without clone support; nothing cached"
-      return 0
+      return 1
     fi
     while IFS= read -r rel; do
       [ -n "$rel" ] || continue
@@ -406,6 +604,21 @@ EOF
     return 0
   fi
 
+  # Record which tracked files were ALREADY modified before the installer runs, so
+  # cleanup restores only what this run dirtied. Without the snapshot a warm would
+  # revert a crew's own edits; without the restore the slot comes back `dirty` and
+  # treehouse can never hand it out again. See the header's clean-slot contract.
+  if git_worktree "$wt"; then
+    RESTORE_BEFORE=$(mktemp "${TMPDIR:-/tmp}/fm-provision-before.XXXXXX" 2>/dev/null) || RESTORE_BEFORE=""
+    if [ -n "$RESTORE_BEFORE" ]; then
+      tracked_modified "$wt" > "$RESTORE_BEFORE" 2>/dev/null || true
+      RESTORE_WT=$wt
+    else
+      say "provision: cannot snapshot this slot's tracked state; refusing rather than risk leaving it dirty"
+      return 1
+    fi
+  fi
+
   say "provision: $wt (pool $key)"
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
@@ -415,7 +628,7 @@ $roots
 EOF
 
   [ "$rc" -eq 0 ] || say "provision: finished with at least one cold root"
-  return 0
+  return $rc
 }
 
 main "$@"
