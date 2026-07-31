@@ -37,9 +37,11 @@ A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity
 If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 because it cannot safely read loop-guard fields.
 
 A re-arm actively in flight is not a blind turn, and the guard tolerates it explicitly.
-`bin/fm-watch-arm.sh` holds `state/.watch.arming` for as long as an arm process is alive - the startup handoff between a watcher exiting to deliver a wake and its replacement claiming the lock - and clears it on every exit path via an `EXIT` trap.
-When the health check fails but that marker is present and fresh within `FM_ARMING_GRACE` (default 30 seconds), the guard exits 0 instead of blocking, so a normal watcher handoff does not render as a turn-end error.
-The bound means a `SIGKILL`-orphaned marker cannot mask a genuinely dead watcher beyond that window, and a stale or absent marker still blocks, so a turn that ends with no re-arm in flight - the real blind-turn case - still fires.
+`bin/fm-watch-arm.sh` holds `state/.watch.arming` for as long as an arm process is alive - the handoff between a watcher exiting and its replacement claiming the lock, including the backoff before an arm relaunches a watcher that died with nothing to report - and clears it on every exit path via an `EXIT` trap.
+The guard asks `fm_arm_in_flight <state-dir> <arm-path> [grace] [home]` from `bin/fm-wake-lib.sh`, which owns that verdict: it confirms the marker's recorded pid is alive AND identity-matched AND records this home and this arm path.
+A verified live arm counts however old its marker is, because an arm now supervises its watcher across restarts and freshness alone would call a long-lived, working arm dead.
+An arm `SIGKILL`ed before its `EXIT` trap ran leaves an unverifiable orphan marker, and that case alone falls back to the bounded `FM_ARMING_GRACE` window (default 30 seconds) and then expires.
+So a stale or absent marker still blocks, and a turn that ends with no re-arm in flight - the real blind-turn case - still fires.
 `fm_watcher_healthy` itself stays a pure liveness predicate that the arm wrapper relies on to confirm its own watcher; the `state/.watch.arming` tolerance is layered on top of it by the guards, never inside it.
 
 ## One authoritative liveness answer
@@ -50,7 +52,7 @@ Three surfaces share that one predicate so they cannot disagree:
 
 - `bin/fm-turnend-guard.sh` - the blocking backstop above.
 - `bin/fm-guard.sh` - the pull-based advisory banner.
-  It decides its watcher-down banner with `fm_watcher_healthy` (not beacon age) and applies the SAME `state/.watch.arming` tolerance as the turn-end guard, so a normal handoff is silent on both while a genuine lapse surfaces on both.
+  It decides its watcher-down banner with `fm_watcher_healthy` (not beacon age) and applies the SAME `fm_arm_in_flight` tolerance as the turn-end guard, so a normal handoff is silent on both while a genuine lapse surfaces on both.
   `bin/fm-supervision-lib.sh` supplies only descriptive counts (`FM_SUP_IN_FLIGHT`, the total recorded tasks, and `FM_SUP_SUPERVISABLE`, those that demand a watcher) and beacon-age text for its banner, never a liveness verdict.
 - `bin/fm-supervision-live.sh` - the agent-callable check.
   Firstmate runs it instead of improvising (a process grep, a beacon-freshness read, or a payload-less turn-end-guard invocation all gave confident WRONG answers).

@@ -263,6 +263,24 @@ wait_for_pane_input_pending() {
   return 1
 }
 
+# Echo a pane's cursor-row bytes as hex, once they contain <want-hex> or the wait
+# runs out. Returning the last capture either way keeps a genuine wrong-shape
+# failure reportable: the caller still asserts, and still prints what it saw.
+wait_for_cursor_row_hex() {  # <pane> <want-hex>
+  local pane=$1 want=$2 i=0 y row hex=
+  while [ "$i" -lt 100 ]; do
+    y=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$pane" '#{cursor_y}')
+    row=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$pane" -S "$y" -E "$y")
+    hex=$(printf '%s' "$row" | od -An -tx1 | tr -d ' \n')
+    case "$hex" in
+      *"$want"*) break ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  printf '%s' "$hex"
+}
+
 selfcheck_pane_input_pending
 
 # --- Scenario A: human-partial-input ----------------------------------------
@@ -450,7 +468,7 @@ test_scenario_c() {
 # tests/fm-composer-lib.test.sh's bare-glyph-between-rules case.
 
 test_scenario_d() {
-  local pane row hex verdict digest_count digest_line digest_hex
+  local pane hex verdict digest_count digest_line digest_hex
   # Prompt spec: \033[37m U+276F U+00A0 \033[39m - the captured incident bytes.
   local prompt_spec='\033[37m\342\235\257\302\240\033[39m'
   local rule_spec='\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200'
@@ -461,16 +479,17 @@ test_scenario_d() {
   pane=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t wedge-shape '#{pane_id}')
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$pane" \
     "clear; bash '$LOOP_SCRIPT' '$LOG_FILE' '$prompt_spec' '$rule_spec'" Enter
-  sleep 1
   SUPERVISOR_PANE="$pane"
 
   # Precondition 1: the pane really carries the incident bytes, not a lookalike.
   # Without this the scenario could pass against an ordinary ASCII-space prompt
   # and prove nothing.
-  row=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$pane" \
-    -S "$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$pane" '#{cursor_y}')" \
-    -E "$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$pane" '#{cursor_y}')")
-  hex=$(printf '%s' "$row" | od -An -tx1 | tr -d ' \n')
+  #
+  # Wait for the glyph rather than sleeping a fixed second before capturing: a
+  # loaded box needs longer than that to draw the prompt, and the capture then
+  # returned an EMPTY cursor row, which reads as "the shape is wrong" and failed
+  # the run for a reason that has nothing to do with the shape.
+  hex=$(wait_for_cursor_row_hex "$pane" e29daf)
   case "$hex" in
     *e29daf*) ;;
     *) fail "Scenario D: the pane is not drawing U+276F (cursor row hex: $hex)" ;;

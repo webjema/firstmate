@@ -79,13 +79,12 @@ beacon_desc=$FM_SUP_BEACON_DESC
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   watcher_fresh=true
-elif [ -e "$STATE/.watch.arming" ] \
-  && [ "$(fm_path_age "$STATE/.watch.arming")" -lt "${FM_ARMING_GRACE:-30}" ]; then
+elif fm_arm_in_flight "$STATE" "$SCRIPT_DIR/fm-watch-arm.sh" "${FM_ARMING_GRACE:-30}" "$FM_HOME"; then
   # A re-arm is actively in flight (the normal watcher handoff between a watcher
-  # exiting to deliver a wake and its replacement claiming the lock). bin/fm-watch-arm.sh
-  # holds state/.watch.arming for the arm's whole life; tolerate a FRESH marker so a
-  # handoff does not read as a supervision lapse - the SAME tolerance
-  # bin/fm-turnend-guard.sh applies, so the two guards stay consistent.
+  # exiting to deliver a wake and its replacement claiming the lock, or an arm
+  # backing off before replacing a watcher that died with nothing to report).
+  # fm_arm_in_flight is the SAME predicate bin/fm-turnend-guard.sh applies, so the
+  # two guards stay consistent.
   watcher_fresh=true
 else
   watcher_fresh=false

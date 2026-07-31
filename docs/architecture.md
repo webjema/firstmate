@@ -58,8 +58,11 @@ Optional X mode rides the same check path: the locked session-start bootstrap st
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
-`bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints exactly one honest status line (`started` / `attached` / restart-only `healthy` / `FAILED`, the last exiting non-zero).
-On `attached` it stays live until that existing cycle ends so background-notify harnesses do not get an empty false wake from a healthy no-op exit.
+`bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints honest status lines (`started` / `attached` / `already armed` / `relaunching` / `wakes queued` / restart-only `healthy` / `FAILED`, the last exiting non-zero).
+On a notify-on-exit harness the arm's own exit IS the wake, so it exits ONLY on information: a watcher wake reason, wake records left in the durable queue, or one bounded `FAILED`.
+A watcher that ends with nothing to report is relaunched in place, with exponential backoff and a churn budget (`FM_ARM_RELAUNCH_MAX` quiet exits inside `FM_ARM_CHURN_WINDOW`) that turns a watcher which will not stay up into a single loud failure instead of a relaunch loop; every relaunch is recorded in `state/.watch-arm.log`.
+One arm per home: a second arm stands down with `already armed` rather than attaching to a live cycle, because two arms on one cycle means two harness notifications per wake.
+[incidents/watch-arm-notification-storm.md](incidents/watch-arm-notification-storm.md) records the storm that established these rules.
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
 A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, or if tasks are in flight and that watcher stops running or queued wakes are waiting to be drained.
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.

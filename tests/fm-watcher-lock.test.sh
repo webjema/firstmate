@@ -506,7 +506,7 @@ test_watcher_self_evicts_on_lock_takeover() {
 }
 
 test_arm_attaches_and_waits_for_live_fresh_watcher() {
-  local dir state fakebin out armout i wpid armpid status
+  local dir state fakebin out armout i wpid armpid lock_pid
   dir=$(make_case arm-attach)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -537,13 +537,25 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm reported FAILED for a healthy watcher"
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "arm disturbed the healthy watcher's lock"
   is_live_non_zombie "$armpid" || fail "arm exited while the seed watcher was still healthy"
-  # After the seed dies, the attached arm must exit 0 (cycle ended).
+  # After the seed dies with NOTHING to report, the arm must NOT exit: an exit is a
+  # harness wake, and a wake that carries no information is what turned one dead
+  # watcher into a notification loop. It replaces the watcher in place instead.
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
-  wait_for_exit "$armpid" 300
-  status=$?
-  [ "$status" -eq 0 ] || fail "attached arm did not exit zero after seed died (status $status)"
-  pass "arm attaches to a live fresh watcher and exits only when that cycle ends"
+  i=0
+  while [ "$i" -lt 300 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$armpid" || fail "arm exited on a quiet watcher death instead of relaunching: $(cat "$armout")"
+  grep -qF 'watcher: relaunching after 1 quiet exit(s)' "$armout" || fail "arm did not report the relaunch: $(cat "$armout")"
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start a replacement watcher: $(cat "$armout")"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$lock_pid" ] && [ "$lock_pid" != "$wpid" ] || fail "replacement watcher did not take the lock (got '$lock_pid')"
+  kill "$armpid" "$lock_pid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm adopts a live fresh watcher and relaunches it in place when that cycle ends quiet"
 }
 
 test_arm_starts_and_self_heals() {
@@ -644,7 +656,7 @@ SH
 }
 
 test_arm_waits_for_peer_beacon_after_child_stands_down() {
-  local dir state fakebin armout peer beater identity armpid status i
+  local dir state fakebin armout peer beater identity armpid i
   dir=$(make_case arm-peer-startup-race)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -674,13 +686,21 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   grep -qF "watcher: attached pid=$peer" "$armout" || fail "arm did not wait for and attach to the peer watcher: $(cat "$armout")"
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm falsely reported FAILED during peer startup race"
   is_live_non_zombie "$armpid" || fail "arm exited while the peer was still healthy"
-  # After the peer dies, the attached arm must exit 0 (same as pre-fork attach).
+  # After the peer dies with nothing to report, the arm replaces it in place
+  # rather than spending a harness wake to say nothing happened.
   kill "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
-  wait_for_exit "$armpid" 300
-  status=$?
-  [ "$status" -eq 0 ] || fail "attached arm did not exit zero after peer died (status $status): $(cat "$armout")"
-  pass "arm attaches to a peer watcher after child stands down and exits when peer dies"
+  i=0
+  while [ "$i" -lt 300 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$armpid" || fail "arm exited on a quiet peer death instead of relaunching: $(cat "$armout")"
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start a replacement after the peer died: $(cat "$armout")"
+  kill "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm attaches to a peer watcher after child stands down and relaunches when the peer dies quiet"
 }
 
 test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
