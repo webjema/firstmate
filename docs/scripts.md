@@ -19,6 +19,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-brief.sh`            | Scaffold ship, scout, and secondmate-charter briefs                                  |
 | `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` symlink, and the canonical self-governance section |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, and stale watcher liveness   |
+| `fm-disk-guard.sh`       | Reclaim disk on measured pressure rather than on a lifecycle event; never overrides a treehouse lease (docs/incidents/disk-exhaustion-2026-07-31.md) |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |
 | `fm-arm-pretool-check.sh` | Stable PreToolUse transport for the watcher-arm command policy (docs/arm-pretool-check.md) |

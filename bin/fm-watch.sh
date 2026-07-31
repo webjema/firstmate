@@ -92,6 +92,11 @@ fi
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
+# Disk-guard cadence. Deliberately NOT the heartbeat's backing-off interval: the
+# heartbeat backs off because an idle fleet has nothing new to say, whereas a disk
+# fills fastest exactly when the fleet is busy, so this one stays flat.
+DISK_GUARD_INTERVAL=${FM_DISK_GUARD_INTERVAL:-900}  # seconds between disk checks
+DISK_GUARD_TIMEOUT=${FM_DISK_GUARD_TIMEOUT:-120}    # ceiling on one guard run, so the janitor can never stall supervision
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
@@ -985,6 +990,55 @@ EOF
       touch "$STATE/.last-heartbeat"
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
       triage_log "absorbed heartbeat (no captain-relevant change)"
+    fi
+  fi
+
+  # Disk guard: the one sweep that must NOT wait for the next session start.
+  # Every other janitor firstmate runs is wired to a lifecycle event - bootstrap,
+  # teardown - and a session that stays up for days therefore never sweeps again.
+  # That is how this box reached 94% full on 2026-07-31 (see
+  # docs/incidents/disk-exhaustion-2026-07-31.md): the janitors were fine, nothing
+  # re-ran them. The watcher is the only thing here that ticks on wall-clock time
+  # regardless of what the fleet is doing, so the disk check belongs on it.
+  #
+  # It is silent and zero-token while the disk is healthy: the guard exits at tier
+  # "ok" without printing, so no wake is enqueued and the captain never sees it.
+  # A wake is raised ONLY for the case the guard deliberately cannot fix by itself -
+  # landed worktrees held by a lease, which only their owner may release. That is
+  # information the captain must act on, which is the bar for waking anyone.
+  #
+  # THE HOLDBACK IS A STANDING CONDITION, SO IT MUST NOT BE A STANDING WAKE.
+  # Leased-and-landed worktrees stay leased until their owner releases them, which
+  # may be days. Waking on the condition itself would re-fire every cadence forever
+  # and reach the captain as pure churn - the exact shape of the storm in
+  # docs/incidents/watch-arm-notification-storm.md. So the wake fires on a CHANGE in
+  # the holdback, not on its presence: the report is hashed, and a wake is raised
+  # only when that hash differs from the last one surfaced. Same worktrees still
+  # stuck tomorrow, no wake; a new one joins the set, one wake.
+  #
+  # The run is also bounded. At tier ok the guard is one `df` and exits, but under
+  # real pressure it queries gh per candidate worktree, and this loop is the fleet's
+  # supervision heartbeat - a janitor must never be the reason a wedged crew went
+  # unnoticed. If it overruns, it is killed and retried next cadence.
+  if [ "$(age_of "$STATE/.last-disk-guard")" -ge "$DISK_GUARD_INTERVAL" ]; then
+    touch "$STATE/.last-disk-guard"
+    if [ -x "$FM_ROOT/bin/fm-disk-guard.sh" ]; then
+      dg_out=$(timeout "$DISK_GUARD_TIMEOUT" "$FM_ROOT/bin/fm-disk-guard.sh" 2>/dev/null || true)
+      if [ -n "$dg_out" ]; then
+        triage_log "disk guard: $(echo "$dg_out" | tr '\n' ' ')"
+        dg_held=$(echo "$dg_out" | grep 'LEASED and were not touched' || true)
+        if [ -n "$dg_held" ]; then
+          dg_hash=$(printf '%s' "$dg_held" | cksum | awk '{print $1}')
+          if [ "$dg_hash" != "$(cat "$STATE/.disk-guard-surfaced" 2>/dev/null || echo)" ]; then
+            printf '%s\n' "$dg_hash" > "$STATE/.disk-guard-surfaced"
+            wake_enqueue disk-guard disk-guard "$dg_held"
+            wake "disk-guard"
+          fi
+        else
+          # The holdback cleared, so the next one is news again.
+          rm -f "$STATE/.disk-guard-surfaced"
+        fi
+      fi
     fi
   fi
 
