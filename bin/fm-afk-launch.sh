@@ -36,6 +36,10 @@
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #
+# BOTH start paths gate on the entry preflight (bin/fm-afk-preflight-lib.sh,
+# which owns the contract) before touching any state: a refusal exits non-zero,
+# writes no state/.afk, records no terminal, and starts no daemon.
+#
 # Only the tmux supervisor backend has a non-visible-launch primitive here; any
 # other detected supervisor backend refuses loudly.
 #
@@ -63,6 +67,11 @@ FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
 # shellcheck source=bin/fm-afk-start.sh
 . "$FM_AFK_LAUNCH_DIR/fm-afk-start.sh"
 set +e
+# Both start paths gate on the entry preflight, so depend on its owner directly
+# rather than on fm-afk-start.sh happening to source it (re-sourcing is a cheap
+# idempotent redefinition).
+# shellcheck source=bin/fm-afk-preflight-lib.sh
+. "$FM_AFK_LAUNCH_DIR/fm-afk-preflight-lib.sh"
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
@@ -122,7 +131,7 @@ fm_afk_launch_lock_release() {
 }
 
 fm_afk_launch_usage() {
-  sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,41p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -399,6 +408,14 @@ fm_afk_launch_start() {
 
 fm_afk_launch_start_native() {
   local backup artifact had_afk=0 result=0
+  # Prove away mode can actually reach the supervisor pane before touching any
+  # state - same gate, same reason as fm_afk_launch_start (incident
+  # afk-wake-fix-r4). The native daemon auto-discovers the pane from the env it
+  # inherits from this process, so the preflight resolves it the same way, with
+  # no explicit target to pass in. Runs on the refresh path too: a refresh
+  # re-asserts the same promise. It is first, before mkdir, so a refusal leaves
+  # nothing half-entered.
+  fm_afk_preflight || return 1
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1

@@ -54,13 +54,13 @@ batched digest rather than per-wake injections.
 
 ## Entry preflight (away mode must prove it can wake somebody)
 
-Both entry paths run `fm_afk_preflight` (`bin/fm-afk-preflight-lib.sh`) before writing any away-mode state.
+Both entry paths - `start` and `start-native` - run `fm_afk_preflight` (`bin/fm-afk-preflight-lib.sh`, which owns the full contract) before writing any away-mode state.
 It resolves the supervisor pane exactly as the daemon will, classifies its composer through the real classifier, and enters away mode only on an affirmative `empty`.
-Any other verdict - `pending`, `unknown`, or a missing pane - refuses entry and prints what it saw plus the fix.
+Anything else refuses entry and prints what it saw plus the fix, including the case where firstmate is not running inside tmux, so its own pane was never detected at all.
 Away mode is a promise to wake the user, and a promise that cannot be demonstrated at the moment it is made must not be made at all: on 2026-07-26 a composer misread let away mode start against a pane it could never reach, and the user lost a 7-hour overnight window.
 
 On a refusal, do not retry blindly and never set `FM_AFK_PREFLIGHT=0` to get past it.
-Read the verdict, tell the user in plain language that away mode did not start and why (unsubmitted text on the line, the pane is not running firstmate, no pane found), and enter away mode only once a retry passes.
+Read the verdict, tell the user in plain language that away mode did not start and why (unsubmitted text on the line, the pane is not running firstmate, no pane found, firstmate is not running inside tmux), and enter away mode only once a retry passes.
 `FM_AFK_PREFLIGHT=0` exists for test harnesses and for a user who has explicitly accepted that they may not be woken.
 
 ## How to exit afk

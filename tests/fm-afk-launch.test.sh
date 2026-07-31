@@ -355,7 +355,10 @@ unit_native_lifecycle() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+  # FM_AFK_PREFLIGHT=0: this case is about lifecycle state, not the entry gate,
+  # and there is no supervisor pane in this fixture. The gate itself is covered
+  # by tests/fm-afk-preflight.test.sh.
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_PREFLIGHT=0 "$LAUNCH" start-native >/dev/null 2>&1 \
     && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ] \
     && [ -e "$st/state/.afk" ] \
     && [ ! -e "$st/state/.subsuper-escalations" ]; then
@@ -607,8 +610,11 @@ unit_refresh_validates_record() {
   sleep 30 & daemon_pid=$!
   printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
+  # FM_AFK_PREFLIGHT=0 so both entries fail for the reason under test (the
+  # malformed record) rather than for the unreachable `unused` pane - otherwise
+  # the assertion holds for the wrong reason.
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
-    FM_SUPERVISOR_BACKEND=tmux bash -c '
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_PREFLIGHT=0 bash -c '
       . "$1"
       ! fm_afk_launch_start && ! fm_afk_launch_start_native
     ' _ "$LAUNCH" && [ ! -e "$st/state/.afk" ]; then
@@ -626,7 +632,9 @@ unit_clear_failure_aborts_entry() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear-fail.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  # FM_AFK_PREFLIGHT=0: the abort under test is the artifact clear, not the entry
+  # gate, and this fixture has no supervisor pane to prove.
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_PREFLIGHT=0 bash -c '
     . "$1"
     fm_afk_launch_reconcile() { return 0; }
     fm_afk_clear_stale_artifacts() { return 1; }
@@ -679,7 +687,8 @@ unit_flag_write_failure_aborts() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-flag-fail.XXXXXX")
   mkdir -p "$st/state"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  # FM_AFK_PREFLIGHT=0: the abort under test is the flag write, not the entry gate.
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_PREFLIGHT=0 bash -c '
     . "$1"
     fm_afk_launch_flag_write() { return 1; }
     ! fm_afk_launch_start_native
