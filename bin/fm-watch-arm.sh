@@ -57,6 +57,14 @@
 # armed" line instead of attaching. Attaching duplicates instead multiplied every
 # single wake into one notification per attached arm, each of which firstmate
 # answered with another arm.
+# The marker is OWNED, not merely present: an arm releases it only while it still
+# names that arm, hands it to the peer it stands down for, and re-takes it whenever
+# it goes missing or names a dead arm. An arm nothing can see stops standing
+# duplicates down and reads as a blind turn to the guards. A duplicate that slipped
+# past the startup check while the marker was missing is caught before it can adopt
+# a cycle: a watcher's PARENT is its arm, so both adopt paths ask who that is and
+# stand down for a live one. An ORPHAN watcher is still adopted - that is what
+# attaching exists for.
 #
 # --restart: stop ONLY this FM_HOME's supervision (the arm recorded in THIS home's
 # state/.watch.arming and the watcher pid recorded in THIS home's
@@ -100,21 +108,108 @@ BACKOFF_MAX=${FM_ARM_BACKOFF_MAX:-30}
 # Records this arm's identity so fm_arm_in_flight can verify a REAL live arm
 # rather than guess from the marker's mtime: this process now lives across
 # watcher restarts, so freshness alone would misread a working arm as dead.
-write_arming_marker() {
-  local identity
-  identity=$(fm_pid_identity "$$" 2>/dev/null || true)
+write_arming_marker_for() {  # <pid>
+  local pid=$1 identity
+  identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
   {
-    printf 'pid=%s\n' "$$"
+    printf 'pid=%s\n' "$pid"
     printf 'identity=%s\n' "$identity"
     printf 'arm-path=%s\n' "$ARM_SELF"
     printf 'fm-home=%s\n' "$FM_HOME"
   } > "$ARMING" 2>/dev/null || true
 }
 
+write_arming_marker() {
+  write_arming_marker_for "$$"
+}
+
 # Keep the mtime fallback fresh too, so an older guard (or one reading a marker
 # whose pid it cannot identify) still sees an in-flight re-arm.
 touch_arming_marker() {
   touch "$ARMING" 2>/dev/null || true
+}
+
+# Sleep INTERRUPTIBLY. Bash defers a trap until the running FOREGROUND command
+# finishes, so a plain `sleep` in this long-lived process would delay its own TERM
+# handler by up to that long - enough for --restart to give up waiting and for the
+# watcher it is replacing to sail past its own interruptible point. `wait` IS
+# interruptible, so the handler fires the instant the signal lands. Every sleep in
+# a loop this process can be signalled during goes through here.
+nap() {  # <seconds>
+  sleep "$1" &
+  wait "$!" 2>/dev/null || true
+}
+
+marker_owner() {
+  sed -n 's/^pid=//p' "$ARMING" 2>/dev/null | head -1
+}
+
+# Give up the marker ONLY if it still names this arm. An unconditional rm lets a
+# short-lived arm delete the record of a DIFFERENT arm that is still supervising,
+# and an arm nothing can see is an arm that stops standing duplicates down and
+# stops answering the turn-end guard - which is the whole storm, back again.
+release_arming_marker() {
+  [ "$(marker_owner)" = "$$" ] || return 0
+  rm -f "$ARMING" 2>/dev/null || true
+}
+
+# Re-take the marker whenever it has gone missing or now names a dead arm. Writing
+# it once at startup is not enough: this process outlives many watchers, so any
+# window where the marker is absent would otherwise make it invisible for the rest
+# of its life. A live peer's marker is left alone - exactly one arm is the visible
+# owner, and that is what makes the dedupe below decisive.
+assert_arming_marker() {
+  local owner
+  owner=$(marker_owner)
+  if [ "$owner" = "$$" ]; then
+    touch_arming_marker
+    return 0
+  fi
+  if [ -n "$owner" ] && fm_pid_alive "$owner"; then
+    return 0
+  fi
+  write_arming_marker
+}
+
+# Hand the marker to the live peer we are standing down for rather than deleting
+# it on the way out. The peer would re-take it on its next poll anyway, and that
+# gap is a window in which a third arm sees no owner and duplicates after all.
+yield_arming_marker_to() {  # <pid>
+  write_arming_marker_for "$1"
+}
+
+# Identify the arm behind a watcher this process did not start. A watcher's PARENT
+# is its arm, which is the one signal the marker cannot give us here: a duplicate
+# that started while the marker was missing has by then claimed the marker itself,
+# so asking the marker "is another arm live?" would only ever find this process.
+peer_arm_of_watcher() {  # <watcher-pid> -> echoes a live peer arm pid, or fails
+  local wpid=$1 ppid args
+  ppid=$(ps -o ppid= -p "$wpid" 2>/dev/null | tr -d ' ')
+  [ -n "$ppid" ] || return 1
+  [ "$ppid" != "$$" ] || return 1
+  fm_pid_alive "$ppid" || return 1
+  args=$(ps -o args= -p "$ppid" 2>/dev/null || true)
+  case "$args" in
+    *fm-watch-arm.sh*) printf '%s' "$ppid" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Stand down, rather than adopt, when the watcher we were about to attach to
+# already has an arm waiting on it. Two arms on one cycle means two harness
+# notifications when it ends, firstmate answers each with another arm, and that
+# fan-out is what turned one wake into ~80 background tasks. The startup dedupe
+# usually catches a duplicate; it cannot when the marker was missing at the instant
+# we started, hence the ppid question above. An ORPHAN watcher - no live arm behind
+# it - is left to the adopt path, which is the case attaching exists for.
+# Sets CYCLE/CYCLE_DETAIL and succeeds when it stood down; fails to say "carry on".
+stand_down_for_peer_arm() {
+  local peer_arm
+  peer_arm=$(peer_arm_of_watcher "$HEALTHY_PID") || return 1
+  echo "watcher: already armed pid=$peer_arm (watcher pid=$HEALTHY_PID, beacon $(fm_path_age "$BEAT")s)"
+  yield_arming_marker_to "$peer_arm"
+  CYCLE=standdown
+  CYCLE_DETAIL="stood down for arm pid=$peer_arm"
 }
 
 arm_log() {  # <message>
@@ -197,8 +292,8 @@ queued_wakes() {
 sleep_holding_marker() {  # <seconds>
   local secs=$1 i=0
   while [ "$i" -lt "$secs" ]; do
-    sleep 1
-    touch_arming_marker
+    nap 1
+    assert_arming_marker
     i=$((i + 1))
   done
 }
@@ -240,7 +335,7 @@ fi
 # We own supervision from here: take the marker and clear it on every exit path,
 # so a completed or killed arm never masks a real supervision gap.
 write_arming_marker
-trap 'rm -f "$ARMING" 2>/dev/null || true' EXIT
+trap 'release_arming_marker' EXIT
 
 if [ "$mode" = restart ]; then
   # Home-scoped stop of this home's supervision, arm first: a surviving arm would
@@ -308,8 +403,8 @@ attach_and_wait() {  # <attached-pid>
       attached_pid=$HEALTHY_PID
       report_attached
     fi
-    sleep "$ATTACH_POLL"
-    touch_arming_marker
+    nap "$ATTACH_POLL"
+    assert_arming_marker
   done
 }
 
@@ -330,6 +425,7 @@ run_cycle() {  # <cycle-mode>
   # rather than start a second one. (--restart skips this on its first cycle: it
   # just stopped this home's supervision and wants a fresh watcher.)
   if [ "$cycle_mode" = arm ] && healthy_watcher; then
+    stand_down_for_peer_arm && return 0
     report_attached
     attach_and_wait "$HEALTHY_PID"
     CYCLE=quiet
@@ -357,6 +453,14 @@ run_cycle() {  # <cycle-mode>
     if healthy_watcher; then
       if [ "$HEALTHY_PID" = "$child" ]; then
         echo "watcher: started pid=$child (beacon fresh)"
+        # Poll rather than block in `wait`: this is where the arm spends nearly
+        # all of its life, so it is also where a marker deleted by some other arm
+        # would otherwise stay deleted for the whole cycle. Reaping after the fact
+        # still yields the child's real status - bash holds it until waited on.
+        while fm_pid_alive "$child"; do
+          assert_arming_marker
+          nap 1
+        done
         wait "$child"
         rc=$?
         if watch_output_has_wake "$child_out"; then
@@ -373,6 +477,10 @@ run_cycle() {  # <cycle-mode>
       fi
       # Another watcher won the singleton; our child stood down.
       if [ "$cycle_mode" = arm ]; then
+        if stand_down_for_peer_arm; then
+          reap_child
+          return 0
+        fi
         report_attached
         reap_child
         attach_and_wait "$HEALTHY_PID"
@@ -413,7 +521,7 @@ run_cycle() {  # <cycle-mode>
       CYCLE_DETAIL=$detail
       return 0
     fi
-    sleep 0.2
+    nap 0.2
     touch_arming_marker
   done
 }
@@ -434,7 +542,7 @@ while :; do
       exit 0
       ;;
     standdown)
-      arm_log 'exit: restart-only, healthy peer holds the lock'
+      arm_log "exit: stood down, ${CYCLE_DETAIL:-healthy peer holds the lock}"
       exit 0
       ;;
     failed)

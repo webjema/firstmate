@@ -106,6 +106,34 @@ The contract is now stated in `bin/fm-watch-arm.sh`'s header and enforced there:
 `tests/fm-watch-arm-supervision.test.sh` runs a real arm over a scripted watcher and asserts the whole contract: quiet death relaunches without exiting, a wake reason still exits with the reason verbatim, queued records still exit, the churn budget ends as ONE `FAILED`, a second arm stands down without starting a second watcher, `--restart` stops the incumbent arm, and `fm_arm_in_flight` accepts a live arm with an ancient marker while expiring a dead one's.
 Writing that file found the `--restart` ordering defect above, which the storm had hidden.
 
+## Recurrence, 2026-07-31: the arming marker had no owner
+
+The fix above landed as PR #50 (squashed to `main` as `78c8277`) and the storm came back, quieter: `Background command "Re-arm watcher (confirmed down)" was stopped` every 15-20s, interleaved with `TURN WOULD END BLIND - SUPERVISION IS OFF`.
+
+Measured in the primary home, running `78c8277`:
+
+- Two arms alive at the same instant, pids `1890014` and `1909172`, which the one-arm-per-home rule is supposed to make impossible.
+- `state/.watch-arm.log`: 12 exits over two hours, every one `exit: watcher wake reason propagated`, arriving in PAIRS 45-60s apart - two arms ending on the same cycle.
+
+Root cause, in the shipped fix itself.
+`bin/fm-watch-arm.sh` wrote `state/.watch.arming` exactly once at startup and removed it with an UNCONDITIONAL `trap 'rm -f "$ARMING"' EXIT`, so any short-lived arm deleted the marker belonging to a different, still-live arm.
+Because the marker was never rewritten, one foreign deletion made a working arm invisible for the rest of its life.
+Both consequences follow directly: the startup dedupe found no marker and let a duplicate through (the fan-out, back again), and `fm_arm_in_flight` answered false while an arm was genuinely supervising (the blind-turn banner).
+
+A second, independent path let duplicates through even with the marker working: `run_cycle`'s adopt branch attached to any healthy watcher, and a duplicate that slipped past the startup check reached it before forking anything.
+
+Fix:
+
+- The EXIT trap releases the marker only when it still names THIS arm; an arm hands the marker to the live peer it stands down for rather than deleting it.
+- A live arm re-takes the marker whenever it is missing or names a dead arm, so a foreign deletion self-heals within about a second instead of lasting the whole cycle.
+- The arm polls its child instead of blocking in `wait`, because the self-heal has to run where the arm spends nearly all of its life.
+  It naps by backgrounding `sleep` and `wait`ing on it: bash defers a trap until the running FOREGROUND command finishes, and a plain `sleep 1` here delayed the arm's own TERM handler by up to a second, which was enough to break `--restart`.
+- Both adopt paths - the one before forking and the one after losing the singleton race - now ask `peer_arm_of_watcher` whether the watcher already has an arm behind it, and stand down if so.
+  A watcher's PARENT is its arm, which is the one signal the marker cannot give: a duplicate that started while the marker was missing has by then claimed the marker naming itself.
+  An ORPHAN watcher with no live arm is still adopted, which is the case attaching exists for.
+
+Three cases in `tests/fm-watch-arm-supervision.test.sh` cover it: an exiting arm leaves a live peer's marker intact, a live arm re-takes a marker deleted underneath it, and a second arm stands down even when the marker was missing at the instant it started.
+
 ## Reproducing the measurements
 
 ```python

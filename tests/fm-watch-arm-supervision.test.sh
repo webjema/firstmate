@@ -215,6 +215,105 @@ test_second_arm_stands_down_instead_of_attaching() {
   pass "a second arm stands down for a live one instead of attaching to its cycle"
 }
 
+# The storm came back in the field through this hole: a short-lived arm's EXIT trap
+# deleted the marker unconditionally, including when the marker belonged to a
+# DIFFERENT arm that was still supervising. That arm then became invisible - the
+# dedupe below stopped standing duplicates down and the turn-end guard stopped
+# seeing a re-arm in flight, so firstmate declared supervision down and re-armed on
+# a loop, exactly as before the fix.
+test_exiting_arm_leaves_a_live_peers_marker_alone() {
+  local dir armout armpid owner
+  dir=$(make_arm_case marker-ownership)
+  armout="$dir/arm.out"
+  set_mode "$dir" hold
+  run_arm_bg "$dir" "$armout"
+  armpid=$ARM_PID
+  wait_for_text "$armout" 'watcher: started pid=' || fail "arm never confirmed a watcher: $(cat "$armout")"
+  owner=$(sed -n 's/^pid=//p' "$dir/state/.watch.arming" 2>/dev/null | head -1)
+  [ "$owner" = "$armpid" ] || fail "live arm does not own the marker (owner=$owner, arm=$armpid)"
+
+  # A second arm stands down and exits. Its exit must not take the marker with it.
+  run_arm "$dir" > "$dir/arm2.out" 2>&1 || fail "second arm exited non-zero: $(cat "$dir/arm2.out")"
+  [ -e "$dir/state/.watch.arming" ] \
+    || fail "a standing-down arm DELETED the live arm's marker on exit - the live arm is now invisible to the dedupe and to both guards"
+  owner=$(sed -n 's/^pid=//p' "$dir/state/.watch.arming" 2>/dev/null | head -1)
+  [ "$owner" = "$armpid" ] \
+    || fail "the marker no longer names the live arm after a peer exited (owner=$owner, arm=$armpid)"
+  is_live_non_zombie "$armpid" || fail "the live arm died"
+  kill "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "an exiting arm leaves a live peer's arming marker intact"
+}
+
+# Self-heal: whatever removes the marker, a live arm must take it back on its own.
+# Writing it only at startup means one deletion blinds the arm for the rest of its
+# life, however long it supervises.
+test_live_arm_retakes_a_deleted_marker() {
+  local dir armout armpid i owner
+  dir=$(make_arm_case marker-selfheal)
+  armout="$dir/arm.out"
+  set_mode "$dir" hold
+  run_arm_bg "$dir" "$armout"
+  armpid=$ARM_PID
+  wait_for_text "$armout" 'watcher: started pid=' || fail "arm never confirmed a watcher: $(cat "$armout")"
+  rm -f "$dir/state/.watch.arming"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    owner=$(sed -n 's/^pid=//p' "$dir/state/.watch.arming" 2>/dev/null | head -1)
+    [ "$owner" = "$armpid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$owner" = "$armpid" ] \
+    || fail "the arm never re-took its deleted marker; it stays invisible for the rest of the cycle (owner=$owner, arm=$armpid)"
+  kill "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "a live arm re-takes a marker that was deleted underneath it"
+}
+
+# The startup dedupe cannot fire when the marker is missing at the instant a second
+# arm starts. It must not then attach to the live cycle anyway: two arms on one
+# cycle is the multiplier that turned a single wake into ~80 background tasks.
+test_second_arm_stands_down_even_when_the_marker_was_missing() {
+  local dir armout secondout armpid rc=0 runs
+  dir=$(make_arm_case one-arm-marker-race)
+  armout="$dir/arm.out"
+  secondout="$dir/arm2.out"
+  set_mode "$dir" hold
+  run_arm_bg "$dir" "$armout"
+  armpid=$ARM_PID
+  wait_for_text "$armout" 'watcher: started pid=' || fail "first arm never confirmed a watcher: $(cat "$armout")"
+  # Simulate losing the race: no marker at all when the second arm starts.
+  rm -f "$dir/state/.watch.arming"
+  # Backgrounded and bounded on purpose: the regression here is that the second arm
+  # ATTACHES and waits forever, which as a foreground call would burn the whole file's
+  # timeout and report nothing useful about why.
+  local secondpid i=0
+  run_arm_bg "$dir" "$secondout"
+  secondpid=$ARM_PID
+  while [ "$i" -lt 300 ] && is_live_non_zombie "$secondpid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$secondpid"; then
+    kill "$secondpid" 2>/dev/null || true
+    wait "$secondpid" 2>/dev/null || true
+    fail "second arm never exited - it attached to the live cycle and became a duplicate notification: $(cat "$secondout")"
+  fi
+  wait "$secondpid" 2>/dev/null || rc=$?
+  [ "$rc" -eq 0 ] || fail "second arm exited non-zero (status $rc): $(cat "$secondout")"
+  grep -qF 'watcher: already armed' "$secondout" \
+    || fail "second arm did not stand down once the race resolved: $(cat "$secondout")"
+  grep -qF 'watcher: attached' "$secondout" \
+    && fail "second arm ATTACHED to the live cycle - that duplicate is what multiplied every wake: $(cat "$secondout")"
+  runs=$(watcher_runs "$dir")
+  [ "$runs" -eq 1 ] || fail "second arm left an extra watcher behind (runs=$runs)"
+  is_live_non_zombie "$armpid" || fail "the incumbent arm died when a second one ran"
+  kill "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "a second arm stands down even when the marker was missing when it started"
+}
+
 test_restart_stops_the_incumbent_arm() {
   local dir armout restartout armpid restartpid i runs
   dir=$(make_arm_case restart-incumbent)
@@ -284,5 +383,8 @@ test_watcher_wake_reason_still_exits
 test_queued_wakes_still_exit
 test_churn_is_bounded_by_one_loud_failure
 test_second_arm_stands_down_instead_of_attaching
+test_exiting_arm_leaves_a_live_peers_marker_alone
+test_live_arm_retakes_a_deleted_marker
+test_second_arm_stands_down_even_when_the_marker_was_missing
 test_restart_stops_the_incumbent_arm
 test_arm_in_flight_verifies_a_real_process
