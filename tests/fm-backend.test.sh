@@ -551,6 +551,7 @@ run_teardown_case() {
 test_teardown_conformance_old_vs_new() {
   local old_bin fb proj wt id
   local state_old state_new config_old config_new data log_old log_new out_old out_new rc_old rc_new
+  local prune_line
   old_bin=$(build_old_bin teardown-old)
   proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt"
   id="teardownconform1"
@@ -577,13 +578,17 @@ test_teardown_conformance_old_vs_new() {
   out_new=$(run_teardown_case "$ROOT/bin/fm-teardown.sh" "$old_bin" "$fb" "$log_new" "$state_new" "$data" "$config_new" "$id" 2>&1)
   rc_new=$?
 
-  # The new fm-teardown.sh adds an async `treehouse prune --yes` at the end to reclaim space.
-  # We strip this exact line from the new log before comparing it byte-for-byte against the old log.
-  grep -v "^treehouse"$'\x1f'"prune"$'\x1f'"--yes$" "$log_new" > "$log_new.filtered" || true
+  # fm-teardown.sh ends with an ASYNC `treehouse prune --yes` to reclaim space. Strip it
+  # from BOTH logs: it lands in whichever run wins the race with the backgrounded child, so
+  # comparing it would test scheduling rather than command shape. Filtering only the new log
+  # worked while the prune existed nowhere else, but the baseline now carries it too.
+  prune_line="^treehouse"$'\x1f'"prune"$'\x1f'"--yes$"
+  grep -v "$prune_line" "$log_old" > "$log_old.filtered" || true
+  grep -v "$prune_line" "$log_new" > "$log_new.filtered" || true
 
   expect_code 0 "$rc_old" "old fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_old"
   expect_code 0 "$rc_new" "new fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
-  diff -u "$log_old" "$log_new.filtered" > "$TMP_ROOT/teardown-diff.txt" 2>&1 \
+  diff -u "$log_old.filtered" "$log_new.filtered" > "$TMP_ROOT/teardown-diff.txt" 2>&1 \
     || fail "fm-teardown.sh: tmux+treehouse command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/teardown-diff.txt")"
   assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" \
     "teardown did not call treehouse return --force <worktree>"

@@ -79,6 +79,40 @@ fm_watcher_healthy() {
   return 0
 }
 
+# fm_arm_in_flight <state> <arm-path> [grace] [home]
+# TRUE when a re-arm is genuinely in flight for this home, so the guards can tell
+# a normal watcher handoff apart from a blind turn. bin/fm-watch-arm.sh owns
+# state/.watch.arming for its whole life and records its own pid, identity, path,
+# and home in it. A live, identity-matched arm is in flight for as long as it
+# runs, however long that is: the arm now supervises its watcher across restarts,
+# so marker FRESHNESS alone would wrongly call a long-lived, working arm dead.
+# An arm SIGKILLed before its EXIT trap ran leaves an orphan marker, so an
+# unverifiable marker still falls back to the bounded mtime window and expires.
+# Sets FM_ARM_IN_FLIGHT_PID to the arm's pid when (and only when) the pid was
+# verified, so a caller that needs a real process - not a fresh file - can ask.
+FM_ARM_IN_FLIGHT_PID=
+fm_arm_in_flight() {
+  local state=$1 arm_path=$2 grace=${3:-${FM_ARMING_GRACE:-30}} home=${4:-$FM_HOME}
+  local arm_marker="$state/.watch.arming" pid identity marker_path marker_home current
+  FM_ARM_IN_FLIGHT_PID=
+  [ -e "$arm_marker" ] || return 1
+  pid=$(sed -n 's/^pid=//p' "$arm_marker" 2>/dev/null | head -1)
+  identity=$(sed -n 's/^identity=//p' "$arm_marker" 2>/dev/null | head -1)
+  marker_path=$(sed -n 's/^arm-path=//p' "$arm_marker" 2>/dev/null | head -1)
+  marker_home=$(sed -n 's/^fm-home=//p' "$arm_marker" 2>/dev/null | head -1)
+  if fm_pid_alive "$pid" \
+    && [ "$marker_path" = "$arm_path" ] \
+    && [ "$marker_home" = "$home" ] \
+    && [ -n "$identity" ] \
+    && current=$(fm_pid_identity "$pid") \
+    && [ "$current" = "$identity" ]; then
+    # shellcheck disable=SC2034 # Read by callers after fm_arm_in_flight returns.
+    FM_ARM_IN_FLIGHT_PID=$pid
+    return 0
+  fi
+  [ "$(fm_path_age "$arm_marker")" -lt "$grace" ]
+}
+
 # fm_home_lock_is_foreign <my-watch-path> <fm-home> <state-override>
 # The daemon-leak containment predicate. Returns 0 (TRUE: this process must
 # REFUSE the home lock) when, with NO explicit state override in effect, $FM_HOME

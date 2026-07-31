@@ -121,13 +121,14 @@ fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
 # A re-arm actively in flight is not a blind turn. bin/fm-watch-arm.sh holds
 # state/.watch.arming for as long as an arm process is alive - the startup
 # handoff between a watcher exiting to deliver a wake and its replacement
-# claiming the lock - and clears it on exit. Tolerate a FRESH marker so a normal
-# handoff does not render as a turn-end error, bounded by FM_ARMING_GRACE so a
-# SIGKILL-orphaned marker cannot mask a genuinely dead watcher beyond that
-# window. A stale or absent marker still blocks, so a turn that ends with no
-# re-arm in flight - the real blind-turn case - still fires.
-if [ -e "$STATE/.watch.arming" ] \
-  && [ "$(fm_path_age "$STATE/.watch.arming")" -lt "${FM_ARMING_GRACE:-30}" ]; then
+# claiming the lock, and now also the backoff between a watcher that died with
+# nothing to report and the one this arm is putting in its place - and clears it
+# on exit. fm_arm_in_flight owns that predicate: a live, identity-matched arm
+# counts however long it has been working, and an unverifiable marker still
+# expires against FM_ARMING_GRACE so a SIGKILL-orphaned one cannot mask a
+# genuinely dead watcher. A stale or absent marker still blocks, so a turn that
+# ends with no re-arm in flight - the real blind-turn case - still fires.
+if fm_arm_in_flight "$STATE" "$SCRIPT_DIR/fm-watch-arm.sh" "${FM_ARMING_GRACE:-30}" "$FM_HOME"; then
   exit 0
 fi
 

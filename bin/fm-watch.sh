@@ -291,7 +291,7 @@ surface_still_worktree() {  # <window> <task> <kind> <age> <tail40>
   window_is_busy "$w" "$tail40" && return 0
   status_is_paused "$(last_status_line "$STATE/$task.status")" && return 0
   reason=$(wake_payload stale "$w" "$STATE" "$task" spinning "wt=still" "idle=${age}s")
-  fm_wake_append stale "$w" "$reason" || exit 1
+  wake_enqueue stale "$w" "$reason"
   date +%s > "$STATE/.wt-still-woke-$task"
   wake "$reason"
 }
@@ -314,6 +314,20 @@ recorded_windows() {
     seen="$seen|$w|"
     printf '%s\n' "$w"
   done
+}
+
+# Append a wake record to the durable queue, or make the failure itself the wake.
+# A queue write that fails is exactly what supervision must not swallow: exiting
+# silently on it (the previous behavior) left the wake permanently due, so the
+# replacement watcher re-fired it at once and exited silently again - an
+# information-free hot loop that reached firstmate only as harness churn. Saying
+# so once, in a reason line the arm propagates verbatim, turns it into the single
+# actionable wake it always was.
+wake_enqueue() {  # <kind> <key> <reason>
+  local kind=$1 key=$2 reason=$3
+  fm_wake_append "$kind" "$key" "$reason" && return 0
+  echo "heartbeat: wake-queue write FAILED (kind=$kind key=$key); the queue at $FM_WAKE_QUEUE is unwritable - the wake below could not be recorded: $reason"
+  exit 0
 }
 
 # Exit reporting a wake. Consecutive heartbeats with no other wake in between
@@ -373,7 +387,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fi
         # shellcheck disable=SC2086  # $extra is a deliberate multi-field split.
         reason=$(wake_payload stale "$win" "$STATE" "$(window_to_task "$win" "$STATE")" "$class" $extra)
-        fm_wake_append stale "$win" "$reason" || exit 1
+        wake_enqueue stale "$win" "$reason"
         rm -f "$since_file"
         wake "$reason"
       fi
@@ -405,7 +419,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
     reason=$(wake_payload stale "$win" "$STATE" "$task" paused "idle=${age}s" "recheck=pause")
-    fm_wake_append stale "$win" "$reason" || exit 1
+    wake_enqueue stale "$win" "$reason"
     date +%s > "$rf"
     wake "$reason"
   fi
@@ -460,7 +474,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
   reason=$(wake_payload stale "$win" "$STATE" "$(window_to_task "$win" "$STATE")" none)
-  fm_wake_append stale "$win" "$reason" || exit 1
+  wake_enqueue stale "$win" "$reason"
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   wake "$reason"
@@ -655,7 +669,7 @@ while :; do
       out=$(run_check "$c")
       if [ -n "$out" ]; then
         reason="check: $c: $out"
-        fm_wake_append check "$c" "$reason" || exit 1
+        wake_enqueue check "$c" "$reason"
         touch "$STATE/.last-check"
         wake "$reason"
       fi
@@ -705,7 +719,7 @@ EOF
       reason=$(signal_payload "$STATE" $files)
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
-        fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+        wake_enqueue signal "$(basename "$f")" "$reason"
       done <<EOF
 $pending
 EOF
@@ -803,7 +817,7 @@ EOF
               if secondmate_has_live_work "$STATE" "$task" \
                  && [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
                 reason=$(wake_payload stale "$w" "$STATE" "$task" none "kind=secondmate")
-                fm_wake_append stale "$w" "$reason" || exit 1
+                wake_enqueue stale "$w" "$reason"
                 printf '%s' "$h" > "$sf"
                 mark_surfaced "$STATE/$task.status"
                 wake "$reason"
@@ -816,7 +830,7 @@ EOF
           # daemon's job), so the payload's verdict is `untriaged`.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             reason=$(wake_payload stale "$w" "$STATE" "$task" untriaged)
-            fm_wake_append stale "$w" "$reason" || exit 1
+            wake_enqueue stale "$w" "$reason"
             printf '%s' "$h" > "$sf"
             wake "$reason"
           fi
@@ -842,7 +856,7 @@ EOF
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
               reason=$(wake_payload stale "$w" "$STATE" "$task" none)
-              fm_wake_append stale "$w" "$reason" || exit 1
+              wake_enqueue stale "$w" "$reason"
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               mark_surfaced "$STATE/$task.status"
@@ -956,14 +970,14 @@ EOF
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
     if afk_present; then
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      wake_enqueue heartbeat heartbeat heartbeat
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
     elif heartbeat_scan_finds_actionable; then
       # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
       # Enqueue first, then mark every captain-relevant status surfaced so the next
       # heartbeat does not re-fire them (enqueue-before-suppress preserved).
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      wake_enqueue heartbeat heartbeat heartbeat
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced
       wake "heartbeat"
