@@ -22,9 +22,22 @@
 #   - the repo reports no checks at all (nothing to fail)
 #   - gh is missing, unauthenticated, or the call fails (never wake on a tool error)
 #
-# A failure wakes once per PR head: the failing head sha is recorded in
-# state/<id>.ci-seen, so a persistent red check does not re-wake firstmate every
-# poll, while a new push (a fix round that fails again) does.
+# Neither wake repeats itself, but they are bounded differently, because only one of
+# the two events is terminal:
+#   - MERGED is terminal - a PR cannot un-merge, so there is no later merge to hear
+#     about. The poll prints "merged" and then DELETES ITSELF, so the fact is reported
+#     exactly once. Teardown normally removes the poll when the task closes out, but a
+#     teardown that legitimately REFUSES (unlanded work in the worktree) never reaches
+#     that phase, and an armed poll for an already-merged PR then wakes firstmate on
+#     every watcher cycle, forever.
+#   - "checks failed" is NOT terminal - a red PR can be pushed to and go green, and a
+#     later failure is real news. So it wakes once per PR head: the failing head sha is
+#     recorded in state/<id>.ci-seen, so a persistent red check does not re-wake
+#     firstmate every poll, while a new push (a fix round that fails again) does.
+#
+# Re-arming resets both, by construction rather than by cleanup: this script always
+# writes a FRESH state/<id>.check.sh, so re-arming the same task onto a different PR
+# cannot inherit a marker that would swallow the new PR's merge.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -68,6 +81,7 @@ cat > "$STATE/$ID.check.sh" <<EOF
 set -u
 URL='$URL'
 SEEN='$STATE/$ID.ci-seen'
+SELF='$STATE/$ID.check.sh'
 command -v gh >/dev/null 2>&1 || exit 0
 line=\$(gh pr view "\$URL" --json state,headRefOid,statusCheckRollup -q '$ROLLUP_QUERY' 2>/dev/null) || exit 0
 read -r pr_state pr_head checks <<< "\$line"
@@ -75,6 +89,12 @@ read -r pr_state pr_head checks <<< "\$line"
 
 if [ "\$pr_state" = MERGED ]; then
   echo "merged"
+  # Terminal: disarm so this one-time fact is never reported twice. The wake line is
+  # printed FIRST on purpose - if the removal fails (a read-only state dir, say), the
+  # next cycle reports the merge again, which is merely noisy. Removing first and
+  # printing second would risk the one failure that matters: a merge firstmate never
+  # hears about at all.
+  rm -f "\$SELF"
   exit 0
 fi
 
