@@ -301,6 +301,7 @@ Every wake carries its own evidence after the `|`: the task, the watcher's absor
 2. `signal:` / `stale:` act on the payload. `class=none` on a stale means the crew stopped: peek with `bin/fm-peek.sh`, and if it is waiting, looping, or unresponsive, load `stuck-crewmate-recovery`. Only when a payload lacks the evidence you need, read live state with `bin/fm-crew-state.sh <id>` - never a `tail` of the status log.
 3. `check:` a per-task poll fired (a CI failure or a merge). Act on it.
 4. `heartbeat:` something turned up that the per-wake path missed. Review the whole fleet with `bin/fm-fleet-view.sh`, then resume. Do not report that the fleet is unchanged.
+5. `disk-guard:` the disk is low, and the guard has already reclaimed what it safely can. What remains is held by a crew's lease, which only the user may drop, so this wake exists to be relayed: give them the reclaimable size and the payload's commands verbatim. Never release a lease yourself.
 
 When a wake reports a merged PR for a project this home also has cloned, run `bin/fm-fleet-sync.sh <project>` so the clone never sits stale.
 

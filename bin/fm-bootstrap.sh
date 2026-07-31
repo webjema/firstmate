@@ -400,5 +400,12 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   if command -v treehouse >/dev/null 2>&1; then
     treehouse prune --global --yes >/dev/null 2>&1 &
   fi
+
+  # Disk pressure. The two sweeps above are unconditional session-start hygiene;
+  # this is the escalation, and it stays silent unless the disk is actually low.
+  # It runs in the FOREGROUND, unlike the prune above, because a low-disk report is
+  # part of the session-start digest the captain reads - a backgrounded one would
+  # print into the void after bootstrap had already returned.
+  [ -x "$FM_ROOT/bin/fm-disk-guard.sh" ] && "$FM_ROOT/bin/fm-disk-guard.sh" 2>/dev/null || true
 fi
 exit 0
