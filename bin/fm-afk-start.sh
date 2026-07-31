@@ -121,8 +121,11 @@ fm_afk_start_main() {
 
   # Prove the wake path BEFORE any state is written, so a refusal leaves nothing
   # half-entered and firstmate never believes it is in away mode with no way to
-  # be woken (incident afk-wake-fix-r4). The launcher-prepared path already ran
-  # its own preflight before preparing state, so it is not re-run here.
+  # be woken (incident afk-wake-fix-r4). BOTH launcher paths - `start` and
+  # `start-native` - run their own preflight before preparing state, so it is
+  # not re-run here. That is load-bearing in the other direction too: if a
+  # launcher path ever stops running it, this skip means NOTHING proves the wake
+  # path for that path, which is exactly how the native path went unguarded.
   if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ]; then
     fm_afk_preflight || return 1
   fi

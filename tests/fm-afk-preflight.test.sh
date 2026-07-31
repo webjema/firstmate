@@ -22,6 +22,7 @@ set -u
 . "$ROOT/bin/fm-afk-preflight-lib.sh"
 
 AFK_START="$ROOT/bin/fm-afk-start.sh"
+AFK_LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-afk-preflight-tests)
 
 # run_preflight: drive fm_afk_preflight against a fake pane whose cursor row is
@@ -127,6 +128,107 @@ test_afk_start_refuses_before_writing_the_afk_flag() {
   pass "fm-afk-start.sh refuses on a failed preflight, leaving no away-mode state behind"
 }
 
+# The OTHER entry point, and the one the incident configuration actually used.
+# The harness-native path enters through `fm-afk-launch.sh start-native` and then
+# runs the daemon with FM_AFK_STATE_PREPARED=1, which by contract skips the entry
+# gate in fm-afk-start.sh - so if the launcher does not run it, NOTHING does, and
+# away mode starts with no proof at all. The cases below drive the real launcher.
+#
+# run_launch_native: drive `fm-afk-launch.sh start-native` against a fake pane.
+# TMUX_PANE and FM_SUPERVISOR_TARGET/BACKEND are stripped deliberately: this is
+# firstmate running OUTSIDE tmux, so the supervisor target must resolve through
+# the documented `firstmate:0` fallback exactly as it does on a real box.
+run_launch_native() {  # <state-dir> <fakebin> <cursor-row-bytes> [extra env assignments...]
+  local state=$1 fakebin=$2 row=$3; shift 3
+  local capture="$state/pane.txt"
+  printf '%b\n' "$row" > "$capture"
+  env -u TMUX_PANE -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND \
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURSOR_Y=0 FM_AFK_PREFLIGHT_ATTEMPTS=1 FM_AFK_PREFLIGHT_SLEEP=0 \
+    FM_HOME="$state" FM_STATE_OVERRIDE="$state/state" "$@" \
+    "$AFK_LAUNCH" start-native 2>&1
+}
+
+test_afk_launch_native_refuses_an_undetected_supervisor_pane() {
+  local dir state out status
+  dir=$(make_supercase preflight-native-fallback)
+  state="$dir/native-fallback"; mkdir -p "$state/state"
+  # The reproduced configuration: firstmate outside tmux, so the target is the
+  # built-in `firstmate:0` guess. The pane is deliberately IDLE (a bordered empty
+  # composer) - the shape that would otherwise classify `empty` and let away mode
+  # in. It must still refuse: an unrelated idle agent is not firstmate.
+  out=$(run_launch_native "$state" "$dir/fakebin" \
+    '\342\224\202 > \033[2mTry "fix the build"\033[0m \342\224\202'); status=$?
+  [ "$status" -eq 0 ] && fail "start-native entered away mode against an undetected pane: $out"
+  assert_contains "$out" "REFUSING to enter away mode" "the native path refused without saying so"
+  assert_contains "$out" "NOT DETECTED" "the refusal did not say the target was only a guess"
+  assert_contains "$out" "firstmate:0" "the refusal did not name the fallback pane"
+  assert_contains "$out" "inside tmux" "the refusal did not give the fix"
+  assert_absent "$state/state/.afk" "start-native wrote the away-mode flag against an unreachable pane"
+  pass "start-native refuses when firstmate's own pane was never detected"
+}
+
+test_afk_launch_native_refuses_a_pane_that_is_not_running_firstmate() {
+  local dir state out status
+  dir=$(make_supercase preflight-native-shell)
+  state="$dir/native-shell"; mkdir -p "$state/state"
+  # A resolved target that is a bare shell prompt: a real pane that exists but
+  # runs no agent, so an escalation would be typed into a SHELL.
+  out=$(run_launch_native "$state" "$dir/fakebin" '$ ' \
+    FM_SUPERVISOR_TARGET=someone-elses:0 FM_SUPERVISOR_BACKEND=tmux); status=$?
+  [ "$status" -eq 0 ] && fail "start-native entered away mode against a non-firstmate pane: $out"
+  assert_contains "$out" "composer verdict: unknown" "the refusal did not name the verdict it saw"
+  assert_contains "$out" "someone-elses:0" "the refusal did not name the pane it probed"
+  assert_contains "$out" "running firstmate" "the refusal gave no fix"
+  assert_absent "$state/state/.afk" "start-native wrote the away-mode flag against a shell pane"
+  pass "start-native refuses when the supervisor target is not running firstmate"
+}
+
+# The working path, which must keep working: firstmate running INSIDE tmux, so
+# TMUX_PANE names its own pane, and that pane's composer is idle.
+test_afk_launch_native_still_enters_on_a_reachable_pane() {
+  local dir state out status
+  dir=$(make_supercase preflight-native-ok)
+  state="$dir/native-ok"; mkdir -p "$state/state"
+  out=$(run_launch_native "$state" "$dir/fakebin" \
+    '\342\224\202 > \033[2mTry "fix the build"\033[0m \342\224\202' TMUX_PANE=%7); status=$?
+  [ "$status" -eq 0 ] || fail "start-native refused a genuinely reachable pane: $out"
+  assert_present "$state/state/.afk" "start-native did not write the away-mode flag on a verified pane"
+  assert_present "$state/state/.afk-daemon-terminal" "start-native did not record the no-terminal mode"
+  pass "start-native still enters away mode when the pane is genuinely reachable"
+}
+
+test_afk_launch_native_override_still_bypasses() {
+  local dir state out status
+  dir=$(make_supercase preflight-native-override)
+  state="$dir/native-override"; mkdir -p "$state/state"
+  out=$(run_launch_native "$state" "$dir/fakebin" '$ ' FM_AFK_PREFLIGHT=0); status=$?
+  [ "$status" -eq 0 ] || fail "FM_AFK_PREFLIGHT=0 did not bypass the native-path gate: $out"
+  assert_contains "$out" "UNVERIFIED" "the native-path override skipped silently"
+  assert_present "$state/state/.afk" "the native-path override did not enter away mode"
+  pass "FM_AFK_PREFLIGHT=0 still bypasses on the native path"
+}
+
+# A half-entered away mode is its own failure: the flag says "you will be woken"
+# while nothing can wake anyone. The gate runs before any state is prepared, so a
+# refusal must leave the state dir exactly as it found it - including the PRIOR
+# session's artifacts, which only a real entry is allowed to clear.
+test_afk_launch_native_refusal_leaves_no_partial_lifecycle_state() {
+  local dir state out
+  dir=$(make_supercase preflight-native-rollback)
+  state="$dir/native-rollback"; mkdir -p "$state/state"
+  printf 'prior session\n' > "$state/state/.subsuper-escalations"
+  out=$(run_launch_native "$state" "$dir/fakebin" '$ ')
+  assert_absent "$state/state/.afk" "a refused entry left the away-mode flag behind"
+  assert_absent "$state/state/.afk-daemon-terminal" "a refused entry left a daemon terminal record behind"
+  assert_absent "$state/state/.afk-launch.lock" "a refused entry left the launcher lock held"
+  assert_present "$state/state/.subsuper-escalations" "a refused entry cleared the prior session's artifacts"
+  if find "$state/state" -maxdepth 1 -name '.afk-launch-backup.*' | grep -q .; then
+    fail "a refused entry left a rollback backup directory behind: $out"
+  fi
+  pass "a refused native entry leaves no partial away-mode lifecycle state"
+}
+
 test_preflight_passes_on_an_empty_composer
 test_preflight_passes_on_the_real_incident_composer
 test_preflight_refuses_a_pending_composer_with_a_capture_command
@@ -134,3 +236,8 @@ test_preflight_refuses_an_unreadable_composer
 test_preflight_refuses_a_missing_pane
 test_preflight_override_is_loud
 test_afk_start_refuses_before_writing_the_afk_flag
+test_afk_launch_native_refuses_an_undetected_supervisor_pane
+test_afk_launch_native_refuses_a_pane_that_is_not_running_firstmate
+test_afk_launch_native_still_enters_on_a_reachable_pane
+test_afk_launch_native_override_still_bypasses
+test_afk_launch_native_refusal_leaves_no_partial_lifecycle_state

@@ -18,6 +18,9 @@
 # Away mode that cannot prove a working wake path fails closed and says so,
 # loudly and actionably, while the user is still at the keyboard.
 #
+# It refuses one case WITHOUT classifying: a supervisor target that was never
+# resolved, only guessed from the built-in fallback. See fm_afk_preflight.
+#
 # Deliberately NOT checked: whether the pane is busy. firstmate is mid-turn
 # running /afk at this very moment, so a busy pane is the normal case; the
 # injector tolerates busy (a mid-turn harness queues the submitted digest) and
@@ -62,8 +65,17 @@ fm_afk_preflight_explain() {  # <verdict> <target> <backend>
   local verdict=$1 target=$2 backend=$3
   echo "afk: REFUSING to enter away mode - cannot prove a working wake path." >&2
   echo "afk:   supervisor pane : $target (backend $backend)" >&2
-  echo "afk:   composer verdict: $verdict (away mode delivers only into 'empty')" >&2
+  if [ "$verdict" = unresolved ]; then
+    echo "afk:   resolution      : NOT DETECTED - this is the built-in fallback target" >&2
+  else
+    echo "afk:   composer verdict: $verdict (away mode delivers only into 'empty')" >&2
+  fi
   case "$verdict" in
+    unresolved)
+      echo "afk:   firstmate is not running inside tmux, so nothing identified its own" >&2
+      echo "afk:   pane and the target above is only a built-in guess. Whatever that pane" >&2
+      echo "afk:   shows, it is not firstmate's, so no escalation can reach you through it." >&2
+      echo "afk:   Run firstmate inside tmux, or set FM_SUPERVISOR_TARGET to its pane." >&2 ;;
     missing)
       echo "afk:   The supervisor pane does not exist. Set FM_SUPERVISOR_TARGET to the" >&2
       echo "afk:   pane running firstmate, or start away mode from that pane." >&2 ;;
@@ -84,13 +96,26 @@ fm_afk_preflight_explain() {  # <verdict> <target> <backend>
 # the target the same way the daemon will (discover_supervisor_target/backend,
 # the shared owner) so the pane it proves is the pane the daemon will inject to.
 fm_afk_preflight() {
-  local target backend verdict
+  local target backend verdict resolved=1
   if [ "${FM_AFK_PREFLIGHT:-1}" = 0 ]; then
     echo "afk: preflight skipped (FM_AFK_PREFLIGHT=0); the wake path is UNVERIFIED" >&2
     return 0
   fi
-  target=$(discover_supervisor_target) || true
+  target=$(discover_supervisor_target) || resolved=0
   backend=$(discover_supervisor_backend) || true
+  # An UNRESOLVED target is refused without probing, because the probe cannot
+  # answer the question that matters. discover_supervisor_target returns 1 only
+  # when nothing was configured and nothing was detected - i.e. firstmate is not
+  # running inside tmux - and in that case no tmux pane can BE firstmate's own,
+  # so the fallback names some unrelated pane. Its composer verdict is then pure
+  # coincidence: an idle unrelated agent reads `empty` and would let away mode
+  # promise a wake it structurally cannot deliver. The terminal-backed launcher
+  # (fm_afk_launch_start) already refuses an unresolved target for this reason;
+  # refusing here makes every away-mode entry path agree.
+  if [ "$resolved" -eq 0 ]; then
+    fm_afk_preflight_explain unresolved "$target" "$backend"
+    return 1
+  fi
   verdict=$(fm_afk_preflight_probe "$target" "$backend")
   if [ "$verdict" = empty ]; then
     echo "afk: preflight ok - supervisor composer at $target reads empty; wake path verified"
