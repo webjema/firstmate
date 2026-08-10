@@ -129,9 +129,14 @@ fm_graph_reindex_timeout() { printf '%s\n' "${FM_GRAPH_REINDEX_TIMEOUT_SECS:-60}
 # WHY A FILE AND NOT A GLOBAL: every caller reads these helpers through a command
 # substitution, so a variable set here would die with the subshell that set it. A
 # file whose path arrives by environment crosses that boundary; a variable cannot.
+#
+# THE BRACES ARE LOAD-BEARING: bash applies redirections left to right, so a
+# `2>/dev/null` written after `> $FM_GRAPH_ERR_FILE` arrives too late to silence
+# that redirection's own failure, and an unwritable path - the one case the guard
+# exists for - prints raw bash noise onto fm-fleet-sync's stderr.
 fm_graph_note_error() {
   [ -n "${FM_GRAPH_ERR_FILE:-}" ] || return 0
-  printf '%s\n' "$1" > "$FM_GRAPH_ERR_FILE" 2>/dev/null || true
+  { printf '%s\n' "$1" > "$FM_GRAPH_ERR_FILE"; } 2>/dev/null || true
 }
 
 # fm_graph_distill <stderr-file>: the CLI's own words, cut down to one line fit to
@@ -234,6 +239,10 @@ fm_graph_project_for_path() {
 # on the recorded entry, and the returned name is the only proof that it did.
 # A mismatch means the refresh silently populated some other entry while the one
 # firstmate reads went stale, which is worth a named failure rather than a green line.
+# The proof is REQUIRED, not merely checked when offered: a response carrying no
+# project is a landing nothing verified, and printing a green line for one would be
+# the same unearned reassurance this whole change exists to remove. 0.8.1 always
+# reports it, so requiring it costs nothing today and fails loudly if that changes.
 fm_graph_reindex() {
   local dir=$1 name=$2 abs mode args json status project nodes
   mode=$(fm_graph_mode)
@@ -257,7 +266,11 @@ fm_graph_reindex() {
     return 1
   fi
   project=$(printf '%s\n' "$json" | jq -r '.project // empty' 2>/dev/null)
-  if [ -n "$project" ] && [ "$project" != "$name" ]; then
+  if [ -z "$project" ]; then
+    fm_graph_note_error "the CLI reported no project for the refresh, so nothing proves '$name' is the entry it wrote"
+    return 1
+  fi
+  if [ "$project" != "$name" ]; then
     fm_graph_note_error "the refresh landed on project '$project', not the recorded '$name', so '$name' is still stale"
     return 1
   fi

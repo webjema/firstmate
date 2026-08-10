@@ -639,15 +639,18 @@ graph_home() {
 }
 
 test_graph_refreshed_after_fast_forward() {
-  local home clone out log
+  local home clone out log name
   home=$(graph_home)
   clone=$(build_pair "$home" alpha)
   advance_origin "$home" alpha C1
   log="$home/graph-calls.log"
-  fm_graph_stub_projects "$home/graph.json" alpha-in-graph "$clone"
+  # The graph entry carries the name the CLI derives from the clone's own path,
+  # because that is the only name a refresh of that path can land on.
+  name=$(fm_graph_derived_name "$(cd "$clone" && pwd -P)")
+  fm_graph_stub_projects "$home/graph.json" "$name" "$clone"
   out=$(FM_STUB_PROJECTS="$home/graph.json" FM_STUB_LOG="$log" run_sync_graph "$home" "$clone")
   assert_contains "$out" "alpha: synced" "the clone must still fast-forward"
-  assert_contains "$out" "graph refreshed (project=alpha-in-graph" "a moved clone must refresh its graph"
+  assert_contains "$out" "graph refreshed (project=$name" "a moved clone must refresh its graph"
   assert_grep "index_repository" "$log" "a moved clone must re-index"
   pass "fleet-sync: a fast-forwarded clone refreshes its knowledge graph"
 }

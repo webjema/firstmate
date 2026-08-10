@@ -29,6 +29,18 @@ Usage: codebase-memory-mcp cli [--progress] [--json] <tool_name> [json_args]
 `index_repository` takes `repo_path` (required), `mode`, `persistence`, and `target_projects`.
 It takes **no name**: 0.8.1 always derives the project name from the resolved repo path, so a refresh reaches the recorded entry only when that entry's name is the derived one.
 This is why `fm_graph_reindex` passes the resolved path and then checks the `project` the response reports, instead of asserting the target with a flag that no longer exists.
+That check treats a response carrying no `project` as a failure, not as a pass: without the name there is no evidence the refresh reached the recorded entry, and a green line for an unverified landing is the same unearned reassurance the incident below is about.
+
+The derivation is a slug of the path, not a lookup of anything already recorded.
+Every character outside `[A-Za-z0-9._]` becomes a dash, runs of dashes collapse to one, and the ends are trimmed - so underscores, dots and case survive while a space, a quote, a plus or a tilde do not.
+
+```
+$ CBM_CACHE_DIR=/tmp/fm-slug-probe/cache codebase-memory-mcp cli index_repository '{"repo_path":"/tmp/fm-slug-probe/A_b+C d/e~f","mode":"fast","persistence":false}' 2>/dev/null | jq -r .project
+tmp-fm-slug-probe-A_b-C-d-e-f
+```
+
+`tests/graph-helpers.sh`'s stub derives its answer by that same rule.
+A stub that looked the path up in its own fixture instead would answer with the recorded name for a path the binary would slug differently, and so would report a landing the binary never performs.
 
 `list_projects` takes no arguments (`{}` and no argument behave identically) and, in 0.8.1, reports `name`, `root_path`, `nodes`, `edges`, and `size_bytes` per project - with **no `git` block**.
 `fm_graph_project_for_path` still accepts a match on `git.canonical_root` because an entry may carry one from another producer, but on 0.8.1 every match is on `root_path`.
@@ -82,6 +94,10 @@ $ CBM_CACHE_DIR=/tmp/probe-cache codebase-memory-mcp cli list_projects 2>/dev/nu
 
 `tests/fm-graph.test.sh`'s real-CLI cases set it to a directory under the test's own temp root, so running the suite never adds, refreshes, or deletes an entry in the graph the user works from.
 This is what makes it safe for the suite to drive the installed binary for real rather than only a stub.
+
+The suite asserts that isolation rather than resting on this record of it.
+`test_real_cli_refreshes_an_indexed_project` indexes its fixture under one throwaway cache and then reads a second, empty one, which must not see it.
+If a later binary renamed or dropped the variable, both reads would hit the one graph the user actually works from - which would by then hold a throwaway fixture pointing at a directory the suite is about to delete - and without the assertion the run would stay green while littering it once per run.
 
 ## Incident: the silent refresh, 2026-07-29 to 2026-08-09
 

@@ -52,6 +52,13 @@ run_reindex() {
     "$ROOT/bin/fm-graph-reindex.sh" "$arg" 2> "$home/stderr.log"
 }
 
+# derived_for <dir>: the project name the graph holds for <dir> - its resolved path,
+# slugged the way the binary slugs it (see fm_graph_derived_name). A happy-path
+# fixture must record THIS name and no other: the CLI derives the project from the
+# path it is handed, so an entry named anything else is one a refresh can never
+# land on, and a fixture that pretends otherwise tests a graph that cannot exist.
+derived_for() { fm_graph_derived_name "$(cd "$1" && pwd -P)"; }
+
 test_help_includes_entire_header() {
   local help
   help=$("$ROOT/bin/fm-graph-reindex.sh" --help 2>&1)
@@ -62,13 +69,14 @@ test_help_includes_entire_header() {
 # The happy path, plus the two invariants that make it safe: the refresh lands on
 # the recorded project (not a second, path-derived one) and persistence is false.
 test_refreshes_indexed_project() {
-  local home repo out log
+  local home repo out log name
   read -r home repo <<<"$(new_case)"
   log="$home/calls.log"
-  fm_graph_stub_projects "$home/projects.json" derived-graph-name "$repo"
+  name=$(derived_for "$repo")
+  fm_graph_stub_projects "$home/projects.json" "$name" "$repo"
   out=$(FM_STUB_PROJECTS="$home/projects.json" FM_STUB_LOG="$log" run_reindex "$home" "$repo")
   assert_contains "$out" "proj: graph refreshed" "a refreshed project must report on stdout"
-  assert_contains "$out" "project=derived-graph-name" "the refresh must name the graph's project, not the directory"
+  assert_contains "$out" "project=$name" "the refresh must name the graph's project, not the directory"
   assert_contains "$out" "mode=full" "full must be the default index mode"
   assert_contains "$out" "nodes=4321" "the refresh must report the node count it got back"
   assert_grep "index_repository" "$log" "an indexed project must be re-indexed"
@@ -85,7 +93,7 @@ test_arguments_are_one_json_object_not_flags() {
   local home repo log args
   read -r home repo <<<"$(new_case)"
   log="$home/calls.log"
-  fm_graph_stub_projects "$home/projects.json" json-proj "$repo"
+  fm_graph_stub_projects "$home/projects.json" "$(derived_for "$repo")" "$repo"
   FM_STUB_PROJECTS="$home/projects.json" FM_STUB_LOG="$log" run_reindex "$home" "$repo" >/dev/null
   assert_no_grep "index_repository --" "$log" "no graph call may pass a flag; 0.8.1 has no flag form"
   args=$(sed -n 's/^index_repository //p' "$log")
@@ -101,14 +109,15 @@ test_arguments_are_one_json_object_not_flags() {
 # A path holding a space (or a quote) must survive as data. jq builds the argument
 # for exactly this reason: concatenating one into a string would split or inject.
 test_path_with_space_is_passed_intact() {
-  local home repo out log args
+  local home repo out log args name
   home=$(mktemp -d "$TMP_ROOT/case.XXXXXX")
   repo="$home/projects/a proj \"quoted\""
   mkdir -p "$repo" "$home/config"
   log="$home/calls.log"
-  fm_graph_stub_projects "$home/projects.json" spaced-proj "$repo"
+  name=$(derived_for "$repo")
+  fm_graph_stub_projects "$home/projects.json" "$name" "$repo"
   out=$(FM_STUB_PROJECTS="$home/projects.json" FM_STUB_LOG="$log" run_reindex "$home" "$repo")
-  assert_contains "$out" "project=spaced-proj" "a path with a space must still resolve and refresh"
+  assert_contains "$out" "project=$name" "a path with a space must still resolve and refresh"
   args=$(sed -n 's/^index_repository //p' "$log")
   [ "$(printf '%s' "$args" | jq -r '.repo_path')" = "$(cd "$repo" && pwd -P)" ] \
     || fail "a spaced/quoted path must arrive whole, got: $args"
@@ -118,36 +127,68 @@ test_path_with_space_is_passed_intact() {
 # Non-JSON leading output (the real binary's mem.init log, a deprecation warning)
 # must be tolerated, not assumed away.
 test_tolerates_non_json_leading_output() {
-  local home repo out
+  local home repo out name
   read -r home repo <<<"$(new_case)"
-  fm_graph_stub_projects "$home/projects.json" noisy-proj "$repo"
+  name=$(derived_for "$repo")
+  fm_graph_stub_projects "$home/projects.json" "$name" "$repo"
   out=$(FM_STUB_PROJECTS="$home/projects.json" FM_STUB_NOISE=1 run_reindex "$home" "$repo")
-  assert_contains "$out" "project=noisy-proj" "leading non-JSON lines must not defeat the parser"
+  assert_contains "$out" "project=$name" "leading non-JSON lines must not defeat the parser"
   pass "fm-graph-reindex.sh: tolerates non-JSON leading output on stdout"
 }
 
-# The lookup keys on the resolved path, so a graph entry pinned to a canonical root
-# still matches when root_path names a worktree of it.
-test_matches_on_canonical_root() {
-  local home repo out
+# The lookup keys on the resolved path and accepts a match on git.canonical_root, so
+# an entry pinned to one is FOUND - and then cannot be refreshed, because the CLI
+# derives the project from the path it is handed rather than from the entry that
+# matched. This test says so out loud. It used to claim the refresh succeeded, which
+# was true only of the stub: the stub answered with the recorded name, while the real
+# binary would answer with the slug of the clone path and trip the mismatch guard.
+# The condition is latent on 0.8.1 (its list_projects carries no git block at all,
+# so nothing supplies a canonical_root), and closing it for good means not sending
+# the clone path in the first place - out of scope here, pinned here so it is visible.
+test_canonical_root_match_cannot_land_and_says_so() {
+  local home repo out code
   read -r home repo <<<"$(new_case)"
   fm_graph_stub_projects_canonical_only "$home/projects.json" canonical-proj "$repo"
-  out=$(FM_STUB_PROJECTS="$home/projects.json" run_reindex "$home" "$repo")
-  assert_contains "$out" "project=canonical-proj" "a canonical-root match must be found"
-  pass "fm-graph-reindex.sh: matches a project on its canonical root"
+  out=$(FM_STUB_PROJECTS="$home/projects.json" run_reindex "$home" "$repo"); code=$?
+  expect_code 0 "$code" "a canonical-root mismatch must not fail the caller"
+  [ -z "$out" ] || fail "a refresh that landed elsewhere must not claim success, got: $out"
+  assert_no_grep "not found in the graph" "$home/stderr.log" \
+    "the entry must still be FOUND; only the refresh cannot reach it"
+  assert_grep "graph refresh failed" "$home/stderr.log" "an unreachable entry must warn"
+  assert_grep "canonical-proj" "$home/stderr.log" "the warning must name the entry left stale"
+  assert_grep "$(derived_for "$repo")" "$home/stderr.log" \
+    "the warning must name the path-derived project the refresh actually wrote"
+  pass "fm-graph-reindex.sh: a canonical-root-only entry is found, and its refresh fails loudly"
 }
 
 # A bare project name resolves against the home's projects/ dir, like fleet sync's.
 test_resolves_bare_project_name() {
-  local home repo out
+  local home repo out name
   read -r home repo <<<"$(new_case)"
-  fm_graph_stub_projects "$home/projects.json" bare-proj "$repo"
+  name=$(derived_for "$repo")
+  fm_graph_stub_projects "$home/projects.json" "$name" "$repo"
   out=$(FM_STUB_PROJECTS="$home/projects.json" run_reindex "$home" proj)
-  assert_contains "$out" "project=bare-proj" "a bare <name> must resolve against projects/"
+  assert_contains "$out" "project=$name" "a bare <name> must resolve against projects/"
   pass "fm-graph-reindex.sh: resolves a bare project name against projects/"
 }
 
 # --- non-fatal failure paths ------------------------------------------------
+
+# fm_graph_note_error's contract is "silent unless FM_GRAPH_ERR_FILE names a
+# WRITABLE path", and the unwritable case is the only one the guard exists for.
+# Bash applies redirections left to right, so a `2>/dev/null` that follows the
+# output redirection cannot silence that redirection's own failure - the shell's
+# own "No such file or directory" then lands on fm-fleet-sync's stderr, which
+# firstmate relays to the user as a diagnostic nobody can act on.
+test_note_error_is_silent_when_the_file_is_unwritable() {
+  local home noise code
+  read -r home _ <<<"$(new_case)"
+  noise=$(FM_GRAPH_ERR_FILE="$home/no/such/dir/err" bash -c \
+    '. "$1/bin/fm-graph-lib.sh"; fm_graph_note_error boom' _ "$ROOT" 2>&1); code=$?
+  expect_code 0 "$code" "an unwritable error file must not fail its caller"
+  [ -z "$noise" ] || fail "an unwritable error file must produce no output, got: $noise"
+  pass "fm-graph-lib.sh: an unwritable FM_GRAPH_ERR_FILE stays silent, bash noise and all"
+}
 
 test_unindexed_project_is_skipped_not_indexed() {
   local home repo out code log
@@ -295,6 +336,25 @@ test_refresh_landing_on_another_project_fails_loudly() {
   pass "fm-graph-reindex.sh: a refresh that lands on another project is a named failure"
 }
 
+# The same guard from the other side, and the sharper case: a response that names NO
+# project proves nothing at all about where the refresh landed. Treating that as
+# success prints a green "graph refreshed" line asserting a landing nobody verified,
+# which is worse than the bare warning it replaced - it is this PR's own thesis
+# (a check that cannot detect its own failure) reproduced one layer down. 0.8.1
+# always reports the project, so this pins the contract against a binary that stops.
+test_refresh_without_a_project_fails_loudly() {
+  local home repo out code
+  read -r home repo <<<"$(new_case)"
+  fm_graph_stub_projects "$home/projects.json" "$(derived_for "$repo")" "$repo"
+  out=$(FM_STUB_PROJECTS="$home/projects.json" FM_STUB_INDEX_NO_PROJECT=1 \
+    run_reindex "$home" "$repo"); code=$?
+  expect_code 0 "$code" "an unverifiable refresh must not fail the caller"
+  [ -z "$out" ] || fail "an unverified landing must not print a green line, got: $out"
+  assert_grep "graph refresh failed" "$home/stderr.log" "an unverifiable refresh must warn"
+  assert_grep "no project" "$home/stderr.log" "the warning must say the CLI named no project"
+  pass "fm-graph-reindex.sh: a response naming no project is a failure, not a silent success"
+}
+
 test_non_indexed_status_fails_with_its_hint() {
   local home repo out code
   read -r home repo <<<"$(new_case)"
@@ -349,7 +409,7 @@ test_mode_from_config_file() {
   local home repo log
   read -r home repo <<<"$(new_case)"
   log="$home/calls.log"
-  fm_graph_stub_projects "$home/projects.json" moded-proj "$repo"
+  fm_graph_stub_projects "$home/projects.json" "$(derived_for "$repo")" "$repo"
   printf '# comment\nfast\n' > "$home/config/graph-reindex-mode"
   FM_STUB_PROJECTS="$home/projects.json" FM_STUB_LOG="$log" run_reindex "$home" "$repo" >/dev/null
   assert_grep '"mode":"fast"' "$log" "config/graph-reindex-mode must select the index mode"
@@ -360,7 +420,7 @@ test_env_overrides_config_mode() {
   local home repo log
   read -r home repo <<<"$(new_case)"
   log="$home/calls.log"
-  fm_graph_stub_projects "$home/projects.json" moded-proj "$repo"
+  fm_graph_stub_projects "$home/projects.json" "$(derived_for "$repo")" "$repo"
   printf 'fast\n' > "$home/config/graph-reindex-mode"
   FM_GRAPH_REINDEX_MODE=moderate FM_STUB_PROJECTS="$home/projects.json" FM_STUB_LOG="$log" \
     run_reindex "$home" "$repo" >/dev/null
@@ -372,7 +432,7 @@ test_unknown_mode_falls_back_to_full() {
   local home repo log
   read -r home repo <<<"$(new_case)"
   log="$home/calls.log"
-  fm_graph_stub_projects "$home/projects.json" moded-proj "$repo"
+  fm_graph_stub_projects "$home/projects.json" "$(derived_for "$repo")" "$repo"
   printf 'sideways\n' > "$home/config/graph-reindex-mode"
   FM_STUB_PROJECTS="$home/projects.json" FM_STUB_LOG="$log" run_reindex "$home" "$repo" >/dev/null
   assert_grep '"mode":"full"' "$log" "an unknown mode must fall back to full"
@@ -402,8 +462,10 @@ test_mode_off_disables_refresh() {
 #
 # CBM_CACHE_DIR points the binary's graph database at a throwaway dir under the
 # test's temp root, so a test run never adds, refreshes, or deletes an entry in the
-# graph the user actually works from. Verified: with it set, list_projects reports
-# only what this test indexed. Mode is fast because these fixtures are one file
+# graph the user actually works from. That isolation is the entire case for driving
+# the installed binary here, so test_real_cli_refreshes_an_indexed_project ASSERTS
+# it rather than recording it as verified once: a belief about a binary is exactly
+# what went stale on 2026-08-09. Mode is fast because these fixtures are one file
 # each and the mode knob is already pinned against the stub.
 
 # real_cli: echo the installed codebase-memory binary, or return 1.
@@ -420,6 +482,15 @@ real_cli() {
   fi
 }
 
+# real_roots <cli> <cache>: the root_path of every project the graph under <cache>
+# holds, one per line. Leading non-JSON output is dropped the same way
+# fm_graph_call drops it, because the real binary is chatty on stdout too.
+real_roots() {
+  CBM_CACHE_DIR="$2" "$1" cli list_projects 2>/dev/null \
+    | awk '/^[[:space:]]*[{[]/ { found = 1 } found { print }' \
+    | jq -r '.projects[]?.root_path // empty' 2>/dev/null
+}
+
 # real_case: fresh home whose project dir holds a SPACE, plus its own graph cache.
 # Echoes "<home>\t<repo>\t<cache>". The space is deliberate: it makes the real
 # binary the judge of whether the argument survived, rather than our own jq
@@ -429,7 +500,7 @@ real_case() {
   local home repo
   home=$(mktemp -d "$TMP_ROOT/real.XXXXXX")
   repo="$home/projects/a real proj"
-  mkdir -p "$repo" "$home/config" "$home/cache"
+  mkdir -p "$repo" "$home/config" "$home/cache" "$home/elsewhere-cache"
   fm_git_init_commit "$repo"
   printf 'def widget():\n    return 1\n' > "$repo/widget.py"
   git -C "$repo" add widget.py
@@ -456,6 +527,17 @@ test_real_cli_refreshes_an_indexed_project() {
     "the real CLI must accept what fm-graph-lib.sh builds$(printf '\n--- stderr ---\n')$(cat "$home/stderr.log")"
   assert_not_contains "$out" "nodes=unknown" "a real refresh must report the node count it got back"
   assert_no_grep "graph refresh failed" "$home/stderr.log" "a real refresh must not warn"
+  # The isolation this case rests on, asserted rather than believed. A second, empty
+  # cache must not see what the first indexed: if CBM_CACHE_DIR were ever ignored,
+  # both reads would hit the ONE graph the user actually works from - which would by
+  # then hold this throwaway fixture under a path that is about to be deleted - and
+  # the suite would go on reporting green while quietly littering it, once per run.
+  # Both halves matter: the positive read proves the check is not vacuously passing
+  # on a binary that reports nothing at all.
+  assert_contains "$(real_roots "$cli" "$cache")" "$repo" \
+    "the isolated cache must hold the fixture this case just indexed"
+  assert_not_contains "$(real_roots "$cli" "$home/elsewhere-cache")" "$repo" \
+    "CBM_CACHE_DIR must isolate the graph; a fresh cache seeing the fixture means test runs write to the user's own graph"
   pass "fm-graph-lib.sh: the real codebase-memory CLI accepts the invocation we build"
 }
 
@@ -481,8 +563,9 @@ test_refreshes_indexed_project
 test_arguments_are_one_json_object_not_flags
 test_path_with_space_is_passed_intact
 test_tolerates_non_json_leading_output
-test_matches_on_canonical_root
+test_canonical_root_match_cannot_land_and_says_so
 test_resolves_bare_project_name
+test_note_error_is_silent_when_the_file_is_unwritable
 test_unindexed_project_is_skipped_not_indexed
 test_missing_binary_is_non_fatal
 test_missing_jq_is_non_fatal
@@ -491,6 +574,7 @@ test_lookup_error_is_non_fatal_and_named
 test_index_error_is_non_fatal_and_names_its_cause
 test_rejected_arguments_are_reported_verbatim
 test_refresh_landing_on_another_project_fails_loudly
+test_refresh_without_a_project_fails_loudly
 test_non_indexed_status_fails_with_its_hint
 test_garbage_payload_is_non_fatal
 test_hung_cli_is_bounded
