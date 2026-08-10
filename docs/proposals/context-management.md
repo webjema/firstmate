@@ -8,7 +8,7 @@ Harness posture: full stack on Claude/Agent-SDK, a bounded-tools-plus-reset floo
 ## 1. What this is
 
 A long-running firstmate session accumulates context the same way any agent does: every wake, pane peek, crew-state read, review diff, and fleet snapshot adds tokens, and a supervising session lives for hours across many tasks.
-Crews carry even more risk per session, because they do the heavy reads, run `/code-review`, `/verify`, and full test suites, and today get zero context guidance in their brief.
+Crews carry even more risk per session, because they do the heavy reads, run their own diff review, end-to-end exercise, and full test suites, and today get zero context guidance in their brief.
 Left alone, both drift toward the window limit, and the harness falls back to lossy auto-compaction that keeps what it guesses is important rather than what firstmate chose.
 
 This proposal makes context reset a routine, lossless, first-class operation rather than a crash-only event.

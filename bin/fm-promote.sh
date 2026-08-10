@@ -6,6 +6,11 @@
 # (inventory scratch state, reset to a clean default-branch base, carry over only
 # intended fix changes, create branch fm/<task-id>, implement, then report done
 # according to the project's delivery mode).
+# The scout brief carries no ship review gate and is never regenerated on promotion,
+# so those instructions must carry it themselves: an independent review of the diff
+# and a `reviewed by: <mechanism> - <what it found>` report. Without it a promoted crew
+# cannot satisfy the rule in AGENTS.md's "Review and ship" and would be bounced forever.
+# bin/fm-brief.sh's header owns why the gate names no command.
 # Usage: fm-promote.sh <task-id>
 set -eu
 
@@ -26,4 +31,4 @@ mv "$TMP" "$META"
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship (teardown protection restored)"
-echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
+echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; get an INDEPENDENT review of your diff by whatever mechanism your harness provides (a review subagent over the diff always works) and fix what it finds; report done with \"reviewed by: <mechanism> - <what it found>\">'"

@@ -27,16 +27,33 @@
 # with needs-decision rather than quietly working against it.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see AGENTS.md task lifecycle):
-#   PR          implement -> /code-review + /verify -> push the branch, open NO PR ->
-#               report `review-ready: branch fm/<id> pushed, no PR` and STOP (default).
+#   PR          implement -> independent review + end-to-end exercise -> push the branch,
+#               open NO PR -> report
+#               `review-ready: branch fm/<id> pushed, no PR - reviewed by: <mechanism> -
+#               <what it found>` and STOP (default).
 #               Firstmate reviews the pushed branch against the direction; findings are
 #               fixed in place and re-signalled `review-ready:`, and only an approval opens
 #               the PR (plain gh) with `done: PR <url>`. The review gate sits BEFORE the PR so
-#               a finding costs one fix, not a re-review plus a re-run of the crew's verify and
-#               full suite and the PR's CI - the largest source of rework measured in the fleet.
+#               a finding costs one fix, not a re-review plus a re-run of the crew's end-to-end
+#               exercise and full suite and the PR's CI - the largest source of rework measured
+#               in the fleet.
 #               The push still happens, so the work is durable against a box reboot.
-#   local-only  implement on branch, stop and report "ready in branch" (no push/PR);
+#   local-only  implement on branch, stop and report
+#               `done: ready in branch fm/<id> - reviewed by: <mechanism> - <what it found>`
+#               (no push/PR);
 #               firstmate reviews, user approves, firstmate merges to local main
+# Both modes require an INDEPENDENT review of the diff and name no command to get one.
+# Naming one is unsafe in two directions: a harness may refuse to let an agent invoke its
+# review command (Claude Code's built-in `/code-review` and `/verify` are both
+# disable-model-invocation, i.e. runnable only in a turn a human typed them in, which a
+# crewmate never has), and a same-named command from another source may review a different
+# artifact (an already-open PR rather than the working diff). The scaffold therefore demands
+# the OUTCOME - a fresh reader over the diff - and makes the crew report BOTH the mechanism and
+# what the review found, on the status line it already writes. The outcome half is what makes
+# the claim checkable: firstmate reads the same diff independently, so "no findings" on a diff
+# with obvious defects is the tell that no review ran. A mechanism alone is unfalsifiable.
+# The gate is built once by review_gate() and interpolated into both DODs, because two copies
+# of one contract drift the moment only one is edited.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge - but they still
 # carry the direction, because a recommendation that ignores it is worthless.
@@ -292,6 +309,25 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# The review gate is identical in both delivery modes, so it is built once here and
+# interpolated into each DOD rather than written twice: two copies drift the moment
+# only one is edited. Only the line the crew reports it on differs, so that is the
+# single parameter. $REPORT_LINE names it (a `review-ready:` or a `done:` line).
+review_gate() {
+  local report_line=$1
+  cat <<EOF
+2. Obtain an INDEPENDENT code review of your diff and fix what it finds.
+   Do not assume any particular review command exists. This brief deliberately names none: firstmate cannot know which commands your harness exposes, some harnesses refuse to let an agent invoke its review command at all, and a command that shares a name across harnesses can review a different artifact than your working diff.
+   Use whatever your harness actually provides. A review subagent handed your diff works on every harness and is always an acceptable choice.
+   It must be a fresh reader over the diff, not you re-reading your own work.
+   **Report the review on your $report_line, as \`reviewed by: <mechanism> - <what it found>\`.** Name the mechanism, then say what came back: the findings you acted on, or \`no findings\` if it genuinely returned none.
+   Naming a mechanism but no outcome does not count: firstmate reads the same diff independently, and a review that found nothing worth reporting on a diff with obvious defects is how it detects a review that never ran. Reporting nothing at all means the review did not happen and firstmate will send it back.
+   Fix the real findings yourself. A finding that turns on a human judgment call - a product choice, a destructive or irreversible action, a security trade-off - is NOT yours to decide: escalate it under rule 6 and stop.
+3. Exercise the change end-to-end - drive the affected flow in the real app, not just the tests.
+   Do not assume a named command for this either; use whatever your harness provides.
+EOF
+}
+
 case "$MODE" in
   local-only)
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
@@ -301,11 +337,10 @@ This project ships **local-only**: no remote, no PR.
 
 1. Implement the change and commit it on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
    Run the tests your change AFFECTS as you go. Run the project's FULL suite EXACTLY ONCE, at the end, before step 6 - not after every edit.
-2. Run \`/code-review\` and address what it finds. Fix the real findings; a finding that is a human judgment call is not yours to decide - escalate it under rule 6.
-3. Run \`/verify\` to exercise the change end-to-end - drive the affected flow in the real app, not just the tests.
+$(review_gate "\`done:\` line at step 6")
 4. Direction check: in one line, state how this change honors the Direction above. If it moves against the direction, stop and escalate under rule 6 instead of shipping it.
 5. Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-6. Append \`done: ready in branch fm/$ID\` to the status file and stop.
+6. Append \`done: ready in branch fm/$ID - reviewed by: {mechanism} - {what it found}\` to the status file and stop, filling in both halves from step 2.
 
 Firstmate then reviews your branch diff against the project's direction, the user approves, and firstmate merges it into local \`main\`.
 EOF
@@ -320,17 +355,16 @@ Firstmate reviews your pushed branch BEFORE any PR exists, so its findings cost 
 
 1. Implement the change and commit it on your branch.
    Run the tests your change AFFECTS as you go. Run the project's FULL suite EXACTLY ONCE, at the end, before step 6 - not after every edit. Re-running the whole suite per edit was the single biggest time sink measured in this fleet.
-2. Run \`/code-review\` and address what it finds.
-   Fix the real findings yourself. A finding that turns on a human judgment call - a product choice, a destructive or irreversible action, a security trade-off - is NOT yours to decide: escalate it under rule 6 and stop.
-3. Run \`/verify\` to exercise the change end-to-end - drive the affected flow in the real app, not just the tests.
+$(review_gate "\`review-ready:\` line at step 6, and again in the PR body at step 7")
+   **State in the PR body how you exercised it.**
 4. Satisfy the project's quality hooks. They run automatically on commit and push (secret scan, lint, typecheck, tests). A blocked commit or push means the gate caught something real; fix the cause, never work around the gate.
 5. Direction check: in one line, state how this change honors the Direction above.
    If the task as specified would move AGAINST the direction, do not quietly implement it - escalate under rule 6.
 6. **Push your branch. Open NO PR.** The push makes your work durable; the PR would only make firstmate's review expensive to act on.
-   Append \`review-ready: branch fm/$ID pushed, no PR\` to the status file and STOP. Firstmate now reviews your diff against the direction.
+   Append \`review-ready: branch fm/$ID pushed, no PR - reviewed by: {mechanism} - {what it found}\` to the status file and STOP, filling in both halves from step 2. Firstmate now reviews your diff against the direction.
 7. Firstmate replies with one of two things:
-   - **Findings.** Fix them IN PLACE on the same branch, push again, and append \`review-ready:\` again. Repeat until firstmate approves. No PR exists yet, so there is nothing to churn.
-   - **Approval.** Open the PR with plain \`gh\` (\`gh pr create\`), append \`done: PR {url}\` to the status file, and stop.
+   - **Findings.** Fix them IN PLACE on the same branch, push again, and append \`review-ready:\` again, reporting the review of what you changed this round. Repeat until firstmate approves. No PR exists yet, so there is nothing to churn.
+   - **Approval.** Open the PR with plain \`gh\` (\`gh pr create\`), stating in the body how you reviewed and exercised the change, append \`done: PR {url}\` to the status file, and stop.
 
 Do NOT merge the PR, and do not wait for CI yourself. Firstmate watches CI; the user merges.
 Once the PR is open your work is on the remote, so firstmate releases your worktree at that point - finish step 7 and stop cleanly.

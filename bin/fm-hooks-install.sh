@@ -2,8 +2,9 @@
 # Ensure a project worktree has a mechanical quality floor: Claude Code hooks that
 # enforce secret-scanning, lint, typecheck, and tests without an agent's cooperation.
 # Hooks are the floor that cannot be talked out of it. The judgment layer on top of
-# them is the crewmate's own /code-review pass and firstmate's independent,
-# direction-aware review of the diff before it reaches the user.
+# them is the crewmate's own independent review of its diff and firstmate's independent,
+# direction-aware review of the diff before it reaches the user. The crewmate's review
+# names no command by design; bin/fm-brief.sh's header owns why.
 #
 # This is a worktree utility for crewmates, not a supervision script, so it does not
 # call fm-guard.sh, and firstmate never runs it against a project clone itself:
