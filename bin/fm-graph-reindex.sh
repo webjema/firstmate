@@ -14,6 +14,13 @@
 # warns on stderr and is otherwise silent, so a session-start fleet refresh (which
 # relays stdout) stays quiet unless something actually happened.
 #
+# EVERY FAILURE NAMES ITS CAUSE, quoting the CLI's own words. This is not polish:
+# for a fortnight a refresh that could never succeed - the CLI had changed its
+# argument surface out from under bin/fm-graph-lib.sh - printed only "graph refresh
+# failed", and a non-fatal warning nobody can act on is indistinguishable from
+# noise. A warning that says what broke is what makes the next such change land in
+# minutes rather than a fortnight; docs/graph-cli-backend.md records that incident.
+#
 # ONLY REFRESHES PROJECTS THE GRAPH ALREADY HOLDS. A project the graph does not
 # know is skipped, never indexed: a first index of a large repo is slow, and
 # choosing to index a project is a decision, not a side effect of a merge. Index
@@ -74,13 +81,35 @@ if ! fm_graph_cli >/dev/null; then
   exit 0
 fi
 
-if ! NAME=$(fm_graph_project_for_path "$DIR"); then
+# The helpers run inside command substitutions, so the cause of a failure comes
+# back through this file rather than a variable the subshell would take with it.
+# Set up before the first call and read after each one; see fm_graph_note_error.
+ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-graph-reindex.XXXXXX") || ERR_FILE=
+FM_GRAPH_ERR_FILE="$ERR_FILE"
+trap '[ -z "${ERR_FILE:-}" ] || rm -f "$ERR_FILE"' EXIT
+
+# cause: the CLI's own account of the last failure, or a stand-in when it said
+# nothing. Always non-empty, so a warning never trails off into a bare colon.
+cause() {
+  local text=
+  [ -z "${ERR_FILE:-}" ] || text=$(cat "$ERR_FILE" 2>/dev/null) || text=
+  printf '%s\n' "${text:-no cause reported}"
+}
+
+LOOKUP=0
+NAME=$(fm_graph_project_for_path "$DIR") || LOOKUP=$?
+if [ "$LOOKUP" -eq 2 ]; then
+  # Distinct from "not indexed" on purpose: telling someone to index a project
+  # they already indexed is what a broken CLI looks like when it is misdiagnosed.
+  echo "$LABEL: graph skipped: could not read the graph's project list: $(cause)" >&2
+  exit 0
+elif [ "$LOOKUP" -ne 0 ]; then
   echo "$LABEL: graph skipped: not found in the graph (index it once to opt in to refreshes)" >&2
   exit 0
 fi
 
 if ! NODES=$(fm_graph_reindex "$DIR" "$NAME"); then
-  echo "$LABEL: graph refresh failed for project '$NAME' (mode=$MODE); graph may be stale" >&2
+  echo "$LABEL: graph refresh failed for project '$NAME' (mode=$MODE): $(cause); graph may be stale" >&2
   exit 0
 fi
 

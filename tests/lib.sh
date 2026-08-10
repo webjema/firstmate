@@ -61,6 +61,12 @@ fm_test_cleanup() {
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
+  # PHYSICALLY RESOLVED, because production code resolves the paths it is handed
+  # (`cd ... && pwd -P`) and a fixture path that does not match its own resolution
+  # is a fake failure. On macOS TMPDIR is /var/folders/..., a symlink into
+  # /private/var/folders/..., which silently broke every knowledge-graph fixture
+  # that compared a recorded path against a resolved one.
+  root=$(cd "$root" && pwd -P)
   if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
     trap fm_test_cleanup EXIT
   fi
