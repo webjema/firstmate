@@ -125,8 +125,8 @@ test_pr_dod_carries_the_review_contract() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-dod-b2 pr-proj >/dev/null 2>&1
   brief="$home/data/brief-dod-b2/brief.md"
 
-  assert_grep '/code-review' "$brief" "PR DOD lost the self-review step"
-  assert_grep '/verify' "$brief" "PR DOD lost the end-to-end verify step"
+  # The review and end-to-end steps are owned by test_review_gate_is_obtainable_and_disclosed,
+  # which covers both delivery modes; asserting them here too would fail twice for one cause.
   assert_grep "Do NOT merge the PR" "$brief" "PR DOD lost the never-merge rule"
   assert_grep "never work around the gate" "$brief" "PR DOD lost the do-not-bypass-hooks rule"
   assert_grep "# Quality floor" "$brief" "ship brief lost the quality-floor section"
@@ -134,6 +134,107 @@ test_pr_dod_carries_the_review_contract() {
   # A judgment call is the user's, not the crew's, even mid-review.
   assert_grep "is NOT yours to decide" "$brief" "PR DOD lost the escalate-judgment-calls rule"
   pass "fm-brief.sh: the PR definition of done carries the full review contract"
+}
+
+# The review gate must be obtainable on the harness the crew actually runs on, and
+# must be disclosed. The scaffold used to name `/code-review` and `/verify`; both are
+# Claude Code built-ins marked disable-model-invocation, so a claude crewmate cannot
+# invoke either (verified by execution: `Skill(code-review)` and `Skill(verify)` are
+# both refused with reason `disable_model_invocation`). Naming a command is unsafe in
+# the other direction too: a same-named command from another source can review a
+# different artifact (an already-open PR rather than the working diff).
+#
+# So the scaffold must name NO review command and must instead force the crew to
+# report the mechanism it used. The two DOD branches are separate heredocs, so a test
+# that only covers PR mode would leave half the defect in place - both are asserted here.
+test_review_gate_is_obtainable_and_disclosed() {
+  local home brief proj id
+  home="$TMP_ROOT/review-gate-home"
+  write_registry "$home"
+
+  for id_proj in "brief-gate-pr:pr-proj" "brief-gate-local:local-proj"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+
+    # The gate itself: a real, independent review of the diff, not a re-read.
+    assert_grep 'INDEPENDENT code review of your diff' "$brief" \
+      "$id: DOD lost the independent-review requirement"
+    assert_grep 'fresh reader over the diff' "$brief" \
+      "$id: DOD lost the not-your-own-re-read requirement"
+    assert_grep 'review subagent' "$brief" \
+      "$id: DOD lost the works-on-every-harness fallback mechanism"
+    assert_grep 'Exercise the change end-to-end' "$brief" \
+      "$id: DOD lost the end-to-end exercise step"
+
+    # The disclosure half is load-bearing: without it an un-run review passes as clean.
+    # It has two halves and BOTH are required. A mechanism alone is unfalsifiable - a crew
+    # that skipped the review writes the same "review subagent" as one that ran it, and the
+    # brief itself supplies that answer two lines earlier. The outcome half is what firstmate
+    # can cross-check, because it reads the same diff independently.
+    assert_grep 'reviewed by: <mechanism> - <what it found>' "$brief" \
+      "$id: DOD lost the mechanism-plus-outcome disclosure format"
+    assert_grep 'no findings' "$brief" \
+      "$id: DOD lost the explicit empty-result form, leaving 'found nothing' indistinguishable from 'did not run'"
+    assert_grep 'reviewed by: {mechanism} - {what it found}' "$brief" \
+      "$id: the step 6 report line lost its fill-in-both-halves template"
+
+    # No un-runnable command may be named. `code-review` is asserted bare, not as
+    # `/code-review`, so swapping to codex's `$code-review` sigil cannot pass either;
+    # the cost is that the hyphenated English phrase is banned too, which the failure
+    # message says out loud. `verify` cannot get the same treatment - it is an ordinary
+    # English word the brief may legitimately use - so only its command form is banned.
+    assert_no_grep 'code-review' "$brief" \
+      "$id: DOD contains the string 'code-review' - the command is un-runnable, and the bare hyphenated word is banned with it"
+    assert_no_grep '/verify' "$brief" "$id: DOD still names the un-runnable /verify"
+  done
+  pass "fm-brief.sh: both DOD modes demand an obtainable, disclosed review and name no command"
+}
+
+# The rationale for naming no command is identical in both modes, so it is built once by
+# review_gate() and interpolated twice. This pins that: if someone re-inlines it into the two
+# heredocs, the copies drift and one mode silently keeps the old contract. Comparing the two
+# generated briefs' step 2/3 blocks catches that without asserting on the wording itself.
+test_review_gate_is_identical_in_both_modes() {
+  local home pr_gate local_gate
+  home="$TMP_ROOT/gate-shared-home"
+  write_registry "$home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-shared-pr pr-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-shared-local local-proj >/dev/null 2>&1
+
+  # Steps 2 and 3 inclusive: from the review step up to (not including) the next numbered step.
+  pr_gate=$(sed -n '/^2\. Obtain an INDEPENDENT/,/^4\./p' "$home/data/brief-shared-pr/brief.md" | sed '$d')
+  local_gate=$(sed -n '/^2\. Obtain an INDEPENDENT/,/^4\./p' "$home/data/brief-shared-local/brief.md" | sed '$d')
+
+  [ -n "$pr_gate" ] || fail "PR brief has no step 2 review gate to compare"
+  [ -n "$local_gate" ] || fail "local-only brief has no step 2 review gate to compare"
+
+  # Exactly two lines are allowed to differ, and both are checked here rather than
+  # skipped: the report-line sentence (review_gate()'s single parameter) and the
+  # PR-body exercise disclosure (PR mode only - local-only has no PR body to state
+  # it in). Everything else must be byte-identical, which is what catches a fix
+  # applied to one heredoc and not the other.
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  case "$pr_gate" in
+    *'**Report the review on your `review-ready:` line at step 6, and again in the PR body at step 7,'*) ;;
+    *) fail "PR gate lost its report-line parameter" ;;
+  esac
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  case "$local_gate" in
+    *'**Report the review on your `done:` line at step 6,'*) ;;
+    *) fail "local-only gate lost its report-line parameter" ;;
+  esac
+  case "$pr_gate" in
+    *'**State in the PR body how you exercised it.**'*) ;;
+    *) fail "PR gate lost the PR-body exercise disclosure" ;;
+  esac
+
+  pr_gate=$(printf '%s\n' "$pr_gate" | grep -v '\*\*Report the review on your\|\*\*State in the PR body how you exercised it\.\*\*')
+  local_gate=$(printf '%s\n' "$local_gate" | grep -v '\*\*Report the review on your')
+  [ "$pr_gate" = "$local_gate" ] || fail "review gate drifted between modes:
+$(diff <(printf '%s\n' "$pr_gate") <(printf '%s\n' "$local_gate") || true)"
+  pass "fm-brief.sh: the review gate does not drift between the two delivery modes"
 }
 
 # The GitHub tooling rule: gh-axi is for reads only, mutations (the PR open
@@ -479,6 +580,8 @@ test_context_discipline_in_ship_and_scout
 test_ship_modes_generate_clean_briefs
 test_legacy_mode_token_maps_to_pr
 test_pr_dod_carries_the_review_contract
+test_review_gate_is_obtainable_and_disclosed
+test_review_gate_is_identical_in_both_modes
 test_briefs_carry_the_github_tooling_split
 test_direction_is_injected_into_ship_and_scout
 test_absent_direction_is_explicit_not_silent

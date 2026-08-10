@@ -145,8 +145,9 @@ After any merge you perform without asking, post a one-line "merged <full PR URL
 Crewmates run it inside their worktree and commit the result; firstmate never installs hooks into a clone itself.
 A blocked commit or push means the floor did its job - never steer a crewmate around a hook.
 
-**The judgment layer** is review: the crewmate's own `/code-review` and `/verify`, then firstmate's independent, direction-aware review of the pushed branch (section 6).
+**The judgment layer** is review: the crewmate's own independent review of its diff and its end-to-end exercise of the change, then firstmate's independent, direction-aware review of the pushed branch (section 6).
 The crew does not mark its own homework.
+The scaffold names no command for either step and makes the crew name the mechanism it used instead; `bin/fm-brief.sh`'s header owns why.
 
 **Tending** is keeping quality from decaying over time, a bounded slice at a time.
 When the user invokes `/code-shape`, load that skill: it asks the review ledger (`bin/fm-review-ledger.sh`) for the next codebase slice - preferring recently-changed code, else never-reviewed code, never re-reviewing an unchanged slice - and ships one direct-fix crew scoped to it for duplication, dead code, testability, and comment hygiene.
@@ -237,8 +238,10 @@ Add ship and scout tasks to `data/backlog.md` under In flight; a secondmate spaw
 
 ### Review and ship
 
-A ship crewmate pushes its branch and reports `review-ready:` (mode `PR`) or `done: ready in branch fm/<id>` (`local-only`).
-**Your review is independent of the crew's own `/code-review`, `/verify`, and hook run, not a rubber stamp for them.**
+A ship crewmate pushes its branch and reports `review-ready:` (mode `PR`) or `done: ready in branch fm/<id>` (`local-only`), each carrying `reviewed by: <mechanism> - <what it found>`.
+**Your review is independent of the crew's own review, its end-to-end exercise, and the hook run, not a rubber stamp for them.**
+A report missing that clause means the crew never got a review: send it back rather than reviewing on top of a gate that did not run.
+Judge the outcome half against the diff you are about to read anyway - "no findings" on a diff with obvious defects is how an un-run review gives itself away.
 
 1. Read the diff with `bin/fm-review-diff.sh <id>` (summary first, then `--full` or `--files <path>`) - never a raw `git diff`, which can be stale.
 2. Review it against the project's direction (section 5, gate 4). Mechanical quality is the hooks' and CI's job; you are looking for drift, wrong-shaped solutions, and scope creep.

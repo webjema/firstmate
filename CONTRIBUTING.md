@@ -3,7 +3,8 @@
 Thanks for wanting to contribute.
 
 This fork ships changes through an ordinary pull request, gated by CI and by review.
-There is no separate validation pipeline to install: the quality gate is Claude Code hooks, the built-in `/code-review` skill, and the CI workflow in `.github/workflows/ci.yml`.
+There is no separate validation pipeline to install: the quality gate is Claude Code hooks, an independent review of the diff, and the CI workflow in `.github/workflows/ci.yml`.
+An agent contributor cannot invoke Claude Code's built-in `/code-review` or `/verify` and must obtain that review another way, such as a review subagent over the diff; `bin/fm-brief.sh`'s header owns why.
 
 ## Workflow
 
