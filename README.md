@@ -186,6 +186,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the files you set, and harness support.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for a wedged away-mode escalation delivery.
 - [docs/pr-block-signal.md](docs/pr-block-signal.md) - how a blocking review verdict is marked on an open PR so it reaches whoever clicks merge, with the incident and verification record behind it.
+- [docs/graph-cli-backend.md](docs/graph-cli-backend.md) - verified surface of the optional codebase-memory knowledge-graph CLI, how a failed refresh names its cause, and the silent-staleness incident behind both.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - setup guide for the tmux reference backend: prerequisites, attaching, and watching crew windows.
 - [docs/treehouse-backend.md](docs/treehouse-backend.md) - verified treehouse worktree-pool behavior: why repo-level `treehouse.toml` hooks are ignored, what a returned slot keeps, and why APFS clone savings are invisible to `du`.
 - [docs/herdr-backend.md](docs/herdr-backend.md) - setup guide for the experimental herdr backend, plus its verification notes and known gaps.

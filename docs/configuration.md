@@ -83,7 +83,10 @@ An unrecognized value warns and falls back to `full`.
 Both halves need `jq` and a `timeout` binary (`timeout`, else macOS's `gtimeout`) alongside the `codebase-memory` CLI; every graph call is bounded, so a call that cannot be bounded is not made and the graph simply counts as unavailable.
 The session-start clone refresh runs fleet sync under its own aggregate timeout (see the bootstrap fleet-sync section), and that timeout is a process-group kill, so a refresh that does not fit the window dies with its parent rather than outliving the session-start step; the index stays stale until the next sync of that clone.
 
-Firstmate never passes `--persistence true`, which would write `.codebase-memory/graph.db.zst` into a project clone firstmate must not modify.
+Firstmate never passes `"persistence": true`, which would write `.codebase-memory/graph.db.zst` into a project clone firstmate must not modify.
+
+A refresh that fails is still best-effort, but it is never silent: the warning quotes the CLI's own diagnostic, so a surface change reads as a surface change rather than as noise.
+[`docs/graph-cli-backend.md`](graph-cli-backend.md) is the verification record for the CLI surface firstmate builds against, and the procedure for re-verifying it after a binary update.
 
 ## Per-project local env files (config/project-env/)
 
