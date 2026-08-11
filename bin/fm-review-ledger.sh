@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# The coverage ledger that lets a tending pass (/code-shape, /docs-sync) review a
-# project a bounded slice at a time instead of all at once, and never re-review a
-# slice that has not moved since its last clean pass.
+# The coverage ledger that lets the /docs-sync tending pass review a project a
+# bounded slice at a time instead of all at once, and never re-review a slice that
+# has not moved since its last clean pass.
+#
+# /code-shape used this too until 2026-08-11. It stopped because selection here
+# never reached the code that mattered - it covered the twelve smallest units of a
+# project and none of the four biggest. Read the "What selection got wrong"
+# section of docs/review-ledger.md before reusing this for a third track; all
+# three causes are still live for the docs track.
 # Ledgers live at data/reviews/<project>/<track>.md under the active firstmate
 # home, one row per reviewed unit (the unit, the commit it was reviewed at, the
 # date, and a one-line verdict). They are firstmate-private (data/ is gitignored),

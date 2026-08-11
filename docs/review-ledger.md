@@ -1,6 +1,7 @@
 # The review ledger
 
-`bin/fm-review-ledger.sh` is the coverage ledger both tending skills stand on: `/code-shape` and `/docs-sync`.
+`bin/fm-review-ledger.sh` is the coverage ledger `/docs-sync` stands on.
+`/code-shape` used it too until 2026-08-11 and no longer does: its window is now the PRs merged since the last recorded metrics row, so coverage falls out of the fact that every line enters through a PR, and no slice ledger is needed. What that pass found wrong with slice selection is worth knowing before reusing this for a third track - see the note at the end.
 It exists to make "review a project a bounded slice at a time, track what was reviewed, and never re-review an unchanged slice" a mechanism rather than a judgment the agent has to re-derive every pass.
 The script header and `--help` own the exact verbs, flags, paths, and file format; this doc narrates the mechanism and the reasoning, the way `docs/architecture.md` narrates the watcher.
 
@@ -50,3 +51,15 @@ A skill records each unit at the merge commit after its fix lands, so the review
 `status` prints per-unit coverage and flags any ledger row whose unit no longer exists as `ORPHAN`, so a renamed or deleted directory does not rot the ledger unnoticed.
 
 The ledgers live under `data/reviews/<project>/`, gitignored like the rest of `data/`, because what firstmate has reviewed for the user is the user's operational record, not the project's.
+
+## What selection got wrong - still live for the `docs` track
+
+`/code-shape` stopped using this ledger because in a year of use it never once reached the code that mattered. Measured on optiroq 2026-08-10: 16 units reviewed, 13 verdicts `clean`, and the twelve *smallest* units in the project were all covered while `api` (27x the budget), `packages` (32x), `allma-steps` (23x) and `features` (20x) had never been looked at. Of the two over-budget units that ever got through, both produced a real fix; of the fourteen within budget, one did.
+
+Three mechanisms produced that, and **`/docs-sync` still stands on all three**:
+
+1. **Never-reviewed is last, not second.** This doc said tier 2 above; the code emits `changed`=1, `expired`=2, `never`=3. Tier 1 is "already reviewed and has since changed", which in a live repo is never empty - so reviewing a unit promotes it ahead of everything unreviewed, permanently.
+2. **The budget fill is a smallest-first knapsack.** `cmd_select` uses `continue`, not `break`: after the first pick it keeps scanning and collects whatever still fits under the cap. Anything large is skipped on every pass forever.
+3. **A unit larger than the whole cap is handed to the crew flagged `OVERSIZED` with "sub-scope it"** - a vague instruction at exactly the moment the slice is hardest.
+
+The fix, if this is ever reused for a third track: split an over-cap unit into its children recursively so no unit is ever oversized, drain the never-reviewed backlog before re-offering covered ground, and turn that `continue` into a `break`. None of it is done - the `docs` track is running on the ledger as described in the rest of this file.

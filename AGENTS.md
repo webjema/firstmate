@@ -149,8 +149,8 @@ A blocked commit or push means the floor did its job - never steer a crewmate ar
 The crew does not mark its own homework.
 The scaffold names no command for either step and makes the crew name the mechanism it used instead; `bin/fm-brief.sh`'s header owns why.
 
-**Tending** is keeping quality from decaying over time, a bounded slice at a time.
-When the user invokes `/code-shape`, load that skill: it asks the review ledger (`bin/fm-review-ledger.sh`) for the next codebase slice - preferring recently-changed code, else never-reviewed code, never re-reviewing an unchanged slice - and ships one direct-fix crew scoped to it for duplication, dead code, testability, and comment hygiene.
+**Tending** is keeping quality from decaying over time.
+When the user invokes `/code-shape`, load that skill: it records the project's drift metrics (`bin/fm-code-metrics.sh`), sweeps the PRs merged since the last pass for conformance to the architecture the project states, and scouts a capped report that classifies each finding by what would prevent the next one - a check to mechanize, a concern to judge, or a number to watch. The checks it proposes ship as a separate task on the captain's word; the pass itself opens no PR.
 When the user invokes `/docs-sync`, load that skill: it tends the same ledger's `docs` track, shipping a crew to reconcile docs against code, PRs, and commits, then firstmate reconciles Asana with every write captain-confirmed.
 
 ### Project memory
