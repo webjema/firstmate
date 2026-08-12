@@ -5,6 +5,10 @@ Home: `/home/webjema/tools/firstmate` (primary), Claude Code primary harness.
 Transcript: `~/.claude/projects/-home-webjema-tools-firstmate/9746b898-b28f-4118-8a2e-3f174f2d63f6.jsonl`.
 Scripts at fault: `bin/fm-watch-arm.sh`, with `bin/fm-watch.sh` as an amplifier.
 
+This incident is not closed.
+It has recurred twice: 2026-07-31 (the arming marker had no owner) and 2026-08-12 (the one-arm-per-home fix's own stand-down exit).
+Read the Fix section below together with both recurrences, because a line in that fix is what caused the second one.
+
 ## Symptom
 
 The session looped on information-free turns every 3 to 9 seconds, indefinitely, with no crew doing anything:
@@ -95,6 +99,8 @@ The contract is now stated in `bin/fm-watch-arm.sh`'s header and enforced there:
 - A watcher that ends with nothing to report is relaunched IN PLACE, with exponential backoff (`FM_ARM_BACKOFF_MAX`) and a churn budget (`FM_ARM_RELAUNCH_MAX` quiet exits inside `FM_ARM_CHURN_WINDOW`), and the arm stays live.
 - Churn is recorded in `state/.watch-arm.log` (`FM_ARM_LOG_MAX` lines) so a bounded failure can be investigated after the fact instead of re-run to reproduce.
 - One arm per home: a second arm reports `already armed pid=<pid>` and exits instead of attaching to a live cycle, so a wake can never fan out into N notifications.
+  **This line is what caused the 2026-08-12 recurrence below.**
+  It is left here as written, because the sentence and its consequence are the point.
 - `--restart` identifies this home's incumbent arm BEFORE claiming the marker, then stops the arm first and the watcher second; a surviving arm would otherwise relaunch the watcher the restart just stopped.
 - `bin/fm-watch.sh`'s failed-enqueue sites now print an explicit `heartbeat:` reason naming the unwritable queue instead of exiting silently.
 - Both guards ask `fm_arm_in_flight` (`bin/fm-wake-lib.sh`), which verifies a live, identity-matched arm for this home and this arm path, and falls back to the bounded `FM_ARMING_GRACE` mtime window only for an unverifiable orphan marker.
@@ -132,7 +138,59 @@ Fix:
   A watcher's PARENT is its arm, which is the one signal the marker cannot give: a duplicate that started while the marker was missing has by then claimed the marker naming itself.
   An ORPHAN watcher with no live arm is still adopted, which is the case attaching exists for.
 
-Three cases in `tests/fm-watch-arm-supervision.test.sh` cover it: an exiting arm leaves a live peer's marker intact, a live arm re-takes a marker deleted underneath it, and a second arm stands down even when the marker was missing at the instant it started.
+Three cases in `tests/fm-watch-arm-supervision.test.sh` cover it: an exiting arm leaves a live peer's marker intact, a live arm re-takes a marker deleted underneath it, and a second arm refuses to duplicate even when the marker was missing at the instant it started.
+The 2026-08-12 recurrence below changed what "refuses to duplicate" means - standing by rather than standing down - so those cases now assert the standby behaviour.
+
+## Recurrence, 2026-08-12: the fan-out fix's own stand-down exit
+
+The captain saw a terminal filling every ~15 seconds with `Background command "Re-arm supervision" completed (exit code 0)`, with supervision genuinely healthy the whole time.
+
+Measured in the primary home before anything was changed - four consecutive background arms, read off their own output files, each exiting within seconds:
+
+```
+watcher: already armed pid=3388225 (watcher pid=3388241, beacon 13s)
+watcher: already armed pid=3388225 (watcher pid=3388241, beacon 14s)
+watcher: already armed pid=3388225 (watcher pid=3388241, beacon 10s)
+watcher: already armed pid=3388225 (watcher pid=3388241, beacon  8s)
+```
+
+One arm (`3388225`) owned supervision and held a healthy watcher (`3388241`) throughout.
+Every additional arm exited at once with a line that is not news.
+
+Root cause: **the `One arm per home` line in the Fix section above**.
+That line and the root-cause line above it cannot both be safe on the same harness, and this document stated both:
+
+- Root cause 1: "On a notify-on-exit harness the arm's exit IS the wake, so a watcher that died with nothing to say still cost a full model turn."
+- Fix: "a second arm reports `already armed pid=<pid>` and **exits** instead of attaching to a live cycle".
+
+The fan-out fix closed the duplicate's slow door and opened a faster one.
+An immediate exit is an immediate wake; firstmate answers a wake by arming; that arm exits at once too.
+The result is tighter than the original storm rather than absent - a duplicate that stood down at once still cost the exact turn it stood down to save.
+`bin/fm-watch-arm.sh`'s own header stated the invariant the shipped behaviour broke: "this script exits ONLY when it has something firstmate must act on."
+
+The operator half mattered as much as the script.
+`docs/supervision-protocols/claude.md` already said "do NOT start another one", and the loop still happened with a firstmate following it exactly: the protocol never said what a non-news arm COMPLETION means, so a completed background task read as "supervision ended" and the only listed repair was to arm.
+
+Fix:
+
+- A duplicate arm no longer exits.
+  It becomes a silent STANDBY: it starts no watcher, attaches to no cycle, and parks on the INCUMBENT ARM's liveness rather than on that arm's watcher cycle.
+  Parking on the arm rather than the cycle is what prevents the fan-out; not exiting is what prevents the turn spent on silence.
+  Both are required, and neither substitutes for the other.
+- When the arm it parked on is gone, the standby takes the arming marker and supervises in its place, so supervision survives the handover and `bin/fm-supervision-live.sh` keeps answering `live` across it.
+  Promotion IS `assert_arming_marker`'s existing rule - take a marker that is missing or names a dead arm, leave a live peer's alone - so "the incumbent is gone" and "this arm owns supervision" cannot disagree.
+  A settle re-read after taking the marker resolves two standbys promoting at the same instant: the second write sticks, the loser parks again.
+- Steady state is two live arms, one owner and one hot spare: the owner exits on a real wake, the spare promotes into its place, and firstmate's next arm becomes the new spare.
+- The status line is now `watcher: standby - supervision held by arm pid=<pid>`, named for what the task is doing rather than for what it found.
+- `docs/supervision-protocols/claude.md` and `.../grok.md` now state the operator rule in those words: an arm task that ENDS without a wake line is not a wake and not the end of supervision - verify with `bin/fm-supervision-live.sh` and do NOT arm again; arm again only when it answers `watcher: DOWN`.
+
+`bin/fm-supervision-live.sh` remains the only liveness predicate; nothing here added a second one.
+
+Three cases in `tests/fm-watch-arm-supervision.test.sh` cover it, and all three fail against the pre-change script:
+`test_second_arm_stands_by_instead_of_exiting` (the reproduction: the duplicate must still be alive well past the point where the old one had notified),
+`test_standby_takes_over_when_the_incumbent_arm_ends`,
+and `test_second_arm_stands_by_even_when_the_marker_was_missing`.
+`test_exiting_arm_leaves_a_live_peers_marker_alone`, carried over from the 2026-07-31 recurrence, was reworked onto the standby and fails against the pre-change script too.
 
 ## Reproducing the measurements
 

@@ -17,8 +17,9 @@
 #      queued work is information, and losing it was the other half of the bug.
 #   4. Churn is bounded: a watcher that will not stay up ends as ONE loud FAILED
 #      line, never an unbounded relaunch loop.
-#   5. One arm per home: a second arm stands down instead of attaching, and
-#      --restart stops the incumbent arm before taking over.
+#   5. One arm per home: a second arm neither attaches to the live cycle nor exits.
+#      It stands by, silent and live, and takes supervision over when the arm it
+#      stood by for is gone. --restart stops the incumbent arm before taking over.
 #   6. fm_arm_in_flight verifies a real live arm rather than trusting a marker's
 #      mtime, so a long-lived arm is not misread as a blind turn.
 #
@@ -107,6 +108,7 @@ run_arm() {  # <dir> [args...]
   shift
   FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
     FM_ARM_BACKOFF_MAX=1 FM_ARM_CONFIRM_TIMEOUT=6 FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_STANDBY_POLL=0.2 FM_ARM_STANDBY_SETTLE=0.2 \
     "$dir/bin/fm-watch-arm.sh" "$@"
 }
 
@@ -119,6 +121,7 @@ run_arm_bg() {  # <dir> <outfile> [args...]
   shift 2
   ( exec env FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
       FM_ARM_BACKOFF_MAX=1 FM_ARM_CONFIRM_TIMEOUT=6 FM_ARM_ATTACH_POLL=0.1 \
+      FM_ARM_STANDBY_POLL=0.2 FM_ARM_STANDBY_SETTLE=0.2 \
       "$dir/bin/fm-watch-arm.sh" "$@" ) > "$out" 2>&1 &
   ARM_PID=$!
 }
@@ -192,8 +195,15 @@ test_churn_is_bounded_by_one_loud_failure() {
   pass "a watcher that will not stay up ends as one loud failure, not a relaunch loop"
 }
 
-test_second_arm_stands_down_instead_of_attaching() {
-  local dir armout secondout armpid rc=0 runs
+# The 2026-08-12 recurrence, in one case. The one-arm-per-home fix stopped the
+# fan-out by making a duplicate arm print "already armed" and EXIT AT ONCE - and on
+# this harness an immediate exit is an immediate wake. Firstmate answered that wake
+# by arming, that arm exited at once too, and the terminal filled every ~15 seconds
+# with a completion notification carrying no news. A duplicate has to satisfy BOTH
+# halves: it must not attach (that is the fan-out) and it must not exit (that is the
+# wake). Standing by, silent and live, is the only answer that does both.
+test_second_arm_stands_by_instead_of_exiting() {
+  local dir armout secondout armpid secondpid runs i
   dir=$(make_arm_case one-arm-per-home)
   armout="$dir/arm.out"
   secondout="$dir/arm2.out"
@@ -201,18 +211,65 @@ test_second_arm_stands_down_instead_of_attaching() {
   run_arm_bg "$dir" "$armout"
   armpid=$ARM_PID
   wait_for_text "$armout" 'watcher: started pid=' || fail "first arm never confirmed a watcher: $(cat "$armout")"
-  run_arm "$dir" > "$secondout" 2>&1 || rc=$?
-  [ "$rc" -eq 0 ] || fail "second arm exited non-zero (status $rc): $(cat "$secondout")"
-  grep -qF "watcher: already armed pid=$armpid" "$secondout" \
-    || fail "second arm did not stand down for the live arm: $(cat "$secondout")"
+  run_arm_bg "$dir" "$secondout"
+  secondpid=$ARM_PID
+  wait_for_text "$secondout" "watcher: standby - supervision held by arm pid=$armpid" \
+    || fail "second arm did not stand by for the live arm: $(cat "$secondout")"
+  # Well past the point where an exiting duplicate would already have notified.
+  i=0
+  while [ "$i" -lt 20 ]; do
+    is_live_non_zombie "$secondpid" \
+      || fail "second arm EXITED with nothing to say - that exit IS the wake firstmate answers with another arm: $(cat "$secondout")"
+    sleep 0.1
+    i=$((i + 1))
+  done
   grep -qE 'watcher: (attached|started)' "$secondout" \
     && fail "second arm attached to the live cycle - that duplicate is what multiplied every wake: $(cat "$secondout")"
   runs=$(watcher_runs "$dir")
   [ "$runs" -eq 1 ] || fail "second arm started another watcher (runs=$runs)"
   is_live_non_zombie "$armpid" || fail "the incumbent arm died when a second one ran"
+  kill "$secondpid" "$armpid" 2>/dev/null || true
+  wait "$secondpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "a second arm stands by, live and silent, instead of exiting into a wake with no news"
+}
+
+# Standing by is only safe if it also hands supervision on. A parked arm waits on
+# the incumbent ARM, not on its watcher cycle: when that arm is gone the standby
+# takes the marker and holds a watcher up in its place, which is what keeps
+# bin/fm-supervision-live.sh answering "live" across the handover.
+test_standby_takes_over_when_the_incumbent_arm_ends() {
+  local dir armout secondout armpid secondpid runs owner i
+  dir=$(make_arm_case standby-takeover)
+  armout="$dir/arm.out"
+  secondout="$dir/arm2.out"
+  set_mode "$dir" hold
+  run_arm_bg "$dir" "$armout"
+  armpid=$ARM_PID
+  wait_for_text "$armout" 'watcher: started pid=' || fail "first arm never confirmed a watcher: $(cat "$armout")"
+  run_arm_bg "$dir" "$secondout"
+  secondpid=$ARM_PID
+  wait_for_text "$secondout" 'watcher: standby - supervision held by arm' \
+    || fail "second arm did not stand by: $(cat "$secondout")"
   kill "$armpid" 2>/dev/null || true
   wait "$armpid" 2>/dev/null || true
-  pass "a second arm stands down for a live one instead of attaching to its cycle"
+  wait_for_text "$secondout" 'watcher: started pid=' \
+    || fail "the standby never took supervision over from the arm it was standing by for: $(cat "$secondout")"
+  is_live_non_zombie "$secondpid" || fail "the promoted arm exited instead of supervising: $(cat "$secondout")"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    owner=$(sed -n 's/^pid=//p' "$dir/state/.watch.arming" 2>/dev/null | head -1)
+    [ "$owner" = "$secondpid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$owner" = "$secondpid" ] \
+    || fail "the promoted arm does not own the marker, so both guards still read supervision as unheld (owner=$owner, arm=$secondpid)"
+  runs=$(watcher_runs "$dir")
+  [ "$runs" -ge 2 ] || fail "the promoted arm did not start a watcher of its own (runs=$runs)"
+  kill "$secondpid" 2>/dev/null || true
+  wait "$secondpid" 2>/dev/null || true
+  pass "a standby takes supervision over when the arm it stood by for is gone"
 }
 
 # The storm came back in the field through this hole: a short-lived arm's EXIT trap
@@ -222,7 +279,7 @@ test_second_arm_stands_down_instead_of_attaching() {
 # seeing a re-arm in flight, so firstmate declared supervision down and re-armed on
 # a loop, exactly as before the fix.
 test_exiting_arm_leaves_a_live_peers_marker_alone() {
-  local dir armout armpid owner
+  local dir armout armpid secondpid owner
   dir=$(make_arm_case marker-ownership)
   armout="$dir/arm.out"
   set_mode "$dir" hold
@@ -232,8 +289,14 @@ test_exiting_arm_leaves_a_live_peers_marker_alone() {
   owner=$(sed -n 's/^pid=//p' "$dir/state/.watch.arming" 2>/dev/null | head -1)
   [ "$owner" = "$armpid" ] || fail "live arm does not own the marker (owner=$owner, arm=$armpid)"
 
-  # A second arm stands down and exits. Its exit must not take the marker with it.
-  run_arm "$dir" > "$dir/arm2.out" 2>&1 || fail "second arm exited non-zero: $(cat "$dir/arm2.out")"
+  # A second arm parks and is then killed. Neither the parking nor the death may
+  # take the live arm's marker with it.
+  run_arm_bg "$dir" "$dir/arm2.out"
+  secondpid=$ARM_PID
+  wait_for_text "$dir/arm2.out" 'watcher: standby - supervision held by arm' \
+    || fail "second arm did not stand by: $(cat "$dir/arm2.out")"
+  kill "$secondpid" 2>/dev/null || true
+  wait "$secondpid" 2>/dev/null || true
   [ -e "$dir/state/.watch.arming" ] \
     || fail "a standing-down arm DELETED the live arm's marker on exit - the live arm is now invisible to the dedupe and to both guards"
   owner=$(sed -n 's/^pid=//p' "$dir/state/.watch.arming" 2>/dev/null | head -1)
@@ -274,8 +337,8 @@ test_live_arm_retakes_a_deleted_marker() {
 # The startup dedupe cannot fire when the marker is missing at the instant a second
 # arm starts. It must not then attach to the live cycle anyway: two arms on one
 # cycle is the multiplier that turned a single wake into ~80 background tasks.
-test_second_arm_stands_down_even_when_the_marker_was_missing() {
-  local dir armout secondout armpid rc=0 runs
+test_second_arm_stands_by_even_when_the_marker_was_missing() {
+  local dir armout secondout armpid secondpid runs owner
   dir=$(make_arm_case one-arm-marker-race)
   armout="$dir/arm.out"
   secondout="$dir/arm2.out"
@@ -285,33 +348,25 @@ test_second_arm_stands_down_even_when_the_marker_was_missing() {
   wait_for_text "$armout" 'watcher: started pid=' || fail "first arm never confirmed a watcher: $(cat "$armout")"
   # Simulate losing the race: no marker at all when the second arm starts.
   rm -f "$dir/state/.watch.arming"
-  # Backgrounded and bounded on purpose: the regression here is that the second arm
-  # ATTACHES and waits forever, which as a foreground call would burn the whole file's
-  # timeout and report nothing useful about why.
-  local secondpid i=0
   run_arm_bg "$dir" "$secondout"
   secondpid=$ARM_PID
-  while [ "$i" -lt 300 ] && is_live_non_zombie "$secondpid"; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if is_live_non_zombie "$secondpid"; then
-    kill "$secondpid" 2>/dev/null || true
-    wait "$secondpid" 2>/dev/null || true
-    fail "second arm never exited - it attached to the live cycle and became a duplicate notification: $(cat "$secondout")"
-  fi
-  wait "$secondpid" 2>/dev/null || rc=$?
-  [ "$rc" -eq 0 ] || fail "second arm exited non-zero (status $rc): $(cat "$secondout")"
-  grep -qF 'watcher: already armed' "$secondout" \
-    || fail "second arm did not stand down once the race resolved: $(cat "$secondout")"
+  wait_for_text "$secondout" "watcher: standby - supervision held by arm pid=$armpid" \
+    || fail "second arm did not stand by once the race resolved: $(cat "$secondout")"
   grep -qF 'watcher: attached' "$secondout" \
     && fail "second arm ATTACHED to the live cycle - that duplicate is what multiplied every wake: $(cat "$secondout")"
+  is_live_non_zombie "$secondpid" \
+    || fail "second arm exited instead of parking - that exit is a wake with no news: $(cat "$secondout")"
   runs=$(watcher_runs "$dir")
   [ "$runs" -eq 1 ] || fail "second arm left an extra watcher behind (runs=$runs)"
+  # The marker it took during the race went back to the arm that is really supervising.
+  owner=$(sed -n 's/^pid=//p' "$dir/state/.watch.arming" 2>/dev/null | head -1)
+  [ "$owner" = "$armpid" ] \
+    || fail "the marker does not name the supervising arm after the race (owner=$owner, arm=$armpid)"
   is_live_non_zombie "$armpid" || fail "the incumbent arm died when a second one ran"
-  kill "$armpid" 2>/dev/null || true
+  kill "$secondpid" "$armpid" 2>/dev/null || true
+  wait "$secondpid" 2>/dev/null || true
   wait "$armpid" 2>/dev/null || true
-  pass "a second arm stands down even when the marker was missing when it started"
+  pass "a second arm stands by even when the marker was missing when it started"
 }
 
 test_restart_stops_the_incumbent_arm() {
@@ -382,9 +437,10 @@ test_quiet_watcher_death_does_not_wake_firstmate
 test_watcher_wake_reason_still_exits
 test_queued_wakes_still_exit
 test_churn_is_bounded_by_one_loud_failure
-test_second_arm_stands_down_instead_of_attaching
+test_second_arm_stands_by_instead_of_exiting
+test_standby_takes_over_when_the_incumbent_arm_ends
 test_exiting_arm_leaves_a_live_peers_marker_alone
 test_live_arm_retakes_a_deleted_marker
-test_second_arm_stands_down_even_when_the_marker_was_missing
+test_second_arm_stands_by_even_when_the_marker_was_missing
 test_restart_stops_the_incumbent_arm
 test_arm_in_flight_verifies_a_real_process
