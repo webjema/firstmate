@@ -138,15 +138,19 @@ assert_contains "$out2" "DISCARDS" "(c) the reclaim command must be labelled des
 assert_contains "$out2" "treehouse destroy $slot --include-unlanded --yes" "(c) must print the exact reclaim command"
 pass "(c) the report says how to inspect, and marks the reclaim as destructive"
 
-# --- (d) a stale warm lease: reserved forever by a warmer that died -----------
+# --- (d) a warm lease that outlived its warm ----------------------------------
+# The printed command must FORCE. The leak this line reports is an unforced
+# `treehouse return` aborting on the dirty slot and exiting 0, so an unforced command
+# here would abort in the operator's terminal too - and look like it worked.
 C=$(new_case d)
 give_pool_slot "$C"
 printf '1     leased       /pool/1/proj  (held by fm-warm-proj)\n' > "$C/status.txt"
 out=$(run_status "$C")   # no live warmer holds the pool lock
 assert_contains "$out" "no live warmer" "(d) a lease with no live warmer must be reported"
-assert_contains "$out" "treehouse return /pool/1/proj" "(d) must print the safe release command"
+assert_contains "$out" "treehouse return --force /pool/1/proj" "(d) must print a release command that actually releases"
 assert_contains "$out" "holds no work" "(d) must say the release is safe, unlike a dirty slot"
-pass "(d) a warm lease orphaned by a dead warmer is reported as safely releasable"
+assert_not_contains "$out" "died mid-install" "(d) must not blame a crash it cannot know happened"
+pass "(d) a warm lease that outlived its warm is reported as safely releasable"
 
 # --- (e) a LIVE warmer's lease is its job, not a fault ------------------------
 C=$(new_case e)

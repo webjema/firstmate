@@ -33,6 +33,15 @@
 #   (q) a slot whose install FAILED is logged COLD, never as warmed
 #   (r) ONE deadline for the whole warm, taken BEFORE the lease is asked for
 #   (s) an installer that rewrites a TRACKED file leaves the slot CLEAN, not dirty
+#   (t) a DIRTY slot is really released                -> the lease is gone, not "gone"
+#   (u) a return that frees nothing                    -> reported FAILED, never WARMED
+#   (v) a leaked warm lease of this pool's own holder  -> reclaimed, pool never grows
+#   (w) a LIVE warmer's lease                          -> never reaped
+#   (x) a crew's lease, and another project's warm     -> never reaped
+#   (y) TWO leaked leases under one holder             -> releasing one is a SUCCESS
+#   (z) a reclaim that CANNOT free its slot            -> grows the pool, never starves
+#   (aa) a reclaim whose slot does not come back free  -> the ceilings still apply
+#   (ab) a pool treehouse can no longer describe       -> unverifiable is a FAILURE
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -61,13 +70,29 @@ set -u
 holder_of() { while [ $# -gt 0 ]; do [ "$1" = --lease-holder ] && { printf '%s' "$2"; return; }; shift; done; }
 case "${1:-}" in
   status)
+    # A pool treehouse can no longer describe. The release verdict is a STATUS read,
+    # so this is the state in which a release cannot be verified either way.
+    [ -n "${TH_STATUS_BREAK:-}" ] && [ -f "$TH_STATUS_BREAK" ] && exit 1
     cat "${TH_STATUS:?}"
-    # Reality: treehouse's OWN status reports a held lease and who holds it. The
-    # stub must too - that report is the only way a warmer killed mid-install can
-    # find the lease whose path it never learned.
-    if [ -f "${TH_LEASE_STATE:?}" ] && [ "$(cut -d' ' -f1 < "$TH_LEASE_STATE")" = leased ]; then
-      printf '9     leased       %s  (held by %s)\n' \
-        "${TH_NEW_SLOT:?}" "$(cut -d' ' -f2 < "$TH_LEASE_STATE")"
+    # Reality: treehouse's OWN status reports every held lease, its PATH and who
+    # holds it. The stub must too, and must be able to report MORE THAN ONE under the
+    # same holder - that is the state the leak actually produced (six of them), and a
+    # stub that cannot express it cannot catch a release verdict that confuses "this
+    # slot" with "any slot of this holder".
+    if [ -f "${TH_LEASE_STATE:?}" ]; then
+      while read -r lpath lholder; do
+        [ -n "${lpath:-}" ] || continue
+        printf '%s     leased       %s  (held by %s)\n' \
+          "$(basename "$(dirname "$lpath")")" "$lpath" "$lholder"
+      done < "$TH_LEASE_STATE"
+    fi
+    # ... and every slot a return has FREED, which a real pool reports as available
+    # and hands back to the next `get`. Without it the stub can only ever grow.
+    if [ -n "${TH_FREE_STATE:-}" ] && [ -f "$TH_FREE_STATE" ]; then
+      while read -r fpath; do
+        [ -n "${fpath:-}" ] || continue
+        printf '%s     available    %s\n' "$(basename "$(dirname "$fpath")")" "$fpath"
+      done < "$TH_FREE_STATE"
     fi
     ;;
   get)
@@ -76,13 +101,68 @@ case "${1:-}" in
     # A real `get --lease` marks the lease FIRST, does its work (TH_GET_DELAY models
     # how long a create-or-reset takes), and prints the path only at the END. So a
     # warmer killed mid-warm holds a lease it never saw.
-    mkdir -p "${TH_NEW_SLOT:?}"
-    printf 'leased %s\n' "$(holder_of "$@")" > "${TH_LEASE_STATE:?}"
+    # A REAL POOL REUSES BEFORE IT CREATES: an available slot is handed back, and
+    # only an empty pool costs a new one. That distinction is the whole point of
+    # reclaiming a leaked lease, so the stub has to be able to express it.
+    slot=""
+    if [ -n "${TH_FREE_STATE:-}" ] && [ -s "$TH_FREE_STATE" ]; then
+      slot=$(head -n 1 "$TH_FREE_STATE")
+      rest=$(tail -n +2 "$TH_FREE_STATE")
+      printf '%s' "${rest:+$rest
+}" > "$TH_FREE_STATE"
+    fi
+    [ -n "$slot" ] || slot=${TH_NEW_SLOT:?}
+    mkdir -p "$slot"
+    printf '%s %s\n' "$slot" "$(holder_of "$@")" >> "${TH_LEASE_STATE:?}"
+    # A user-level post_create hook runs INSIDE the get, before the worktree is
+    # handed over - which is how a slot arrives already dirty on the box firstmate
+    # runs on. Unset for every case that does not care.
+    if [ -n "${TH_POST_CREATE:-}" ] && [ -x "$TH_POST_CREATE" ]; then
+      ( cd "$slot" && "$TH_POST_CREATE" ) >/dev/null 2>&1 || true
+    fi
     delay=$(cat "${TH_GET_DELAY:?}" 2>/dev/null || echo 0)
     [ "$delay" = 0 ] || sleep "$delay"
-    printf '%s\n' "$TH_NEW_SLOT"
+    printf '%s\n' "$slot"
     ;;
-  return) printf 'free\n' > "${TH_LEASE_STATE:?}" ;;
+  return)
+    # THE BUG THIS SUITE EXISTS TO PIN (treehouse v2.0.0, reproduced by hand
+    # 2026-08-12): an UNFORCED return on a worktree with uncommitted tracked changes
+    # prompts "Clean and return? [Y/n]", and with no terminal to answer it prints
+    # `Aborted.`, releases NOTHING - and exits 0.
+    forced=no; target=""
+    shift
+    for a in "$@"; do
+      case "$a" in --force) forced=yes ;; -*) ;; *) target=$a ;; esac
+    done
+    if [ "$forced" = no ] && [ -n "$target" ] && [ -d "$target" ] \
+       && [ -n "$(git -C "$target" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+      # On STDERR, where the real binary puts it (probed against treehouse v2.0.0,
+      # 2026-08-12: `2>&1 >/dev/null` shows the prompt, `2>/dev/null` shows nothing).
+      # That is the channel fm_pool_release captures for its FAILED line.
+      printf 'Worktree has uncommitted changes. Clean and return? [Y/n] Aborted.\n' >&2
+      exit 0
+    fi
+    # TH_RETURN_NOOP models a return that reports success and frees nothing for some
+    # OTHER reason - the class the exit code can never be trusted to reveal.
+    [ "${TH_RETURN_NOOP:-0}" = 1 ] && exit 0
+    # And it frees THE SLOT IT WAS GIVEN, not "the lease": a return aimed at the
+    # wrong path must leave the right one standing, or no test can see the
+    # difference.
+    if [ -f "${TH_LEASE_STATE:?}" ]; then
+      if grep -qF -- "$target " "$TH_LEASE_STATE"; then
+        # TH_FREE_SINK: the lease really goes, but the slot does NOT come back as
+        # available - treehouse left it dirty, or a crew's plain `get` took it in the
+        # gap. Same observable state, and the case a released slot cannot be assumed
+        # to be a free one.
+        [ -n "${TH_FREE_STATE:-}" ] && [ "${TH_FREE_SINK:-0}" != 1 ] \
+          && printf '%s\n' "$target" >> "$TH_FREE_STATE"
+      fi
+      [ "${TH_BREAK_STATUS_ON_RETURN:-0}" = 1 ] && : > "${TH_STATUS_BREAK:?}"
+      kept=$(grep -vF -- "$target " "$TH_LEASE_STATE" || true)
+      printf '%s' "${kept:+$kept
+}" > "$TH_LEASE_STATE"
+    fi
+    ;;
 esac
 exit 0
 SH
@@ -108,6 +188,8 @@ warm_env() {  # <case-dir> -> the env every warm run shares
     "TH_GET_RC=$case_dir/get-rc" \
     "TH_GET_DELAY=$case_dir/get-delay" \
     "TH_LEASE_STATE=$case_dir/lease-state" \
+    "TH_FREE_STATE=$case_dir/free-state" \
+    "TH_STATUS_BREAK=$case_dir/status-broken" \
     "TH_NEW_SLOT=$case_dir/th-root/pool/9/proj" \
     "FM_ROOT_OVERRIDE=$ROOT" \
     "FM_HOME=$case_dir/home" \
@@ -217,7 +299,8 @@ plant_dir_lock() {
   printf '%s\n' "$3" > "$lock/boot"
 }
 
-lease_state() { cat "$1/lease-state" 2>/dev/null | cut -d' ' -f1 || true; }
+lease_state() { [ -s "$1/lease-state" ] && printf 'leased' || printf 'free'; }
+leases() { cat "$1/lease-state" 2>/dev/null || true; }
 th_log() { cat "$1/th.log"; }
 warm_log() { cat "$1/home/state/.pool-warm.log" 2>/dev/null || true; }
 
@@ -255,7 +338,7 @@ printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
 run_warm "$C" || fail "(c) must exit 0"
 log=$(th_log "$C")
 assert_contains "$log" "get --lease" "(c) the slot is leased for the install"
-assert_contains "$log" "return $C/th-root/pool/9/proj" "(c) the lease is released on the leased path"
+assert_contains "$log" "return --force $C/th-root/pool/9/proj" "(c) the lease is released on the leased path"
 [ "$(printf '%s\n' "$log" | grep -c '^treehouse get')" = 1 ] || fail "(c) exactly one slot must be warmed per cycle"
 pass "(c) the lease is held across the install and released on the leased slot"
 
@@ -587,3 +670,196 @@ plant_dir_lock "$C" 999999 "$(current_boot)"   # a DEAD owner on this boot
 FM_POOL_LOCK_FORCE_DIR=1 run_warm "$C" || fail "(j) must exit 0"
 assert_contains "$(th_log "$C")" "get --lease" "(j) a stale lock must be reclaimed, not honored forever"
 pass "(j) a pool lock whose owner is dead is reclaimed"
+
+# --- (t) a DIRTY slot must be RELEASED, not merely reported as released --------
+# The leak that cost 17 GB. An operator's treehouse post_create hook installs
+# dependencies inside `treehouse get`, so the slot is already dirty when the
+# provisioner snapshots it and correctly declines to restore work it did not make.
+# `treehouse return` then prompts, finds no terminal, aborts - AND EXITS 0. The warm
+# logged WARMED, availability never rose, and always-plus-one added another slot
+# every cycle. Nothing but the lease state can catch this: the exit code is a lie.
+C=$(new_case t)
+in_flight "$C"
+printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+SLOT="$C/th-root/pool/9/proj"
+mkdir -p "$SLOT"
+printf 'node_modules/\n' > "$SLOT/.gitignore"
+printf 'v1\n' > "$SLOT/hook-touched.txt"
+git -C "$SLOT" init -q
+git -C "$SLOT" add -A
+git -C "$SLOT" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm fixture
+cat > "$C/post-create.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'v2\n' > hook-touched.txt      # a TRACKED file, dirtied before the handover
+SH
+chmod +x "$C/post-create.sh"
+TH_POST_CREATE="$C/post-create.sh" run_warm "$C" || fail "(t) must exit 0"
+[ -n "$(git -C "$SLOT" status --porcelain --untracked-files=no)" ] \
+  || fail "(t) setup: the slot was not dirty at return time, so this case proves nothing"
+[ "$(lease_state "$C")" = free ] \
+  || fail "(t) the lease on a dirty slot survived the release - the slot is stranded and the pool will grow around it"
+assert_contains "$(th_log "$C")" "return --force" "(t) the release must force, as every other treehouse return in this repo does"
+assert_contains "$(warm_log "$C")" "WARMED proj" "(t) and the slot really is back in the pool"
+pass "(t) a dirty slot's lease is really released, not just logged as released"
+
+# --- (u) a release that frees nothing is a FAILURE, whatever it exits with -----
+# --force fixes the known abort; it cannot promise there is no other. So the verdict
+# is treehouse's own status, never the exit code, and this is the branch that says so.
+C=$(new_case u)
+in_flight "$C"
+printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+TH_RETURN_NOOP=1 run_warm "$C" || fail "(u) a failed release must still never break a spawn"
+[ "$(lease_state "$C")" = leased ] || fail "(u) setup: the return was supposed to free nothing"
+assert_contains "$(warm_log "$C")" "the slot is still LEASED" "(u) an unreleased slot must be reported as still leased"
+assert_not_contains "$(warm_log "$C")" "WARMED proj" "(u) and must never be logged as a warm slot the pool can hand out"
+pass "(u) a return that frees nothing is reported FAILED, not WARMED"
+
+# --- (v) a leaked warm lease is RECLAIMED, not routed around ------------------
+# The self-healing the pool lacked. A lease still held under this pool's own warm
+# holder, while WE hold the pool lock, is provably an orphan - so release it and warm
+# through the normal path, where the pool hands that same slot straight back. It runs
+# BEFORE the ceilings on purpose: it adds no slot, and the real pool was already at
+# its budget, where a ceiling-first order would have left the leak permanent.
+#
+# The fixture puts the leak on slot 8 and leaves 9 as the one a GROWING pool would
+# create, so "reclaimed, not grown" is a directory that must not exist rather than a
+# hopeful reading of the log.
+C=$(new_case v)
+in_flight "$C"
+mkdir -p "$C/th-root/pool/1"
+dd if=/dev/zero of="$C/th-root/pool/1/blob" bs=1024 count=1024 status=none
+printf '1     in-use       %s/th-root/pool/1/proj\n' "$C" > "$C/status.txt"
+SLOT="$C/th-root/pool/8/proj"
+mkdir -p "$SLOT"
+printf '%s fm-warm-proj\n' "$SLOT" > "$C/lease-state"   # a warm that ended without releasing
+FM_POOL_DISK_BUDGET_KB=1024 run_warm "$C" || fail "(v) must exit 0"
+assert_contains "$(warm_log "$C")" "REAP proj" "(v) the reclaim must be visible in the only log that records it"
+assert_contains "$(th_log "$C")" "return --force $SLOT" "(v) the leaked lease is released, never warmed under a dead warm's reservation"
+assert_contains "$(th_log "$C")" "get --lease --lease-holder fm-warm-proj" "(v) and the warm then takes that slot under a lease of its own"
+if [ -d "$C/th-root/pool/9" ]; then
+  fail "(v) the pool grew a slot instead of taking back the one it already had"
+fi
+[ "$(lease_state "$C")" = free ] || fail "(v) the leaked lease must end up released"
+assert_contains "$(warm_log "$C")" "WARMED proj" "(v) the reclaimed slot is warmed, not just freed"
+assert_not_contains "$(warm_log "$C")" "disk budget" "(v) a full pool must not block the one action that reclaims a slot instead of adding one"
+pass "(v) a warm lease leaked by an earlier cycle is reclaimed instead of growing the pool"
+
+# --- (w) a LIVE warmer's lease is never reaped --------------------------------
+# The reaper's safety rests on the pool lock: a lease under this holder can only be
+# an orphan because a live warmer would still hold that lock, and a second warmer
+# never gets past it. Prove the rail, not the string comparison - hold the lock with
+# a real live process and leave a lease standing under the same holder the reaper
+# matches. Anything that returns it here would be stealing a slot mid-install.
+C=$(new_case w)
+in_flight "$C"
+printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+printf '%s/th-root/pool/9/proj fm-warm-proj\n' "$C" > "$C/lease-state"   # the live warmer's in-flight lease
+hold_lock_live "$C" || fail "(w) setup: could not hold the pool lock"
+run_warm "$C" || fail "(w) must exit 0"
+release_lock_holder
+assert_not_contains "$(th_log "$C")" "return" "(w) a live warmer's lease must never be released by another warmer"
+assert_not_contains "$(th_log "$C")" "get" "(w) nor may the pool be grown behind its back"
+[ "$(lease_state "$C")" = leased ] || fail "(w) the live warmer's lease was taken out from under it"
+pass "(w) a lease held while a live warmer owns the pool lock is left alone"
+
+# --- (x) a crew's lease is never reaped, nor another project's warm ------------
+# The line AGENTS.md rail 3 draws. A crew holds its slot under its TASK ID, and a
+# warm for a different project holds one under a different fm-warm-* holder. Neither
+# is this warmer's to touch, so with no lease of its own to reuse it must fall back
+# to growing the pool exactly as before - and never name either slot in any command.
+C=$(new_case x)
+in_flight "$C"
+cat > "$C/status.txt" <<'EOF'
+1     in-use       /pool/1/proj
+2     leased       /pool/2/proj  (held by fix-login-k3)
+3     leased       /pool/3/proj  (held by fm-warm-otherproject)
+EOF
+run_warm "$C" || fail "(x) must exit 0"
+log=$(th_log "$C")
+assert_contains "$log" "get --lease --lease-holder fm-warm-proj" "(x) with no lease of its own to reuse, the warmer provisions a new slot"
+assert_not_contains "$log" "/pool/2/proj" "(x) a crew's leased slot must never be named by any command the warmer runs"
+assert_not_contains "$log" "/pool/3/proj" "(x) nor another project's warm lease"
+assert_not_contains "$(warm_log "$C")" "REAP" "(x) and neither may be reported as reusable"
+pass "(x) a crew's lease and a foreign warm lease are both out of the reaper's reach"
+
+# --- (y) one holder, several leaked leases: a release is judged PER SLOT ---------
+# The state the real leak actually reached - six slots, one fm-warm-<name> holder.
+# A verdict that asks "does this HOLDER still hold anything?" instead of "is THIS
+# slot still leased?" calls a perfectly good release FAILED, and the retry then
+# forces a path that is already back in the pool, where `treehouse get` can have
+# handed it to a crew. So the reaped slot must be reported WARMED even though a
+# sibling leak is still standing, and must be returned exactly once.
+C=$(new_case y)
+in_flight "$C"
+printf '1     in-use       /pool/1/proj
+' > "$C/status.txt"
+SLOT="$C/th-root/pool/8/proj"
+SIBLING="$C/th-root/pool/9/proj"
+mkdir -p "$SLOT" "$SIBLING"
+printf '%s fm-warm-proj
+%s fm-warm-proj
+' "$SLOT" "$SIBLING" > "$C/lease-state"
+run_warm "$C" || fail "(y) must exit 0"
+assert_contains "$(warm_log "$C")" "WARMED proj" "(y) the slot whose lease really was released must be reported as warm"
+assert_not_contains "$(warm_log "$C")" "still LEASED" "(y) a sibling leak under the same holder must not make this release look failed"
+assert_not_contains "$(warm_log "$C")" "LEAKED" "(y) nor may the trap fire on a slot that is already back in the pool"
+assert_not_contains "$(warm_log "$C")" "could not reclaim" "(y) a sibling leak under the same holder must not make the reclaim look failed either"
+assert_not_contains "$(th_log "$C")" "return --force $SIBLING" "(y) and the sibling is not this cycle's to force - it is reclaimed by the cycle that needs it"
+assert_contains "$(leases "$C")" "$SIBLING fm-warm-proj" "(y) setup: the sibling leak is what the next cycle reclaims"
+pass "(y) with several leaks under one holder, each release is judged on its own slot"
+
+# --- (z) a reclaim that cannot free its slot falls through to growing the pool --
+# The starvation this design has to avoid. If the release keeps failing - a slot git
+# can no longer return - a reaper that only ever retried it would leave the project
+# with NO warm slot for as long as the leak lasts. So a failed reclaim is logged and
+# the cycle provisions a slot anyway. TH_RETURN_NOOP frees nothing at all here, so
+# the warm's own release fails too and it correctly declines to report WARMED; what
+# this case pins is that the pool still got its slot.
+C=$(new_case z)
+in_flight "$C"
+printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+SLOT="$C/th-root/pool/8/proj"
+mkdir -p "$SLOT"
+printf '%s fm-warm-proj\n' "$SLOT" > "$C/lease-state"
+TH_RETURN_NOOP=1 run_warm "$C" || fail "(z) must exit 0"
+assert_contains "$(warm_log "$C")" "could not reclaim" "(z) an unreclaimable leak must be reported, not retried in silence"
+assert_contains "$(th_log "$C")" "get --lease --lease-holder fm-warm-proj" "(z) and the project must still get a warm slot"
+[ -d "$C/th-root/pool/9" ] || fail "(z) the cycle stalled on the leak instead of provisioning beside it"
+pass "(z) a reclaim that cannot free its slot grows the pool rather than starving the project"
+
+# --- (aa) a released slot is not assumed to be a free one ---------------------
+# Reclaiming skips both ceilings, and it may do that only because the slot it freed
+# is the one `treehouse get` hands back. Nothing guarantees that: treehouse can leave
+# the slot dirty, and a crew takes slots with a plain `treehouse get` while holding no
+# pool lock, so it can consume this one in the gap. Then the `get` CREATES a slot -
+# and a creation that skipped the disk budget is the outcome this whole branch exists
+# to end. So the skip is earned by re-reading the pool, not assumed from the release.
+C=$(new_case aa)
+in_flight "$C"
+mkdir -p "$C/th-root/pool/1"
+dd if=/dev/zero of="$C/th-root/pool/1/blob" bs=1024 count=1024 status=none
+printf '1     in-use       %s/th-root/pool/1/proj\n' "$C" > "$C/status.txt"
+SLOT="$C/th-root/pool/8/proj"
+mkdir -p "$SLOT"
+printf '%s fm-warm-proj\n' "$SLOT" > "$C/lease-state"
+TH_FREE_SINK=1 FM_POOL_DISK_BUDGET_KB=1024 run_warm "$C" || fail "(aa) must exit 0"
+assert_contains "$(warm_log "$C")" "REAP proj" "(aa) setup: the leaked lease is still released"
+assert_contains "$(warm_log "$C")" "not free to take" "(aa) a release that left no free slot must be reported, not silently treated as one"
+assert_contains "$(warm_log "$C")" "disk budget" "(aa) and the budget must decide the slot that would then be CREATED"
+assert_not_contains "$(th_log "$C")" "treehouse get" "(aa) a pool over its budget must not grow just because a reclaim ran first"
+pass "(aa) a reclaim that leaves no free slot falls back under the ceilings"
+
+# --- (ab) a release that cannot be VERIFIED is a failure, not a success --------
+# The verdict is a `treehouse status` read, so the one thing that can defeat it is a
+# pool treehouse can no longer describe. Answering "released" there is how this bug
+# hid for a month; answering "still leased" leaves a slot the next cycle reclaims. So
+# it fails closed AND says why - a bare "still LEASED" with no reason is what sent a
+# captain looking for crashed processes that never existed.
+C=$(new_case ab)
+in_flight "$C"
+printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+TH_BREAK_STATUS_ON_RETURN=1 run_warm "$C" || fail "(ab) an unverifiable release must still never break a spawn"
+assert_contains "$(warm_log "$C")" "still LEASED" "(ab) a release that cannot be verified must be reported as unreleased"
+assert_contains "$(warm_log "$C")" "unreadable" "(ab) and must name the reason, or the log sends its reader hunting the wrong cause"
+assert_not_contains "$(warm_log "$C")" "WARMED proj" "(ab) an unverified slot is never announced as one the pool can hand out"
+pass "(ab) a release the pool cannot confirm is failed closed, with its reason named"

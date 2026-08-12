@@ -32,7 +32,8 @@
 #     skips it forever and `treehouse prune` will not reclaim it. Inspect: <cmd>.
 #     Reclaim (DISCARDS the work): <cmd>
 #   POOL_SLOT: <project>: slot <name> is LEASED by <holder> with no live warmer -
-#     a warmer died mid-install and the slot is reserved forever. Release: <cmd>
+#     its warm finished but the lease outlived it. Reclaimed by the next warm that
+#     finds no free slot, or by hand while no warm is running: <cmd>
 #   POOL_SLOT: <project>: slot <name> is ORPHANED (owner pid <pid> is gone) - <cmd>
 #   POOL_BUDGET: <project>: <reason>   (raised by bin/fm-pool-warm.sh, surfaced here)
 set -u
@@ -73,9 +74,25 @@ slot_evidence() {  # <slot-path>
 
 # A firstmate warm lease (bin/fm-pool-warm.sh) is transient: taken, install, then
 # released within one warm cycle. One still held with no live warmer owning the
-# pool lock means the warmer died mid-install (a reboot), and the slot is
-# reserved forever. Unlike a dirty slot, this holds NO work: releasing it is safe
-# and non-destructive, so the command we print is a plain `treehouse return`.
+# pool lock means that cycle is over and its lease was not released.
+#
+# THIS LINE USED TO SAY "a warm died mid-install", AND THAT WAS WRONG - the reading
+# it sent a captain chasing crashed processes that never existed. The six leases of
+# 2026-08-11 were all left by warms that ran to completion and logged WARMED: their
+# `treehouse return` hit the dirty-worktree prompt with no terminal to answer it,
+# aborted, and exited 0 (data/pool-lease-forensics.md). A dead warmer can leave a
+# lease too - the EXIT trap misses a SIGKILL - but it is the rarer cause, so name
+# the outcome, not a mechanism the reader cannot check.
+#
+# Unlike a dirty slot, this holds NO work, which is why the printed command forces:
+# an unforced `treehouse return` is exactly what failed here, and printing a command
+# that aborts and exits 0 would repeat the whole bug at the operator's prompt.
+#
+# The force is not inert, though, so the line says when NOT to run it. This report is
+# suppressed while a warmer is live, but that is a check at print time: a warm that
+# starts afterwards reclaims exactly this slot and installs into it, and a force
+# landing there pulls the slot out from under it - and worse, that warm's own release
+# then finds nothing leased, reports success, and logs a half-installed slot WARMED.
 #
 # Liveness is boot-aware (fm_pool_owner_alive), never a bare `kill -0` on a
 # recorded pid: the lock survives reboot, so after a restart that pid may belong to
@@ -145,7 +162,7 @@ report_project() {  # <project-real-path>
         case "$holder" in
           fm-warm-*)
             warmer_is_live "$project" && continue
-            printf 'POOL_SLOT: %s: slot %s is LEASED by %s with no live warmer - a warm died mid-install and the slot is reserved forever. Release it (safe, holds no work): treehouse return %s\n' \
+            printf 'POOL_SLOT: %s: slot %s is LEASED by %s with no live warmer - its warm is over but the lease outlived it, so the pool cannot hand this slot out. It is reclaimed only by the next warm that finds this pool with no free slot, which may be never while the project is idle; to free it now (safe, holds no work - but only while no warm is running for this project): treehouse return --force %s\n' \
               "$name" "$slot" "$holder" "$path"
             ;;
         esac
