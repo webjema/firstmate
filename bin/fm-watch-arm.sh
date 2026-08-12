@@ -39,8 +39,9 @@
 #                                                          waits until that cycle ends
 #   watcher: healthy pid=<N> (beacon <age>s)             - restart mode found a live+fresh
 #                                                          watcher it did not own
-#   watcher: already armed pid=<N> (<watcher state>)     - another arm process is alive and
-#                                                          owns supervision; do NOT arm again
+#   watcher: standby - supervision held by arm pid=<N>   - another arm owns supervision;
+#                                                          this one parks silently and does
+#                                                          NOT exit
 #   watcher: relaunching after <k> quiet exit(s)         - a watcher died with nothing to
 #                                                          report and is being replaced in place
 #   watcher: wakes queued (<n>) - drain them             - the watcher enqueued records but
@@ -52,11 +53,23 @@
 # returns a FAILED line. A live cycle already present means re-arm ADOPTS it - it
 # never starts a second watcher.
 #
-# ONE ARM PER HOME. A second arm launched while a live, identity-matched arm
-# already holds state/.watch.arming stands down immediately with the "already
-# armed" line instead of attaching. Attaching duplicates instead multiplied every
-# single wake into one notification per attached arm, each of which firstmate
-# answered with another arm.
+# ONE ARM PER HOME, AND A DUPLICATE NEVER EXITS. A second arm launched while a
+# live, identity-matched arm already holds state/.watch.arming becomes a silent
+# STANDBY: it starts no watcher, attaches to no cycle, and parks on the INCUMBENT
+# ARM's liveness rather than on that arm's watcher cycle. When the incumbent is
+# gone it takes the marker and supervises in its place; while the incumbent lives
+# it says nothing more.
+# Both halves of that are load-bearing, and each fixes an incident:
+#   - Parking on the ARM, not the cycle, is what keeps a duplicate from fanning
+#     out. N arms attached to one cycle all exit when it ends, which is one
+#     notification each, and firstmate answers every one of them with another arm.
+#   - NOT EXITING is what keeps a duplicate from costing a turn for saying
+#     nothing. A duplicate that exited at once with "already armed" was an
+#     immediate wake carrying no news, and firstmate answered it by arming again:
+#     a tighter loop than the fan-out it replaced. See the 2026-08-12 recurrence
+#     in docs/incidents/watch-arm-notification-storm.md.
+# Steady state is two live arms - one owner and one hot spare - because the owner
+# exits on a real wake and the spare promotes into its place.
 # The marker is OWNED, not merely present: an arm releases it only while it still
 # names that arm, hands it to the peer it stands down for, and re-takes it whenever
 # it goes missing or names a dead arm. An arm nothing can see stops standing
@@ -98,6 +111,11 @@ ARMING_GRACE=${FM_ARMING_GRACE:-30}
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
+# Standby: how often a parked duplicate checks whether the arm it stands by for is
+# gone, and how long it waits after taking the marker before it trusts that it won
+# the promotion race.
+STANDBY_POLL=${FM_ARM_STANDBY_POLL:-1}
+STANDBY_SETTLE=${FM_ARM_STANDBY_SETTLE:-0.5}
 # Churn budget: how many quiet watcher deaths to absorb inside one window before
 # giving up loudly, and how far the relaunch backoff may grow.
 RELAUNCH_MAX=${FM_ARM_RELAUNCH_MAX:-8}
@@ -195,21 +213,59 @@ peer_arm_of_watcher() {  # <watcher-pid> -> echoes a live peer arm pid, or fails
   esac
 }
 
-# Stand down, rather than adopt, when the watcher we were about to attach to
-# already has an arm waiting on it. Two arms on one cycle means two harness
-# notifications when it ends, firstmate answers each with another arm, and that
-# fan-out is what turned one wake into ~80 background tasks. The startup dedupe
-# usually catches a duplicate; it cannot when the marker was missing at the instant
-# we started, hence the ppid question above. An ORPHAN watcher - no live arm behind
-# it - is left to the adopt path, which is the case attaching exists for.
-# Sets CYCLE/CYCLE_DETAIL and succeeds when it stood down; fails to say "carry on".
-stand_down_for_peer_arm() {
+# Stand by, rather than adopt, when the watcher we were about to attach to already
+# has an arm waiting on it. Two arms on one cycle means two harness notifications
+# when it ends, firstmate answers each with another arm, and that fan-out is what
+# turned one wake into ~80 background tasks. The startup dedupe usually catches a
+# duplicate; it cannot when the marker was missing at the instant we started, hence
+# the ppid question above. An ORPHAN watcher - no live arm behind it - is left to
+# the adopt path, which is the case attaching exists for.
+# Sets CYCLE/CYCLE_DETAIL and succeeds when it stood by; fails to say "carry on".
+stand_by_for_peer_arm() {
   local peer_arm
   peer_arm=$(peer_arm_of_watcher "$HEALTHY_PID") || return 1
-  echo "watcher: already armed pid=$peer_arm (watcher pid=$HEALTHY_PID, beacon $(fm_path_age "$BEAT")s)"
+  # Hand the marker over BEFORE announcing the standby, never after. This arm took
+  # the marker on startup (the dedupe cannot fire when the marker is missing at that
+  # instant), so between the announcement and the yield the marker names an arm that
+  # is about to park. Anything reading in that window - a guard, a third arm, a test -
+  # is told the parking arm is the one supervising. Announce only what is already true.
   yield_arming_marker_to "$peer_arm"
-  CYCLE=standdown
-  CYCLE_DETAIL="stood down for arm pid=$peer_arm"
+  report_standby "$peer_arm"
+  CYCLE=standby
+  CYCLE_DETAIL="stood by for arm pid=$peer_arm"
+}
+
+report_standby() {  # <arm-pid>
+  local arm_pid=$1
+  if healthy_watcher; then
+    echo "watcher: standby - supervision held by arm pid=$arm_pid (watcher pid=$HEALTHY_PID, beacon $(fm_path_age "$BEAT")s)"
+  else
+    echo "watcher: standby - supervision held by arm pid=$arm_pid (restoring its watcher)"
+  fi
+}
+
+# Park until the arm that owns supervision is gone, then take over. This is the ONE
+# thing a duplicate is allowed to do, because it is the only answer that satisfies
+# both incidents at once: parking costs no notification (an exit would BE the wake),
+# and waiting on the ARM rather than on its watcher cycle means a cycle ending never
+# fans out into one notification per duplicate.
+# Promotion is exactly assert_arming_marker's rule - take a marker that is missing
+# or names a dead arm, leave a live peer's alone - so "the incumbent is gone" and
+# "this arm now owns supervision" are one decision, not two that can disagree.
+# The settle re-read resolves the only race left: two standbys can take the marker
+# within the same instant, and the second write is the one that sticks, so the loser
+# sees the winner and parks again. Exactly one promotes.
+stand_by_until_promoted() {
+  while :; do
+    nap "$STANDBY_POLL"
+    assert_arming_marker
+    [ "$(marker_owner)" = "$$" ] || continue
+    nap "$STANDBY_SETTLE"
+    if [ "$(marker_owner)" = "$$" ]; then
+      arm_log 'promoted: the arm this one stood by for is gone'
+      return 0
+    fi
+  done
 }
 
 arm_log() {  # <message>
@@ -306,20 +362,25 @@ case "${1:-}" in
 esac
 
 # --- one arm per home --------------------------------------------------------
-# Stand down for a genuinely live arm instead of attaching to its watcher. Two
-# arms on one cycle means two harness notifications per wake, and firstmate
-# answers each with another arm: that is how a single quiet wake compounded into
-# ~80 live background tasks and a 3-second notification loop. Only a
-# pid-VERIFIED live arm stands us down; a stale or unverifiable marker does not.
+# Stand BY for a genuinely live arm: neither attach to its watcher nor exit. Two
+# arms on one cycle means two harness notifications per wake, and firstmate answers
+# each with another arm: that is how a single quiet wake compounded into ~80 live
+# background tasks. Exiting here instead was the 2026-08-12 recurrence: the exit is
+# itself a wake, so a duplicate that stood down at once still cost the turn it was
+# standing down to save. Only a pid-VERIFIED live arm parks us; a stale or
+# unverifiable marker does not.
 if [ "$mode" = arm ] \
   && fm_arm_in_flight "$STATE" "$ARM_SELF" "$ARMING_GRACE" "$FM_HOME" \
   && [ -n "$FM_ARM_IN_FLIGHT_PID" ]; then
-  if healthy_watcher; then
-    echo "watcher: already armed pid=$FM_ARM_IN_FLIGHT_PID (watcher pid=$HEALTHY_PID, beacon $(fm_path_age "$BEAT")s)"
-  else
-    echo "watcher: already armed pid=$FM_ARM_IN_FLIGHT_PID (restoring its watcher)"
-  fi
-  exit 0
+  # Own no marker while parked - the incumbent's is the one that must stay visible -
+  # but arm the release now, because promotion happens inside the wait below and a
+  # signal after it would otherwise leave OUR marker behind.
+  trap 'release_arming_marker' EXIT
+  trap 'exit 143' TERM INT
+  trap 'exit 129' HUP
+  report_standby "$FM_ARM_IN_FLIGHT_PID"
+  arm_log "standby: supervision held by arm pid=$FM_ARM_IN_FLIGHT_PID"
+  stand_by_until_promoted
 fi
 
 # Identify this home's incumbent arm BEFORE claiming the marker, because claiming it
@@ -411,6 +472,7 @@ attach_and_wait() {  # <attached-pid>
 # Run one supervision cycle: hold exactly one live watcher up and block until it
 # ends. Sets CYCLE to what firstmate must be told:
 #   wake      - the watcher printed a reason line (already in $child_out)
+#   standby   - another arm owns supervision; park on it instead of exiting
 #   standdown - restart mode found a healthy peer and stood down
 #   quiet     - the cycle ended with nothing to report
 #   failed    - no watcher could be confirmed (FAILED line already printed)
@@ -425,7 +487,7 @@ run_cycle() {  # <cycle-mode>
   # rather than start a second one. (--restart skips this on its first cycle: it
   # just stopped this home's supervision and wants a fresh watcher.)
   if [ "$cycle_mode" = arm ] && healthy_watcher; then
-    stand_down_for_peer_arm && return 0
+    stand_by_for_peer_arm && return 0
     report_attached
     attach_and_wait "$HEALTHY_PID"
     CYCLE=quiet
@@ -477,7 +539,7 @@ run_cycle() {  # <cycle-mode>
       fi
       # Another watcher won the singleton; our child stood down.
       if [ "$cycle_mode" = arm ]; then
-        if stand_down_for_peer_arm; then
+        if stand_by_for_peer_arm; then
           reap_child
           return 0
         fi
@@ -540,6 +602,13 @@ while :; do
     wake)
       arm_log 'exit: watcher wake reason propagated'
       exit 0
+      ;;
+    standby)
+      # Park, do not exit: the exit would be a wake carrying no news. When the arm
+      # we stood by for is gone this loop takes the cycle over in its place.
+      arm_log "standby: ${CYCLE_DETAIL:-another arm holds supervision}"
+      stand_by_until_promoted
+      continue
       ;;
     standdown)
       arm_log "exit: stood down, ${CYCLE_DETAIL:-healthy peer holds the lock}"
