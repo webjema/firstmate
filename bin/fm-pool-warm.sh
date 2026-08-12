@@ -21,7 +21,7 @@
 #
 #   treehouse get --lease --lease-holder fm-warm-<project>   # create-or-reset
 #   bin/fm-worktree-provision.sh <path>                      # populate the deps
-#   treehouse return <path>                                  # release the lease
+#   treehouse return --force <path>                          # release the lease
 #
 # TREEHOUSE INSTALLS NOTHING. It hands over an empty worktree, and it CANNOT be
 # made to install from a repo's own treehouse.toml: treehouse ignores hooks there
@@ -69,6 +69,58 @@
 # THE LEASE IS WHAT MAKES IT SAFE. It is held for the WHOLE install, so a
 # concurrent `treehouse get` can never be handed a half-installed slot, and it is
 # released the moment the warm is done - warm or cold.
+#
+# AND THE RELEASE IS VERIFIED, NEVER ASSUMED. `treehouse return` on a dirty slot
+# aborts and still exits 0, so for a month every warm logged WARMED while its lease
+# survived: availability stayed 0, this script's own invariant provisioned another
+# slot every cycle, and the pool grew to 17 GB before the disk budget stopped it.
+# fm_pool_release now forces the return AND asks treehouse whether the lease is
+# actually gone; the "still LEASED" branch below is what that honesty surfaces.
+#
+# THE REAPER: A LEAKED WARM LEASE IS RECLAIMED, NOT ROUTED AROUND. Before growing
+# the pool, a warmer asks whether this pool already holds a lease under its OWN warm
+# holder; if it does, it releases that lease and then warms through the normal path,
+# where `treehouse get` hands back the slot it just freed. It is the only
+# self-healing in this path, and its safety rests on the pool lock, not on a string
+# test alone:
+#
+#   1. Only the pool-lock holder ever takes an fm-warm-* lease - warm_one leases
+#      strictly after acquire_pool_lock and releases strictly before the lock.
+#   2. So once THIS warmer holds that lock, no other warmer for this pool is
+#      running, and any fm-warm-<name> lease it can see is an orphan of a warm that
+#      is already over. (Which is why liveness is NOT re-tested here: we are the
+#      live warmer, so fm_pool_warmer_live is true by construction and would refuse
+#      every reap.)
+#   3. The holder is matched exactly, inside THIS pool's own status. A crew or
+#      secondmate lease is held under a task id (bin/fm-home-seed.sh), never under
+#      fm-warm-*, so no reachable lease belongs to anyone but this warm path.
+#
+# A live warmer's lease is untouchable for a plainer reason still: a second warmer
+# never gets past acquire_pool_lock at all.
+#
+# RELEASE, THEN LEASE AGAIN - never provision under the dead warm's lease. The warm
+# then holds a lease it took itself, and a release that keeps failing (a slot git can
+# no longer return) falls through to adding a slot rather than retrying the same
+# unreclaimable one every cycle, which would leave the project with no warm slot at
+# all. Reclaim runs BEFORE both ceilings and skips them on success, because it hands
+# `treehouse get` a free slot instead of asking for a new one - and a pool at its
+# budget is exactly where a stranded slot must still be recovered.
+#
+# It is not free. The reclaimed slot may have been created and never populated, so
+# the provision that follows can still install a full dependency tree - the same disk
+# the pool would have spent on the new slot it is NOT creating.
+#
+# It only fires when the pool has no free slot, because that is the only case that
+# gets this far (see the avail >= 1 early return). A leaked lease beside a free slot
+# waits for the cycle that needs it; bin/fm-pool-status.sh reports it meanwhile.
+#
+# One accepted risk, in two shapes: the pool lock dies with the warmer PROCESS, not
+# with its children, so a warm SIGKILLed (or timed out - `timeout` sends TERM and
+# returns) can leave a live `treehouse get` or installer running against a slot whose
+# lease the next cycle then judges an orphan and forces back. The loser is a slot
+# left dirty or half-reset, which fm-pool-status.sh reports and a human can reclaim -
+# strictly better than the behavior this replaces, where that slot left the pool
+# forever. No crew work is ever at stake: the racing process is our own warm.
 #
 # ONE TIME BUDGET FOR THE WHOLE WARM, taken BEFORE the lease is asked for and
 # handed to the provisioner as FM_PROVISION_DEADLINE. The `treehouse get` is
@@ -169,22 +221,27 @@ acquire_pool_lock() {  # <project-real-path>
 # slot from the pool FOREVER - its gigabytes still counted against the disk budget,
 # recovered only if a human reads a POOL_SLOT line. bash runs an EXIT trap on
 # SIGTERM, so a graceful reboot is a cleanup opportunity, and this takes it.
-# WARM_LEASE/WARM_LEASE_PROJECT are globals precisely so the trap can see them; a
-# `local` inside warm_one is invisible here, which is how the lease leaked.
+# WARM_LEASE_PROJECT is a global precisely so the trap can see it; a `local` inside
+# warm_one is invisible here, which is how the lease leaked.
+#
+# IT ASKS TREEHOUSE WHICH SLOT IT HOLDS; IT NEVER FORCES A REMEMBERED PATH. Two
+# reasons, and the second is a safety rail. A warmer killed mid-install holds a lease
+# whose path it never learned - `treehouse get --lease` marks the lease first and
+# prints the path only at the end - so a remembered path is not even available in the
+# case this trap exists for. And a path we remember may already be RELEASED, which
+# makes it a slot `treehouse get` can hand to a crew; forcing that would hard-reset
+# someone's work. treehouse's own status is the only thing that knows, so ask it.
+# Whatever it names under our holder is ours to release: only a pool-lock holder ever
+# takes an fm-warm-* lease, and this runs before the lock goes back.
 release_warm_resources() {
-  local slot
+  local slot holder err
   if [ -n "${WARM_LEASE_PROJECT:-}" ]; then
-    slot=${WARM_LEASE:-}
-    # Killed mid-install? Then treehouse holds a lease whose path we never learned
-    # (it prints the path only at the very end). Ask treehouse which slot
-    # our holder owns rather than walk away from a lease we cannot name.
-    [ -n "$slot" ] || \
-      slot=$(fm_pool_leased_by "$WARM_LEASE_PROJECT" "fm-warm-$(basename "$WARM_LEASE_PROJECT")" 2>/dev/null || true)
+    holder="fm-warm-$(basename "$WARM_LEASE_PROJECT")"
+    slot=$(fm_pool_leased_by "$WARM_LEASE_PROJECT" "$holder" 2>/dev/null || true)
     if [ -n "$slot" ]; then
-      fm_pool_release "$WARM_LEASE_PROJECT" "$slot" || \
-        log "LEAKED $(basename "$WARM_LEASE_PROJECT"): could not release lease on $slot"
+      err=$(fm_pool_release "$WARM_LEASE_PROJECT" "$slot" 2>&1) || \
+        log "LEAKED $(basename "$WARM_LEASE_PROJECT"): could not release lease on $slot${err:+ - $err}"
     fi
-    WARM_LEASE=""
     WARM_LEASE_PROJECT=""
   fi
   fm_pool_lock_release
@@ -195,7 +252,7 @@ release_pool_lock() { release_warm_resources; }
 # warm_one <project-real-path>: enforce always-plus-one for ONE pool.
 warm_one() {  # <project-real-path>
   local project=$1 name avail slots max_trees pool_dir used_kb est_kb budget_kb path rc timeout_secs line
-  local warm_deadline prov_rc prov_out
+  local warm_deadline prov_rc prov_out reaped reclaimed rel_rc rel_err
   name=$(basename "$project")
 
   fm_pool_read "$project" || {
@@ -223,52 +280,93 @@ warm_one() {  # <project-real-path>
   fi
   slots=$FM_POOL_SLOTS
 
-  # Ceiling 1: treehouse's own max_trees.
-  max_trees=$(fm_pool_max_trees "$project")
-  if [ "$slots" -ge "$max_trees" ]; then
-    report_once "$project" "pool is at treehouse's max_trees ($slots/$max_trees slots); no warm slot can be added until one is reclaimed"
-    release_pool_lock
-    return 0
-  fi
-
-  # Ceiling 2: the disk budget. Estimate the next slot from the mean of the
-  # existing ones, because slot size is a property of the PROJECT (optiroq
-  # ~2.8 GB, firstmate ~6 MB) and a fixed count would treat those identically.
-  pool_dir=$FM_POOL_DIR
-  budget_kb=$(fm_pool_disk_budget_kb "$CONFIG")
-  used_kb=0
-  est_kb=0
-  if [ -n "$pool_dir" ] && [ -d "$pool_dir" ]; then
-    used_kb=$(du -sk "$pool_dir" 2>/dev/null | awk '{print $1}')
-    [ -n "$used_kb" ] || used_kb=0
-    [ "$slots" -gt 0 ] && est_kb=$((used_kb / slots))
-  fi
-  if [ "$est_kb" -gt 0 ] && [ $((used_kb + est_kb)) -gt "$budget_kb" ]; then
-    report_once "$project" "disk budget reached: pool uses $(fm_pool_gb "$used_kb") GB and the next slot needs about $(fm_pool_gb "$est_kb") GB, over the $(fm_pool_gb "$budget_kb") GB budget ($slots slots). Raise FM_POOL_DISK_BUDGET_GB or reclaim a slot; no warm slot will be added until then"
-    release_pool_lock
-    return 0
-  fi
-
-  # Warm it. The lease is held across the whole install, so no crew can be handed
-  # this slot half-installed.
-  #
-  # BOUNDED, because an unbounded warm is the worst failure in this system: a hung
-  # install (a dead registry, a lockfile that never resolves) would hang the warmer
-  # forever while it holds
-  # BOTH the pool lock - with a live pid, so no other warmer may ever reclaim it -
-  # and the treehouse lease, whose slot then leaves the pool permanently. And a
-  # live-pid lock makes fm-pool-status.sh's warmer_is_live() true, so the leaked
-  # lease is not even reported. Permanent AND invisible. The timeout ends that: the
-  # warm dies, the EXIT trap releases the lease and the lock, and the next cycle
-  # simply tries again.
-  log "WARM $name: no free slot ($slots in use); provisioning one preventively"
+  # ONE deadline for the WHOLE warm, taken before any lease is asked for or reused.
+  # Taking it after `treehouse get` returned would restart the clock: the get is
+  # itself bounded by timeout_secs, so a slow one plus a full provision budget held
+  # the pool lock - which is shared with every secondmate home pointing at this pool
+  # - for up to twice the bound the header promises.
   timeout_secs=$(fm_pool_warm_timeout)
-  # ONE deadline for the WHOLE warm, taken before the lease is asked for. Taking it
-  # after `treehouse get` returned would restart the clock: the get is itself bounded
-  # by timeout_secs, so a slow one plus a full provision budget held the pool lock -
-  # which is shared with every secondmate home pointing at this pool - for up to
-  # twice the bound the header promises.
   warm_deadline=$(( $(date +%s) + timeout_secs ))
+
+  # THE REAPER. We hold this pool's lock, and only a lock holder ever takes an
+  # fm-warm-* lease, so a lease still standing under OUR holder belongs to a warm
+  # that is already over - reclaim that slot rather than grow the pool around it.
+  # The header owns the full scope argument, including why liveness is deliberately
+  # not re-tested here and why no crew lease is reachable.
+  #
+  # It RELEASES the orphan and then leases again through the normal path, rather
+  # than provisioning under the dead warm's lease. Two reasons: the warm then holds
+  # a lease it took itself, and a release that keeps FAILING - a slot git can no
+  # longer return - falls through to adding a slot instead of retrying the same
+  # unreclaimable one forever, which would leave the project with no warm slot at
+  # all. The freed slot is what `treehouse get` hands back, so the pool does not
+  # grow; the ceilings are skipped for exactly that reason.
+  reclaimed=no
+  reaped=$(fm_pool_leased_by "$project" "fm-warm-$name")
+  if [ -n "$reaped" ]; then
+    rel_rc=0
+    rel_err=$(fm_pool_release "$project" "$reaped" 2>&1) || rel_rc=$?
+    if [ "$rel_rc" -eq 0 ]; then
+      log "REAP $name: $reaped was still leased by this pool's own warm holder with no warmer running; reclaimed it instead of adding a slot"
+      # The ceiling skip is EARNED, never assumed: ask whether the pool really has a
+      # free slot now. A released slot can fail to become one - treehouse can leave it
+      # dirty, and a crew takes slots with a plain `treehouse get` while holding no
+      # pool lock, so it can consume this one in the gap. Either way the `get` below
+      # would CREATE a slot, and skipping the budget for a creation is the exact
+      # outcome this branch exists to end.
+      if fm_pool_read "$project" && [ "$FM_POOL_AVAILABLE" -ge 1 ]; then
+        reclaimed=yes
+      else
+        log "WARM $name: the reclaimed slot is not free to take; falling back to provisioning one"
+      fi
+      slots=$FM_POOL_SLOTS
+    else
+      log "FAILED $name: could not reclaim the leaked lease on $reaped; adding a slot instead${rel_err:+ - $rel_err}"
+    fi
+  fi
+
+  if [ "$reclaimed" = no ]; then
+    # Ceiling 1: treehouse's own max_trees.
+    max_trees=$(fm_pool_max_trees "$project")
+    if [ "$slots" -ge "$max_trees" ]; then
+      report_once "$project" "pool is at treehouse's max_trees ($slots/$max_trees slots); no warm slot can be added until one is reclaimed"
+      release_pool_lock
+      return 0
+    fi
+
+    # Ceiling 2: the disk budget. Estimate the next slot from the mean of the
+    # existing ones, because slot size is a property of the PROJECT (optiroq
+    # ~2.8 GB, firstmate ~6 MB) and a fixed count would treat those identically.
+    pool_dir=$FM_POOL_DIR
+    budget_kb=$(fm_pool_disk_budget_kb "$CONFIG")
+    used_kb=0
+    est_kb=0
+    if [ -n "$pool_dir" ] && [ -d "$pool_dir" ]; then
+      used_kb=$(du -sk "$pool_dir" 2>/dev/null | awk '{print $1}')
+      [ -n "$used_kb" ] || used_kb=0
+      [ "$slots" -gt 0 ] && est_kb=$((used_kb / slots))
+    fi
+    if [ "$est_kb" -gt 0 ] && [ $((used_kb + est_kb)) -gt "$budget_kb" ]; then
+      report_once "$project" "disk budget reached: pool uses $(fm_pool_gb "$used_kb") GB and the next slot needs about $(fm_pool_gb "$est_kb") GB, over the $(fm_pool_gb "$budget_kb") GB budget ($slots slots). Raise FM_POOL_DISK_BUDGET_GB or reclaim a slot; no warm slot will be added until then"
+      release_pool_lock
+      return 0
+    fi
+
+    # Warm it. The lease is held across the whole install, so no crew can be handed
+    # this slot half-installed.
+    #
+    # BOUNDED, because an unbounded warm is the worst failure in this system: a hung
+    # install (a dead registry, a lockfile that never resolves) would hang the warmer
+    # forever while it holds
+    # BOTH the pool lock - with a live pid, so no other warmer may ever reclaim it -
+    # and the treehouse lease, whose slot then leaves the pool permanently. And a
+    # live-pid lock makes fm-pool-status.sh's warmer_is_live() true, so the leaked
+    # lease is not even reported. Permanent AND invisible. The timeout ends that: the
+    # warm dies, the EXIT trap releases the lease and the lock, and the next cycle
+    # simply tries again.
+    log "WARM $name: no free slot ($slots in use); provisioning one preventively"
+  fi
+
   # Record the intent to lease BEFORE leasing: if we are killed between treehouse
   # taking the lease and printing the path, the trap must still know which pool to
   # release. fm_pool_release on a pool with no lease held is a harmless no-op.
@@ -286,7 +384,6 @@ warm_one() {  # <project-real-path>
     release_warm_resources
     return 0
   fi
-  WARM_LEASE=$path
 
   # THIS is what makes a warm slot warm. treehouse hands over an EMPTY worktree -
   # it installs nothing, and cannot be made to from a repo's own treehouse.toml
@@ -317,8 +414,13 @@ EOF
   # Its deps survive the return (git clean -fd, no -x) - that is what makes it warm
   # for the next crew. The lease is released either way: a cold slot still belongs
   # back in the pool, and holding it would cost more than the failed install did.
-  if fm_pool_release "$project" "$path"; then
-    WARM_LEASE=""
+  #
+  # fm_pool_release VERIFIES the release against treehouse's own status rather than
+  # trusting its exit code, which is what makes the failure branch below reachable at
+  # all: a `treehouse return` that aborts on a dirty slot exits 0.
+  rel_rc=0
+  rel_err=$(fm_pool_release "$project" "$path" 2>&1) || rel_rc=$?
+  if [ "$rel_rc" -eq 0 ]; then
     WARM_LEASE_PROJECT=""
     if [ "$prov_rc" -eq 0 ]; then
       log "WARMED $name: $path is free and warm"
@@ -328,9 +430,12 @@ EOF
     fi
   else
     # The lease is still held, whatever the install did. Do NOT hide that: a
-    # still-leased slot is one the pool cannot hand out. Leave WARM_LEASE set so
-    # the EXIT trap tries once more.
-    log "FAILED $name: treehouse return failed for $path; the slot is still LEASED"
+    # still-leased slot is one the pool cannot hand out. WARM_LEASE_PROJECT stays
+    # set, so release_warm_resources below asks treehouse which slot this holder
+    # owns and tries once more - not necessarily THIS slot, because with several
+    # leaks outstanding it releases whichever the pool reports first. Every one of
+    # them is a warm orphan, so any of them is a safe thing to free.
+    log "FAILED $name: treehouse return failed for $path; the slot is still LEASED${rel_err:+ - $rel_err}"
   fi
   release_warm_resources
   return 0
@@ -365,10 +470,11 @@ resolve_project() {  # <name-or-path>
   fi
 }
 
-# Globals, NOT locals: the EXIT trap must be able to see the lease. A `local path`
-# inside warm_one is invisible to the trap, which is exactly how a warmer killed
-# mid-install leaked its treehouse lease and removed a slot from the pool forever.
-WARM_LEASE=""
+# A global, NOT a local: the EXIT trap must be able to see which POOL this warm is
+# leasing from. It deliberately remembers no slot path - release_warm_resources asks
+# treehouse which slot the holder owns at trap time - but without the project a
+# warmer killed mid-install cannot ask at all, which is how it leaked its lease and
+# removed a slot from the pool forever.
 WARM_LEASE_PROJECT=""
 # INT/TERM as well as EXIT: bash runs the EXIT trap on a caught signal, and a
 # reboot's SIGTERM is precisely the case that was leaking the lease.

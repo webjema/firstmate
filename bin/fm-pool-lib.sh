@@ -360,9 +360,76 @@ EOF
   return 0
 }
 
-# fm_pool_release <project-real-path> <slot-path>: release the lease. The slot's
-# installed dependencies SURVIVE this (treehouse's reset is `git clean -fd`, no
-# -x, so gitignored trees are kept) - which is what leaves it available AND warm.
+# fm_pool_lease_held <project-real-path> <slot-path>: does treehouse still report
+# <slot-path> as leased?
+#
+# STRICTLY ONE SLOT, DELIBERATELY. An earlier draft also answered "held" when any
+# OTHER slot in the pool carried the same holder, and that is wrong twice over: the
+# leak this branch fixes leaves SEVERAL slots under one fm-warm-<name> holder, so a
+# perfectly good release would be reported FAILED - and the caller's retry would then
+# force a path it had already returned, which by then may belong to a crew.
+#
+# FAILS CLOSED. A pool it cannot read is a pool whose lease it cannot see gone, and
+# reporting an unverified release is the exact failure fm_pool_release exists to end.
+# A path with no row at all is NOT held: the slot is not in the pool, so nothing can
+# be leasing it, and forcing it again could only reach a stranger.
+fm_pool_lease_held() {  # <project-real-path> <slot-path>
+  local project=$1 slot=$2 name state path lease
+  [ -n "$slot" ] || return 1
+  fm_pool_read "$project" || return 0
+  while IFS=$(printf '\t') read -r name state path lease; do
+    [ -n "${name:-}" ] || continue
+    [ "$state" = leased ] || continue
+    [ "$path" = "$slot" ] && return 0
+  done <<EOF
+$FM_POOL_TABLE
+EOF
+  return 1
+}
+
+# fm_pool_release <project-real-path> <slot-path>: release the lease, and
+# CONFIRM it was released. The slot's installed dependencies SURVIVE this
+# (treehouse's reset is `git clean -fd`, no -x, so gitignored trees are kept) -
+# which is what leaves it available AND warm.
+#
+# --force IS NOT COSMETIC, AND THE EXIT CODE IS NOT THE VERDICT. `treehouse return`
+# on a worktree with an uncommitted TRACKED file prompts "Worktree has uncommitted
+# changes. Clean and return? [Y/n]", and a warmer runs detached with no terminal to
+# answer it - so treehouse prints "Aborted.", leaves the lease held, and EXITS 0
+# (reproduced by hand, treehouse v2.0.0, 2026-08-12). The warm path believed that
+# zero and logged the slot free. It was not: availability never rose, always-plus-one
+# provisioned another slot every cycle, and the pool reached 6 slots / 17 GB on
+# 2026-08-11 and 13 slots / 35.8 GB before that. bin/fm-teardown.sh and
+# bin/fm-home-seed.sh have always forced; this was the one caller that did not.
+#
+# The slot is dirty in the first place because an operator's treehouse post_create
+# hook installs dependencies INSIDE `treehouse get`, so the lockfile is already
+# rewritten when bin/fm-worktree-provision.sh takes its "already modified" snapshot
+# and correctly declines to restore it.
+#
+# FORCING DISCARDS NOTHING A HUMAN WROTE. Every caller is on the warm path
+# (bin/fm-pool-warm.sh), releasing a lease taken under an fm-warm-<name> holder -
+# this warm's own, or one a dead warm left behind - and a leased slot is never handed
+# to a crew, so the only thing a force can clean off it is the installer's own
+# lockfile rewrite.
+# Crew and secondmate leases are held under a task id, never under fm-warm-*, and
+# nothing here ever releases one.
+#
+# treehouse's stderr is kept for a FAILED release only, squashed to one line for the
+# caller's log: a verified release is the routine case and stays silent, while a
+# release that fails for some NEW reason must not. An unreadable pool says so in its
+# own words, because that failure prints nothing on its own and "still LEASED" with
+# no reason is how this bug hid for a month in the first place.
 fm_pool_release() {  # <project-real-path> <slot-path>
-  (cd "$1" 2>/dev/null && treehouse return "$2" >/dev/null 2>&1)
+  local project=$1 slot=$2 err
+  err=$( (cd "$project" 2>/dev/null && treehouse return --force "$slot" >/dev/null) 2>&1 ) || true
+  if fm_pool_lease_held "$project" "$slot"; then
+    if ! fm_pool_read "$project"; then
+      printf 'treehouse status is unreadable, so the release could not be verified\n' >&2
+    elif [ -n "$err" ]; then
+      printf 'treehouse return: %s\n' "$(printf '%s' "$err" | tr '\n' ' ')" >&2
+    fi
+    return 1
+  fi
+  return 0
 }

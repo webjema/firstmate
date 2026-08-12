@@ -46,9 +46,13 @@ The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then
   If it holds real work, dispatch a crewmate to recover it before anything else.
   Only once the work is landed, or the user has explicitly said to discard it, may the printed `treehouse destroy ... --include-unlanded --yes` be run - it is irreversible, so it needs the user's word (`AGENTS.md` section 8: anything destructive reaches the user).
   A pool quietly shrinking is not urgent enough to interrupt the user with on its own; fold it into the next natural reply, in outcome language ("one of the workspaces for <project> still has unsaved work in it from a crash").
-- `POOL_SLOT: <project>: slot <name> is LEASED ... with no live warmer` / `is ORPHANED ...` - a slot reserved by a process that no longer exists, so the pool cannot hand it out.
-  A stale warm lease holds no work: run the printed `treehouse return <path>` to release it.
-  An orphaned slot may still hold a dead crew's work: inspect it with the printed command and treat it exactly like the DIRTY case above.
+- `POOL_SLOT: <project>: slot <name> is LEASED ... with no live warmer` - a warm workspace whose reservation outlived the warm that took it, so the pool cannot hand it out.
+  It holds no work, so the printed release command is safe to run.
+  Warming reclaims such a slot on its own, but only on the next cycle that finds that project with no free workspace at all - so on an idle project it can sit reserved indefinitely, still counted against the disk budget and reprinted at every session start.
+  Run the printed command rather than wait for it - but only while no warm is running for that project, because a warm that started since the report may have reclaimed that very slot and be installing into it, and the force would pull the slot out from under it.
+  `bin/fm-pool-status.sh <project>` reprints the line only while it is still true, so a re-run is the check.
+- `POOL_SLOT: <project>: slot <name> is ORPHANED ...` - a slot reserved by a process that no longer exists.
+  It may still hold a dead crew's work: inspect it with the printed command and treat it exactly like the DIRTY case above.
 - `POOL_BUDGET: <project>: <reason>` - preventive workspace warming has STOPPED for that project because it hit its disk budget or treehouse's `max_trees`, and it will stay stopped until something changes; crews will pay the slow cold-install path again (`bin/fm-pool-warm.sh` owns the policy).
   This is a capacity decision for the user, so relay it in outcome language with the numbers the line carries ("<project>'s workspaces are using X GB of a Y GB budget, so I've stopped adding more - I can raise the budget or clear out old ones").
   Raising the budget means `FM_POOL_DISK_BUDGET_GB` or `config/pool-disk-budget-gb` (`docs/configuration.md`); reclaiming a slot means resolving a POOL_SLOT line above.
