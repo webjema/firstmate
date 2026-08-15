@@ -7,22 +7,31 @@
 # the CLI over these helpers, and bin/fm-brief.sh sources them for the
 # is-this-project-indexed check it needs at scaffold time.
 #
-# CLI SURFACE (verified 2026-08-10 against codebase-memory-mcp 0.8.1 at
+# CLI SURFACE (verified 2026-08-15 against codebase-memory-mcp 0.9.0 at
 # ~/.local/bin/codebase-memory-mcp; `--version` and `cli` with no tool are the two
 # commands that print it). The same tools the MCP server exposes are reachable
 # from bash, and a tool's arguments are ONE POSITIONAL JSON OBJECT:
 #     codebase-memory-mcp cli [--progress] [--json] <tool> [json_args]
-# There is no flag form. 0.8.1 answers `--repo_path /x` and `--repo-path /x` alike
-# with `repo_path is required` on stderr and exit 1, which is what silently stalled
-# every refresh until 2026-08-09; docs/graph-cli-backend.md holds that evidence.
-# JSON is BUILT WITH jq, never string-concatenated, so a repo path holding a space,
-# a quote, or a backslash cannot break or inject into the argument.
+# The argument surface has moved twice, in opposite directions - 0.8.1 had no flag
+# form at all, 0.9.0 has flags back and deprecates the positional JSON it still
+# honours - so the one shape that works on both is the shape on its way out.
+# docs/graph-cli-backend.md owns that history and the migration paths 0.9.0 offers;
+# changing transport is a decision for the fleet's owner, not a side effect of some
+# other change. What firstmate builds today is that positional JSON, BUILT WITH jq
+# rather than concatenated, so a repo path holding a space, a quote, or a backslash
+# cannot break or inject into it.
 #
-# index_repository takes repo_path (required), mode, persistence, and
-# target_projects - and NO name. 0.8.1 always derives the project name from the
-# resolved repo path, so a refresh lands on the recorded entry only when that
-# entry's name is the derived one; fm_graph_reindex verifies this from the
-# response rather than asserting it with a flag that no longer exists.
+# index_repository takes repo_path (required), name, mode, persistence, and
+# target_projects. NAME IS THE ONE THAT ADDRESSES THE ENTRY: without it the binary
+# derives the project from the resolved repo path, so a refresh reaches the
+# recorded entry only when that entry's name happens to be the derived slug - and
+# an entry the user named by hand (or one whose clone moved) can then never be
+# refreshed at all, however healthy each run looked. fm_graph_reindex passes the
+# name the lookup returned and still verifies the landing from the response, which
+# is also what makes a binary that ignores `name` fail loudly instead of quietly
+# refreshing some other entry. Alone among these, `name` can CREATE an entry, so it
+# is only ever passed a name fm_graph_project_for_path just read back out of the
+# graph - never one derived from a path or a caller's argument.
 #
 # The binary logs `level=info msg=... ` lines on stderr and prints its JSON payload
 # on stdout, but nothing in the contract promises the payload starts at the first
@@ -141,9 +150,10 @@ fm_graph_note_error() {
 
 # fm_graph_distill <stderr-file>: the CLI's own words, cut down to one line fit to
 # embed in a warning. Every call logs several `level=info` progress lines, so those
-# are dropped and the last two remaining lines are kept - on a tool error 0.8.1
+# are dropped and the last two remaining lines are kept - on a tool error the CLI
 # writes both a plain reason and its JSON error payload to stderr, and the reason
-# alone is often the more useful of the two.
+# alone is often the more useful of the two. Only `level=info` is filtered, so the
+# `level=warn` line 0.9.0 emits alongside a failure rides in as that reason.
 fm_graph_distill() {
   local msg
   msg=$(grep -v 'level=info' "$1" 2>/dev/null \
@@ -157,8 +167,8 @@ fm_graph_distill() {
 # --- calling the CLI --------------------------------------------------------
 
 # fm_graph_call <timeout-secs> <tool> [json-args]: run one graph tool and print
-# its JSON payload on stdout. <json-args> is the single positional JSON object the
-# 0.8.1 CLI takes (see the header); omit it for a tool that needs no arguments.
+# its JSON payload on stdout. <json-args> is the single positional JSON object every
+# version of the CLI has taken (see the header); omit it for a tool that needs none.
 # Returns non-zero when the binary is unavailable, the call fails or times out, or
 # the output holds no JSON object, and notes the cause via fm_graph_note_error.
 # Leading non-JSON lines (the mem.init log) are dropped rather than assumed away.
@@ -233,28 +243,32 @@ fm_graph_project_for_path() {
 # one. Echoes the node count on success; returns 1 on any failure, having noted
 # the cause via fm_graph_note_error. Never passes persistence true (see header).
 #
-# It passes the RESOLVED path, and then checks the project the CLI says it wrote.
-# 0.8.1 has no name argument - it derives the name from the path it was handed -
-# so passing the same resolved path the lookup matched on is the only way to land
-# on the recorded entry, and the returned name is the only proof that it did.
-# A mismatch means the refresh silently populated some other entry while the one
-# firstmate reads went stale, which is worth a named failure rather than a green line.
+# It passes the RESOLVED path AND the name the lookup read out of the graph (the
+# header owns why the name is what addresses an entry), then checks the project the
+# CLI says it wrote. Aiming and landing are not interchangeable: the name aims the
+# refresh, only the response proves it arrived, and a binary that ignored the name
+# fails here by name instead of refreshing some other entry quietly.
 # The proof is REQUIRED, not merely checked when offered: a response carrying no
-# project is a landing nothing verified, and printing a green line for one would be
-# the same unearned reassurance this whole change exists to remove. 0.8.1 always
-# reports it, so requiring it costs nothing today and fails loudly if that changes.
+# project is a landing nothing verified, and a green line for one is the unearned
+# reassurance both of docs/graph-cli-backend.md's incidents are about.
 fm_graph_reindex() {
   local dir=$1 name=$2 abs mode args json status project nodes
   mode=$(fm_graph_mode)
   [ "$mode" != off ] || return 1
+  # Enforced here rather than trusted to the caller: an empty name is not "refresh
+  # nothing", it is the unnamed call that slugs the path and can create an entry.
+  if [ -z "$name" ]; then
+    fm_graph_note_error "no project name given, so nothing identifies the entry to refresh"
+    return 1
+  fi
   if ! abs=$(cd "$dir" 2>/dev/null && pwd -P); then
     fm_graph_note_error "could not resolve '$dir' to a directory"
     return 1
   fi
   # jq builds the argument, so a path holding a space, a quote, or a backslash is
   # carried as data rather than concatenated into a string the CLI must re-parse.
-  if ! args=$(jq -nc --arg repo_path "$abs" --arg mode "$mode" \
-    '{repo_path: $repo_path, mode: $mode, persistence: false}'); then
+  if ! args=$(jq -nc --arg repo_path "$abs" --arg name "$name" --arg mode "$mode" \
+    '{repo_path: $repo_path, name: $name, mode: $mode, persistence: false}'); then
     fm_graph_note_error "could not build the index_repository arguments"
     return 1
   fi

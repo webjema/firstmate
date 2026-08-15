@@ -6,9 +6,10 @@
 # helper file rather than a per-suite mock because three suites need the same stub,
 # and a stub copied three times drifts three ways.
 #
-# The stub stands in for `codebase-memory-mcp cli <tool> [json_args]`, the 0.8.1
-# surface. It REJECTS a --flag argument exactly the way the real binary does, so a
-# regression back to the flag form fails here instead of silently on the fleet.
+# The stub stands in for `codebase-memory-mcp cli <tool> [json_args]`, the 0.9.0
+# surface. It REFUSES a --flag argument, which is deliberately stricter than 0.9.0
+# and pins what firstmate builds rather than what the installed binary happens to
+# tolerate; docs/graph-cli-backend.md owns the surface and how it has moved.
 # Point FM_GRAPH_CLI at it, then drive it with these run-time env vars:
 #   FM_STUB_PROJECTS  file holding the list_projects JSON payload (see fm_graph_stub_projects)
 #   FM_STUB_LOG       file the stub appends one line of "<tool> <args...>" to per call
@@ -22,21 +23,23 @@
 #                     entirely, the way a future binary that stopped reporting it would
 #   FM_STUB_INDEX_STATUS   status index_repository reports, instead of "indexed"
 #
-# Like the real 0.8.1 binary, index_repository takes NO name and never consults the
-# recorded entry: it DERIVES the project from the repo_path it was handed. Modelling
-# that faithfully is what lets a test tell a refresh that landed on the recorded
-# entry from one that landed elsewhere - a stub that looked the path up instead
-# would answer with the recorded name for a path the binary would slug differently,
-# and so would report a landing the binary never performs.
+# Like the real 0.9.0 binary, index_repository writes the entry named by `name` and,
+# only when no name is given, DERIVES one by slugging the repo_path it was handed -
+# it never looks the path up. Modelling both halves faithfully is what lets a test
+# tell a refresh that landed on the recorded entry from one that landed elsewhere:
+# a stub that always looked the path up would answer with the recorded name even for
+# an unnamed call the binary would slug differently, and so would report a landing
+# the binary never performs.
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# fm_graph_derived_name <path>: the project name the real binary derives for <path>.
-# 0.8.1 keeps [A-Za-z0-9._], turns every other character into a dash, collapses runs
-# of dashes, and trims the ends - so /home/u/projects/x becomes home-u-projects-x,
-# and a path holding a space or a quote slugs rather than being rejected. Probed
-# against 0.8.1; docs/graph-cli-backend.md holds the evidence.
+# fm_graph_derived_name <path>: the project name the real binary derives for <path>
+# when it is handed no name. It keeps [A-Za-z0-9._], turns every other character into
+# a dash, collapses runs of dashes, and trims the ends - so /home/u/projects/x becomes
+# home-u-projects-x, and a path holding a space or a quote slugs rather than being
+# rejected. Probed against 0.8.1 and re-probed against 0.9.0;
+# docs/graph-cli-backend.md holds the evidence.
 fm_graph_derived_name() {
   local s
   s=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._' '-' | tr -s '-')
@@ -51,7 +54,7 @@ fm_graph_stub() {
   {
     cat <<'SH'
 #!/usr/bin/env bash
-# Fake codebase-memory-mcp: `<stub> cli <tool> [json_args]` (the 0.8.1 surface).
+# Fake codebase-memory-mcp: `<stub> cli <tool> [json_args]` (the 0.9.0 surface).
 set -u
 SH
     # The stub gets the derivation rule as the definition above rather than a second
@@ -73,10 +76,10 @@ if [ -n "${FM_STUB_NOISE:-}" ]; then
   echo "level=info msg=mem.init budget_mb=3904 total_ram_mb=15617"
   echo "level=info msg=pipeline.discover files=0 elapsed_ms=0"
 fi
-# 0.8.1 takes ONE positional JSON object and knows no flags at all: it reads a
-# --flag as a tool argument it cannot parse and dies with "repo_path is required".
-# Reproducing that here is the point of the stub - it is what makes a regression to
-# the flag form a red test rather than a fortnight of silent staleness.
+# One positional JSON object is the only form firstmate builds today (see this file's
+# header). 0.8.1 answered a --flag with "repo_path is required"; keeping that answer
+# here is what makes a regression to the flag form a red test rather than a fortnight
+# of silent staleness, whichever surface the installed binary happens to have.
 args=${1:-}
 case "$args" in
   --*) echo "repo_path is required" >&2; exit 1 ;;
@@ -95,10 +98,11 @@ case "$tool" in
       echo "repo_path is required" >&2
       exit 1
     fi
-    # No name argument exists, and the binary never looks the path up: it slugs the
-    # path it was handed. So does this, which is why a lookup that matched on some
-    # OTHER path shows up here as a landing on a different project.
-    project=${FM_STUB_INDEX_PROJECT:-$(fm_graph_derived_name "$repo_path")}
+    # `name` picks the entry; with no name the binary slugs the path it was handed
+    # and never looks it up. So does this, which is why an unnamed call whose lookup
+    # matched on some OTHER path shows up here as a landing on a different project.
+    name=$(printf '%s' "$args" | jq -r '.name // empty' 2>/dev/null)
+    project=${FM_STUB_INDEX_PROJECT:-${name:-$(fm_graph_derived_name "$repo_path")}}
     if [ -n "${FM_STUB_INDEX_NO_PROJECT:-}" ]; then
       jq -nc --arg status "${FM_STUB_INDEX_STATUS:-indexed}" \
         '{nodes: 4321, edges: 9876, status: $status}'
