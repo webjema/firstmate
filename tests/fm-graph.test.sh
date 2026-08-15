@@ -20,9 +20,11 @@
 # 2026-08-09 the flag form bin/fm-graph-lib.sh had used for a fortnight stopped
 # being one the CLI accepted, and every refresh failed non-fatally and silently -
 # a suite that only asserted the string we build would have stayed green through
-# all of it. So the argument shape is checked two ways: the stub rejects a --flag
-# the way 0.8.1 does, and test_real_cli_* drives the installed binary end to end
-# against a throwaway repo and graph cache, skipping cleanly when it is absent.
+# all of it. So the argument shape is checked two ways: the stub refuses a --flag,
+# holding firstmate's own invocation to the JSON form, and test_real_cli_* drives the
+# installed binary end to end against a throwaway repo and graph cache, skipping
+# cleanly when it is absent - including a check that it is still the version
+# docs/graph-cli-backend.md records as verified.
 set -u
 
 # shellcheck source=tests/graph-helpers.sh
@@ -52,11 +54,10 @@ run_reindex() {
     "$ROOT/bin/fm-graph-reindex.sh" "$arg" 2> "$home/stderr.log"
 }
 
-# derived_for <dir>: the project name the graph holds for <dir> - its resolved path,
-# slugged the way the binary slugs it (see fm_graph_derived_name). A happy-path
-# fixture must record THIS name and no other: the CLI derives the project from the
-# path it is handed, so an entry named anything else is one a refresh can never
-# land on, and a fixture that pretends otherwise tests a graph that cannot exist.
+# derived_for <dir>: the name the binary would slug out of <dir>'s resolved path if
+# it were handed no name (see fm_graph_derived_name). Two uses, and only two: a
+# fixture for the common entry whose recorded name IS the slug, and - in the tests
+# below that turn on addressing - the name a refresh must NOT land on.
 derived_for() { fm_graph_derived_name "$(cd "$1" && pwd -P)"; }
 
 test_help_includes_entire_header() {
@@ -87,15 +88,15 @@ test_refreshes_indexed_project() {
 
 # --- the argument surface ---------------------------------------------------
 
-# The 2026-08-09 regression in one assertion: 0.8.1 takes a single positional JSON
-# object, and a --flag is not a degraded form of that, it is an outright error.
+# The 2026-08-09 regression in one assertion. It pins what firstmate builds, not what
+# the installed binary tolerates, which is why it survives the surface moving.
 test_arguments_are_one_json_object_not_flags() {
   local home repo log args
   read -r home repo <<<"$(new_case)"
   log="$home/calls.log"
   fm_graph_stub_projects "$home/projects.json" "$(derived_for "$repo")" "$repo"
   FM_STUB_PROJECTS="$home/projects.json" FM_STUB_LOG="$log" run_reindex "$home" "$repo" >/dev/null
-  assert_no_grep "index_repository --" "$log" "no graph call may pass a flag; 0.8.1 has no flag form"
+  assert_no_grep "index_repository --" "$log" "no graph call may pass a flag; JSON is the shape every version takes"
   args=$(sed -n 's/^index_repository //p' "$log")
   printf '%s' "$args" | jq -e . >/dev/null 2>&1 \
     || fail "index_repository must be handed one parseable JSON object, got: $args"
@@ -104,6 +105,32 @@ test_arguments_are_one_json_object_not_flags() {
   [ "$(printf '%s' "$args" | jq -r '.mode')" = full ] || fail "mode must ride in the JSON, got: $args"
   [ "$(printf '%s' "$args" | jq -r '.persistence')" = false ] || fail "persistence must ride in the JSON, got: $args"
   pass "fm-graph-lib.sh: a tool call is one positional JSON object, never flags"
+}
+
+# --- addressing the recorded entry ------------------------------------------
+#
+# The defect these pin: for a project whose recorded name is not the slug of its
+# clone path, a refresh that sends only the path lands on the slug, and the recorded
+# entry - the one every brief points its crew at - is never refreshed at all.
+# docs/graph-cli-backend.md's "unreachable entry" incident holds the live case.
+
+# The fix in one assertion: the name the lookup read out of the graph is what the
+# refresh is addressed by, so the entry firstmate reads is the entry that moves.
+test_refresh_addresses_the_recorded_name() {
+  local home repo out log args
+  read -r home repo <<<"$(new_case)"
+  log="$home/calls.log"
+  fm_graph_stub_projects "$home/projects.json" recorded-proj "$repo"
+  out=$(FM_STUB_PROJECTS="$home/projects.json" FM_STUB_LOG="$log" run_reindex "$home" "$repo")
+  args=$(sed -n 's/^index_repository //p' "$log")
+  [ "$(printf '%s' "$args" | jq -r '.name')" = recorded-proj ] \
+    || fail "the refresh must be addressed by the graph's recorded name, got: $args"
+  assert_contains "$out" "project=recorded-proj" "the refresh must land on the recorded entry"
+  assert_not_contains "$out" "$(derived_for "$repo")" \
+    "the refresh must not land on the slug of the clone path"
+  assert_no_grep "graph refresh failed" "$home/stderr.log" \
+    "a project whose recorded name is not the path slug must still refresh"
+  pass "fm-graph-reindex.sh: the refresh is addressed by the name the graph records"
 }
 
 # A path holding a space (or a quote) must survive as data. jq builds the argument
@@ -137,28 +164,23 @@ test_tolerates_non_json_leading_output() {
 }
 
 # The lookup keys on the resolved path and accepts a match on git.canonical_root, so
-# an entry pinned to one is FOUND - and then cannot be refreshed, because the CLI
-# derives the project from the path it is handed rather than from the entry that
-# matched. This test says so out loud. It used to claim the refresh succeeded, which
-# was true only of the stub: the stub answered with the recorded name, while the real
-# binary would answer with the slug of the clone path and trip the mismatch guard.
-# The condition is latent on 0.8.1 (its list_projects carries no git block at all,
-# so nothing supplies a canonical_root), and closing it for good means not sending
-# the clone path in the first place - out of scope here, pinned here so it is visible.
-test_canonical_root_match_cannot_land_and_says_so() {
-  local home repo out code
+# an entry recorded against a worktree is FOUND under the canonical clone - and now
+# refreshed, because the name comes from the entry that matched rather than from the
+# path being sent. This case used to assert the opposite and named the reason: the
+# binary slugged the clone path and tripped the mismatch guard, leaving an entry
+# firstmate could see but never refresh. The condition is live, not latent - 0.9.0's
+# list_projects carries the git block that supplies a canonical_root, where 0.8.1's
+# carried none.
+test_canonical_root_match_refreshes_the_recorded_entry() {
+  local home repo out
   read -r home repo <<<"$(new_case)"
   fm_graph_stub_projects_canonical_only "$home/projects.json" canonical-proj "$repo"
-  out=$(FM_STUB_PROJECTS="$home/projects.json" run_reindex "$home" "$repo"); code=$?
-  expect_code 0 "$code" "a canonical-root mismatch must not fail the caller"
-  [ -z "$out" ] || fail "a refresh that landed elsewhere must not claim success, got: $out"
-  assert_no_grep "not found in the graph" "$home/stderr.log" \
-    "the entry must still be FOUND; only the refresh cannot reach it"
-  assert_grep "graph refresh failed" "$home/stderr.log" "an unreachable entry must warn"
-  assert_grep "canonical-proj" "$home/stderr.log" "the warning must name the entry left stale"
-  assert_grep "$(derived_for "$repo")" "$home/stderr.log" \
-    "the warning must name the path-derived project the refresh actually wrote"
-  pass "fm-graph-reindex.sh: a canonical-root-only entry is found, and its refresh fails loudly"
+  out=$(FM_STUB_PROJECTS="$home/projects.json" run_reindex "$home" "$repo")
+  assert_contains "$out" "project=canonical-proj" \
+    "an entry matched on its canonical root must be refreshed under its own name"
+  assert_no_grep "graph refresh failed" "$home/stderr.log" \
+    "a canonical-root match is reachable now that the name addresses it"
+  pass "fm-graph-reindex.sh: a canonical-root-only entry is found and refreshed in place"
 }
 
 # A bare project name resolves against the home's projects/ dir, like fleet sync's.
@@ -190,6 +212,8 @@ test_note_error_is_silent_when_the_file_is_unwritable() {
   pass "fm-graph-lib.sh: an unwritable FM_GRAPH_ERR_FILE stays silent, bash noise and all"
 }
 
+# The never-index-an-unheld-project rule, load-bearing now that `name` can CREATE an
+# entry (bin/fm-graph-lib.sh's header owns why): no entry, no name, no call.
 test_unindexed_project_is_skipped_not_indexed() {
   local home repo out code log
   read -r home repo <<<"$(new_case)"
@@ -201,6 +225,22 @@ test_unindexed_project_is_skipped_not_indexed() {
   assert_grep "not found in the graph" "$home/stderr.log" "an unindexed project must warn on stderr"
   assert_no_grep "index_repository" "$log" "an unindexed project must never be indexed as a side effect"
   pass "fm-graph-reindex.sh: skips (never indexes) a project the graph does not hold"
+}
+
+# The same rule one layer down, so it does not rest on the caller alone.
+test_reindex_refuses_an_empty_name() {
+  local home repo log code
+  read -r home repo <<<"$(new_case)"
+  log="$home/calls.log"
+  # The mode is pinned rather than inherited: fm_graph_mode resolves its config file
+  # against the invoking cwd here, and a `off` there would return before the guard,
+  # passing both assertions for the wrong reason.
+  FM_GRAPH_CLI="$STUB" FM_STUB_LOG="$log" FM_GRAPH_REINDEX_MODE=full bash -c \
+    '. "$1/bin/fm-graph-lib.sh"; fm_graph_reindex "$2" ""' _ "$ROOT" "$repo" >/dev/null 2>&1
+  code=$?
+  expect_code 1 "$code" "an empty project name must be refused"
+  [ ! -s "$log" ] || fail "an empty name must never reach the CLI, got: $(cat "$log")"
+  pass "fm-graph-lib.sh: refuses an empty project name rather than slugging the path"
 }
 
 test_missing_binary_is_non_fatal() {
@@ -318,10 +358,12 @@ SH
   pass "fm-graph-reindex.sh: a CLI that rejects the arguments says so in the warning"
 }
 
-# Passing the recorded name is no longer possible - 0.8.1 derives the project from
-# the path - so landing on the recorded entry is verified from the response. A
-# refresh that populated some OTHER entry left the one firstmate reads stale, which
-# is a failure however healthy the CLI's own "indexed" looked.
+# Asking for the recorded entry is not the same as reaching it, so the landing is
+# verified from the response whatever was asked for. A refresh that populated some
+# OTHER entry left the one firstmate reads stale, which is a failure however healthy
+# the CLI's own "indexed" looked. This is also the guard that keeps the `name`
+# argument honest against a binary that ignores it - 0.8.1 and anything older - which
+# reaches this same branch having silently landed on the path slug instead.
 test_refresh_landing_on_another_project_fails_loudly() {
   local home repo out code
   read -r home repo <<<"$(new_case)"
@@ -340,8 +382,8 @@ test_refresh_landing_on_another_project_fails_loudly() {
 # project proves nothing at all about where the refresh landed. Treating that as
 # success prints a green "graph refreshed" line asserting a landing nobody verified,
 # which is worse than the bare warning it replaced - it is this PR's own thesis
-# (a check that cannot detect its own failure) reproduced one layer down. 0.8.1
-# always reports the project, so this pins the contract against a binary that stops.
+# (a check that cannot detect its own failure) reproduced one layer down. Both 0.8.1
+# and 0.9.0 report the project, so this pins the contract against a binary that stops.
 test_refresh_without_a_project_fails_loudly() {
   local home repo out code
   read -r home repo <<<"$(new_case)"
@@ -521,7 +563,7 @@ test_real_cli_refreshes_an_indexed_project() {
   if ! CBM_CACHE_DIR="$cache" "$cli" cli index_repository "$args" >/dev/null 2>"$home/index.log"; then
     fail "the real CLI could not index the fixture repo: $(tail -3 "$home/index.log")"
   fi
-  out=$(CBM_CACHE_DIR="$cache" FM_GRAPH_REINDEX_MODE=fast FM_GRAPH_REINDEX_TIMEOUT_SECS=120 \
+  out=$(CBM_CACHE_DIR="$cache" FM_GRAPH_REINDEX_MODE=fast FM_GRAPH_REINDEX_TIMEOUT_SECS=120 FM_GRAPH_LOOKUP_TIMEOUT_SECS=120 \
     FM_GRAPH_CLI_OVERRIDE="$cli" run_reindex "$home" "$repo")
   assert_contains "$out" "graph refreshed" \
     "the real CLI must accept what fm-graph-lib.sh builds$(printf '\n--- stderr ---\n')$(cat "$home/stderr.log")"
@@ -541,32 +583,96 @@ test_real_cli_refreshes_an_indexed_project() {
   pass "fm-graph-lib.sh: the real codebase-memory CLI accepts the invocation we build"
 }
 
-# The flag form the fleet shipped for a fortnight, asserted to be broken - so this
-# suite can never again agree with itself about a surface the binary rejects.
-test_real_cli_rejects_the_flag_form() {
-  local cli home repo cache rc=0 err
+# real_project_field <cli> <cache> <name> <field>: one field of the named project in
+# the graph under <cache>, or empty. Same leading-non-JSON tolerance as real_roots.
+real_project_field() {
+  CBM_CACHE_DIR="$2" "$1" cli list_projects 2>/dev/null \
+    | awk '/^[[:space:]]*[{[]/ { found = 1 } found { print }' \
+    | jq -r --arg n "$3" --arg f "$4" '.projects[]? | select(.name == $n) | .[$f] // empty' 2>/dev/null
+}
+
+# The fix's whole premise, put to the real binary: that `name` addresses the recorded
+# entry. It is a belief about an external surface, which is the exact species of thing
+# that went stale on 2026-08-09, so the stub is not allowed to be its only witness.
+# The fixture is the live defect in miniature - an entry named something the binary
+# would never slug out of its clone path - and a green line is not enough to pass:
+# the recorded entry's node count must MOVE, and no slug entry may appear beside it.
+test_real_cli_addresses_the_recorded_short_name() {
+  local cli home repo cache out args before after slug
   if ! cli=$(real_cli); then
-    pass "SKIP (codebase-memory-mcp not installed): real-CLI flag-form rejection"
+    pass "SKIP (codebase-memory-mcp not installed): real-CLI addressing by recorded name"
     return 0
   fi
   IFS=$'\t' read -r home repo cache <<<"$(real_case)"
-  err="$home/flags.log"
-  CBM_CACHE_DIR="$cache" "$cli" cli index_repository \
-    --repo_path "$repo" --mode fast >/dev/null 2>"$err" || rc=$?
-  [ "$rc" -ne 0 ] || fail "the flag form must be rejected; if the CLI accepts it again, revisit fm-graph-lib.sh's header"
-  assert_grep "repo_path is required" "$err" "the flag form must fail for the reason the header records"
-  pass "fm-graph-lib.sh: the flag form the fleet used until 2026-08-09 is still rejected"
+  slug=$(fm_graph_derived_name "$(cd "$repo" && pwd -P)")
+  args=$(jq -nc --arg r "$repo" '{repo_path: $r, name: "shortproj", mode: "fast", persistence: false}')
+  CBM_CACHE_DIR="$cache" "$cli" cli index_repository "$args" >/dev/null 2>"$home/index.log" \
+    || fail "the real CLI could not seed the fixture: $(tail -3 "$home/index.log")"
+  before=$(real_project_field "$cli" "$cache" shortproj nodes)
+  [ -n "$before" ] || fail "the fixture must record a 'shortproj' entry to refresh"
+  # Grow the repo, so a refresh that reached the entry shows as a node count that
+  # moved - a green line alone proves nothing about which entry was written.
+  printf 'def gadget():\n    return 2\n\n\ndef doohickey():\n    return 3\n' > "$repo/gadget.py"
+  git -C "$repo" add gadget.py
+  git -C "$repo" -c user.name=t -c user.email=t@example.invalid commit -qm add-gadget
+  out=$(CBM_CACHE_DIR="$cache" FM_GRAPH_REINDEX_MODE=fast FM_GRAPH_REINDEX_TIMEOUT_SECS=120 FM_GRAPH_LOOKUP_TIMEOUT_SECS=120 \
+    FM_GRAPH_CLI_OVERRIDE="$cli" run_reindex "$home" "$repo")
+  assert_contains "$out" "project=shortproj" \
+    "the real CLI must honour the recorded name$(printf '\n--- stderr ---\n')$(cat "$home/stderr.log")"
+  after=$(real_project_field "$cli" "$cache" shortproj nodes)
+  [ -n "$after" ] && [ "$after" != "$before" ] \
+    || fail "the recorded entry must actually have been rewritten; nodes stayed at ${before:-none}"
+  # Asked for by `name`, not by a field an entry might lack: a missing `nodes` would
+  # otherwise read as a missing entry and pass this vacuously.
+  [ -z "$(real_project_field "$cli" "$cache" "$slug" name)" ] \
+    || fail "the refresh must not create a second, path-derived entry '$slug' beside the recorded one"
+  pass "fm-graph-lib.sh: the real CLI refreshes the entry the graph records, not the path slug"
+}
+
+# This case replaces one that asserted the binary rejects the flag form, which was
+# true of 0.8.1 and is not of 0.9.0. What generalizes is not any one shape but the
+# EXPIRY DATE: a claim to have verified an external surface is only as good as the
+# version it was verified against, so that is what is pinned. Going red on a binary
+# update is the intended behavior - the fix is to re-verify and update the record,
+# which docs/graph-cli-backend.md's last section spells out. CI installs no
+# codebase-memory binary, so this skips there and bites only where re-verifying is
+# actually possible.
+test_real_cli_version_matches_the_verified_record() {
+  local cli recorded actual header
+  if ! cli=$(real_cli); then
+    pass "SKIP (codebase-memory-mcp not installed): real-CLI version against the record"
+    return 0
+  fi
+  # Anchored to the "Verified ... against" line, not to the first bold mention: the
+  # doc keeps superseded records, and one added above this line would silently pin
+  # the suite to a version nobody verified.
+  recorded=$(sed -n 's/^Verified .* against \*\*codebase-memory-mcp \([0-9][0-9.]*\)\*\*.*/\1/p' \
+    "$ROOT/docs/graph-cli-backend.md" | head -1)
+  [ -n "$recorded" ] || fail "docs/graph-cli-backend.md must open its verified surface with 'Verified <date> against **codebase-memory-mcp <version>**'"
+  actual=$("$cli" --version 2>/dev/null | sed -n 's/^codebase-memory-mcp \([0-9][0-9.]*\).*/\1/p' | head -1)
+  [ -n "$actual" ] || fail "could not read a version out of '$cli --version'"
+  [ "$actual" = "$recorded" ] || fail \
+    "installed codebase-memory-mcp is $actual but docs/graph-cli-backend.md verified $recorded; re-derive the surface and update the record (see that file's last section)"
+  # The lib header carries its own copy of the verified version, and a header that
+  # drifts from the doc is how it came to assert a surface the binary did not have.
+  header=$(sed -n 's/.*verified [0-9-]* against codebase-memory-mcp \([0-9][0-9.]*\).*/\1/p' \
+    "$ROOT/bin/fm-graph-lib.sh" | head -1)
+  [ "$header" = "$recorded" ] || fail \
+    "bin/fm-graph-lib.sh's header verified '${header:-none}' but docs/graph-cli-backend.md verified $recorded; the two records must name one version"
+  pass "fm-graph-lib.sh: the installed CLI is the version the backend record verified"
 }
 
 test_help_includes_entire_header
 test_refreshes_indexed_project
 test_arguments_are_one_json_object_not_flags
+test_refresh_addresses_the_recorded_name
 test_path_with_space_is_passed_intact
 test_tolerates_non_json_leading_output
-test_canonical_root_match_cannot_land_and_says_so
+test_canonical_root_match_refreshes_the_recorded_entry
 test_resolves_bare_project_name
 test_note_error_is_silent_when_the_file_is_unwritable
 test_unindexed_project_is_skipped_not_indexed
+test_reindex_refuses_an_empty_name
 test_missing_binary_is_non_fatal
 test_missing_jq_is_non_fatal
 test_missing_timeout_binary_is_non_fatal
@@ -584,4 +690,5 @@ test_env_overrides_config_mode
 test_unknown_mode_falls_back_to_full
 test_mode_off_disables_refresh
 test_real_cli_refreshes_an_indexed_project
-test_real_cli_rejects_the_flag_form
+test_real_cli_addresses_the_recorded_short_name
+test_real_cli_version_matches_the_verified_record
