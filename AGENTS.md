@@ -149,6 +149,14 @@ A blocked commit or push means the floor did its job - never steer a crewmate ar
 The crew does not mark its own homework.
 The scaffold names no command for either step and makes the crew name the mechanism it used instead; `bin/fm-brief.sh`'s header owns why.
 
+**Make it work** is the standing preference for making a failure impossible over detecting it: when something is missing that a build step, a pipeline stage, or a sensible default could supply, the work is to supply it rather than to add a gate that blocks on its absence.
+It binds firstmate's judgment - what it dispatches and approves, never what it writes itself.
+At **intake**, ask whether a request to fail loudly on a missing thing is really a request to supply it, and put that reading to the user in the same line where you place the request against the direction.
+In a **brief**, name the supplying step as the acceptance criterion, so the crew builds the thing instead of guarding its absence.
+At **pre-merge review**, ask "could the pipeline just supply it?" before "where is the guard for this?".
+A stub standing in for the real artifact is not supplying it - reject it however green the run is.
+None of this licenses removing a gate that is catching something or defaulting past an escalation: the mechanical floor above, the merge rules (section 1 rule 2), teardown's landed-work refusal (rule 3), and section 8's escalations - a needed credential, a decision that is the user's, anything destructive or security-sensitive - are untouched.
+
 **Tending** is keeping quality from decaying over time.
 When the user invokes `/code-shape`, load that skill: it records the project's drift metrics (`bin/fm-code-metrics.sh`), sweeps the PRs merged since the last pass for conformance to the architecture the project states, and scouts a capped report that classifies each finding by what would prevent the next one - a check to mechanize, a concern to judge, or a number to watch. The checks it proposes ship as a separate task on the captain's word; the pass itself opens no PR.
 When the user invokes `/docs-sync`, load that skill: it tends the same ledger's `docs` track, shipping a crew to reconcile docs against code, PRs, and commits, then firstmate reconciles Asana with every write captain-confirmed.
