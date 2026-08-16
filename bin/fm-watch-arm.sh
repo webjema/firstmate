@@ -60,8 +60,15 @@
 # does not, and it costs nothing to spare one: fm-watch.sh enqueues every wake into
 # the durable queue BEFORE it prints it, so this process's stdout is only a latency
 # fast-path and a watcher that survives its arm loses no wake - the next arm adopts
-# it and the queue is drained normally. The watcher is started under `setsid` where
-# available so a reap aimed at this arm's process GROUP cannot reach it either.
+# it and the queue is drained normally. Sparing it is necessary and NOT sufficient:
+# a harness reaps a background task by walking its task shell's PPID DESCENDANTS and
+# signalling each one, and `setsid` gives a process its own session and process group
+# WITHOUT changing its ppid - so a setsid'd watcher stayed a descendant and was still
+# killed on every reap (measured; docs/incidents/watcher-harness-reap.md owns the
+# evidence). The watcher is therefore HOSTED IN TMUX, in this home's own detached
+# session, where its parent is the tmux server and no walk from the harness reaches
+# it. Where tmux is unavailable this degrades to the setsid'd child - still immune to
+# a process-GROUP kill, still reachable by a tree walk - rather than failing to arm.
 # Only an unconfirmed or failed child is this arm's to stop. Deliberate stops are
 # unaffected: --restart signals the recorded arm and lock pids directly.
 #
@@ -87,9 +94,9 @@
 # it goes missing or names a dead arm. An arm nothing can see stops standing
 # duplicates down and reads as a blind turn to the guards. A duplicate that slipped
 # past the startup check while the marker was missing is caught before it can adopt
-# a cycle: a watcher's PARENT is its arm, so both adopt paths ask who that is and
-# stand down for a live one. An ORPHAN watcher is still adopted - that is what
-# attaching exists for.
+# a cycle: the arm holding a watcher records itself in state/.watch.owner-arm, so both
+# adopt paths ask who that is and stand down for a live one. An ORPHAN watcher - one
+# no live arm claims - is still adopted, which is what attaching exists for.
 #
 # --restart: stop ONLY this FM_HOME's supervision (the arm recorded in THIS home's
 # state/.watch.arming and the watcher pid recorded in THIS home's
@@ -112,6 +119,19 @@ BEAT="$STATE/.last-watcher-beat"
 # Present for exactly as long as THIS arm process is alive; the guards read it to
 # tell a normal watcher handoff apart from a genuinely blind turn.
 ARMING="$STATE/.watch.arming"
+# Which arm is waiting on the watcher that holds the lock. The one signal the marker
+# cannot give: a duplicate that started while the marker was missing has by then
+# claimed the marker itself, so asking the marker "is another arm live?" would only
+# ever find this process. It records the watcher pid alongside, so a record left by a
+# previous cycle can never be read as a claim on the current watcher.
+OWNER_ARM="$STATE/.watch.owner-arm"
+# Where the watcher runs. `child` is the only value that binds: a setsid'd child of
+# this arm, no tmux involved. `auto` (the default) and `tmux` both prefer a tmux pane
+# out of the harness's process tree and both fall back to a child when no server can
+# be reached, because an arm that refused to start a watcher at all would be a worse
+# outage than the one hosting prevents; `tmux` differs from `auto` only in logging the
+# fallback. Tests that must not touch a tmux server pin `child`.
+WATCH_HOST=${FM_WATCH_HOST:-auto}
 # Why each watcher was replaced, so a churn storm is diagnosable after the fact
 # instead of leaving only a silent exit behind.
 ARM_LOG="$STATE/.watch-arm.log"
@@ -208,19 +228,49 @@ yield_arming_marker_to() {  # <pid>
   write_arming_marker_for "$1"
 }
 
-# Identify the arm behind a watcher this process did not start. A watcher's PARENT
-# is its arm, which is the one signal the marker cannot give us here: a duplicate
-# that started while the marker was missing has by then claimed the marker itself,
-# so asking the marker "is another arm live?" would only ever find this process.
+# Claim the watcher this arm is now waiting on, whether it started it or adopted it.
+# The claim is what a later duplicate reads to tell "another arm is already on this
+# cycle" from "this watcher is an orphan, adopt it".
+claim_watcher() {  # <watcher-pid>
+  # Written aside and renamed: a peer reading a half-written claim would see an empty
+  # file, call the watcher an orphan and adopt it - the fan-out this file prevents.
+  # The identity pins the arm pid to one process, the same way the arming marker does,
+  # so a recycled pid landing on another arm cannot inherit this claim.
+  {
+    printf 'watcher-pid=%s\n' "$1"
+    printf 'arm-pid=%s\n' "$$"
+    printf 'arm-identity=%s\n' "$(fm_pid_identity "$$")"
+  } > "$OWNER_ARM.tmp.$$" 2>/dev/null \
+    && mv -f "$OWNER_ARM.tmp.$$" "$OWNER_ARM" 2>/dev/null
+  rm -f "$OWNER_ARM.tmp.$$" 2>/dev/null || true
+}
+
+release_watcher_claim() {
+  [ "$(sed -n 's/^arm-pid=//p' "$OWNER_ARM" 2>/dev/null | head -1)" = "$$" ] || return 0
+  rm -f "$OWNER_ARM" 2>/dev/null || true
+}
+
+# Identify the arm behind a watcher this process did not start. The watcher's ppid
+# used to answer this, and cannot any more: a tmux-hosted watcher's parent is the
+# tmux server, so every watcher would read as an orphan and every duplicate would
+# adopt instead of standing by - the fan-out, restored. The claim is the one owner
+# of this question in BOTH hosting modes, so there is no second answer to drift.
+# It is believed only when it names the watcher we are actually asking about and a
+# live process that is genuinely another arm.
 peer_arm_of_watcher() {  # <watcher-pid> -> echoes a live peer arm pid, or fails
-  local wpid=$1 ppid args
-  ppid=$(ps -o ppid= -p "$wpid" 2>/dev/null | tr -d ' ')
-  [ -n "$ppid" ] || return 1
-  [ "$ppid" != "$$" ] || return 1
-  fm_pid_alive "$ppid" || return 1
-  args=$(ps -o args= -p "$ppid" 2>/dev/null || true)
+  local wpid=$1 claimed_watcher claimed_arm claimed_identity args
+  [ -s "$OWNER_ARM" ] || return 1
+  claimed_watcher=$(sed -n 's/^watcher-pid=//p' "$OWNER_ARM" 2>/dev/null | head -1)
+  claimed_arm=$(sed -n 's/^arm-pid=//p' "$OWNER_ARM" 2>/dev/null | head -1)
+  claimed_identity=$(sed -n 's/^arm-identity=//p' "$OWNER_ARM" 2>/dev/null | head -1)
+  [ "$claimed_watcher" = "$wpid" ] || return 1
+  [ -n "$claimed_arm" ] || return 1
+  [ "$claimed_arm" != "$$" ] || return 1
+  fm_pid_alive "$claimed_arm" || return 1
+  [ -z "$claimed_identity" ] || [ "$claimed_identity" = "$(fm_pid_identity "$claimed_arm")" ] || return 1
+  args=$(ps -o args= -p "$claimed_arm" 2>/dev/null || true)
   case "$args" in
-    *fm-watch-arm.sh*) printf '%s' "$ppid" ;;
+    *fm-watch-arm.sh*) printf '%s' "$claimed_arm" ;;
     *) return 1 ;;
   esac
 }
@@ -230,8 +280,8 @@ peer_arm_of_watcher() {  # <watcher-pid> -> echoes a live peer arm pid, or fails
 # when it ends, firstmate answers each with another arm, and that fan-out is what
 # turned one wake into ~80 background tasks. The startup dedupe usually catches a
 # duplicate; it cannot when the marker was missing at the instant we started, hence
-# the ppid question above. An ORPHAN watcher - no live arm behind it - is left to
-# the adopt path, which is the case attaching exists for.
+# the claim above. An ORPHAN watcher - no live arm claiming it - is left to the adopt
+# path, which is the case attaching exists for.
 # Sets CYCLE/CYCLE_DETAIL and succeeds when it stood by; fails to say "carry on".
 stand_by_for_peer_arm() {
   local peer_arm
@@ -366,6 +416,169 @@ sleep_holding_marker() {  # <seconds>
   done
 }
 
+# --- hosting the watcher -----------------------------------------------------
+# This home's OWN detached session, so a watcher window cannot collide with another
+# home's on a shared tmux server, and cannot collide with the crew's fm-<id> windows
+# either - those live in the crew's session, this is a session of its own. The digest
+# is over the full FM_HOME because two homes can share a basename; the basename is
+# kept only so the session is recognisable at a glance.
+watcher_session_name() {
+  local base digest=0 i c
+  base=$(printf '%s' "$(basename "$FM_HOME")" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-24)
+  # Hashed in bash rather than through cksum, so there is no external command whose
+  # absence collapses every home on the box onto one fallback session name.
+  for ((i = 0; i < ${#FM_HOME}; i++)); do
+    printf -v c '%d' "'${FM_HOME:i:1}"
+    digest=$(((digest * 31 + c) % 4294967291))
+  done
+  printf 'fm-watch-%s-%s' "${base:-home}" "$digest"
+}
+
+# tmux does NOT give a new pane the caller's environment - it inherits the SERVER's,
+# captured whenever that server started - so everything the watcher resolves from the
+# environment has to travel with the command. FM_HOME travels explicitly because the
+# library RESOLVES it and only exports it if the caller did. Every other variable
+# travels only when the caller genuinely exported it: presence itself is meaningful
+# for some of them, and fm_home_lock_is_foreign reads a set FM_STATE_OVERRIDE as
+# consent, so inventing one here would quietly disarm the foreign-home refusal.
+watcher_env_exports() {
+  local v
+  printf 'export FM_HOME=%q\n' "$FM_HOME"
+  for v in $(compgen -e); do
+    case "$v" in
+      FM_HOME) continue ;;
+      FM_*|STATE|PATH|HOME|TMPDIR) printf 'export %s=%q\n' "$v" "${!v}" ;;
+    esac
+  done
+}
+
+# The pane runs a launcher SCRIPT, never an inline shell string: tmux hands the
+# command to the user's default-shell, whose quoting rules are not knowable from
+# here, and one path in single quotes is the only form every shell it might be
+# agrees on. Inside the launcher the quoting is bash's own.
+# It keeps the two things a bare `exec` would lose - the watcher's real pid and its
+# exit status, both of which this arm reads - and removes itself last, so a watcher
+# that outlives its arm still cleans up after itself.
+write_watcher_launcher() {  # <path>
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set -u\n'
+    watcher_env_exports
+    printf '%q >%q 2>&1 &\n' "$WATCH" "$child_out"
+    printf 'printf %%s "$!" > %q\n' "$child_pid_file"
+    printf 'wait "$!"\n'
+    # Only if the arm's own output file is still there. The arm removes it on its way
+    # out, while this launcher is still waiting, and that removal is the one signal
+    # that nobody is left to read the status - writing it then would leave a file in
+    # state/ that nothing ever globs and nothing ever removes.
+    # shellcheck disable=SC2016  # $rc belongs to the launcher, not to this shell
+    printf 'rc=$?\n[ -e %q ] && printf %%s "$rc" > %q\n' "$child_out" "$child_rc_file"
+    printf 'rm -f %q\n' "$1"
+    # Close the window from the inside. The arm that opened it is usually gone by
+    # now - that is the whole point of hosting here - so the window cannot be left
+    # for the arm to reap, and this box runs `remain-on-exit on`, under which a pane
+    # whose command ended just sits there dead. Without this every relaunch leaves
+    # another dead window in the home's watcher session, forever.
+    # TMUX_PANE is the LAUNCHER's, resolved inside the pane; this arm has no such thing.
+    # shellcheck disable=SC2016
+    printf 'tmux kill-window -t "${TMUX_PANE:-}" 2>/dev/null || true\n'
+  } > "$1" 2>/dev/null || return 1
+  chmod +x "$1" 2>/dev/null
+}
+
+# Start the watcher in this home's watcher session. Sets child/child_window on
+# success; fails - leaving nothing behind - so the caller can fall back.
+tmux_host_start() {
+  local sess win cmd i
+  command -v tmux >/dev/null 2>&1 || return 1
+  child_launcher="$child_out.host.sh"
+  child_pid_file="$child_out.pid"
+  child_rc_file="$child_out.rc"
+  # A path this arm cannot quote for an unknown shell is one it must not run there.
+  # Single quotes are what most shells agree on, but not all of them: fish reads a
+  # backslash inside single quotes as an escape, and a newline splits the command in
+  # any of them. Anything outside a plain path alphabet goes to the fallback instead.
+  case "$child_launcher" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  write_watcher_launcher "$child_launcher" || return 1
+  sess=$(watcher_session_name)
+  cmd="'$child_launcher'"
+  # new-window first, then create the session, then new-window again: the retry is
+  # for the arm that lost a create race, not a second chance at a real failure.
+  win=$(tmux new-window -dP -F '#{window_id}' -t "=$sess:" -n watcher "$cmd" 2>/dev/null) \
+    || win=$(tmux new-session -dP -F '#{window_id}' -s "$sess" -n watcher "$cmd" 2>/dev/null) \
+    || win=$(tmux new-window -dP -F '#{window_id}' -t "=$sess:" -n watcher "$cmd" 2>/dev/null) \
+    || return 1
+  child_window=$win
+  # Scoped to THIS window, never the server: `remain-on-exit on` is a deliberate
+  # global setting here so a crashed crew pane stays readable, and a watcher window
+  # holds nothing worth reading. Belt to the launcher's braces - it covers the
+  # launcher being killed outright, which leaves nothing inside to close the window.
+  tmux set-option -w -t "$child_window" remain-on-exit off 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 100 ]; do
+    child=$(head -1 "$child_pid_file" 2>/dev/null || true)
+    case "$child" in
+      ''|*[!0-9]*) child= ;;
+      *) return 0 ;;
+    esac
+    nap 0.05
+    i=$((i + 1))
+  done
+  tmux kill-window -t "$child_window" 2>/dev/null || true
+  child_window=
+  return 1
+}
+
+# Host the watcher out of the harness's reach if tmux can take it, and as a setsid'd
+# child if it cannot. The fallback is deliberate: setsid still defeats a kill aimed at
+# this arm's process GROUP, and an arm that refused to start a watcher at all because
+# no tmux server answered would be a worse outage than the one this hosting prevents.
+start_watcher() {
+  if [ "$WATCH_HOST" != child ] && tmux_host_start; then
+    child_host=tmux
+    return 0
+  fi
+  [ "$WATCH_HOST" != tmux ] || arm_log 'host: tmux unavailable, falling back to a setsid child'
+  rm -f "$child_launcher" "$child_pid_file" "$child_rc_file" 2>/dev/null || true
+  child_launcher=
+  child_pid_file=
+  child_rc_file=
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$WATCH" >"$child_out" 2>&1 &
+  else
+    "$WATCH" >"$child_out" 2>&1 &
+  fi
+  child=$!
+  child_host=child
+}
+
+# The watcher's exit status, however it was hosted. A local child is reaped with
+# `wait`; a tmux-hosted one is not this shell's child at all, so its status comes from
+# the file the launcher writes just after its own wait - polled briefly, because the
+# watcher's pid disappears a moment before that write lands. An unreadable status
+# reads as 0, the direction that still lets a wake line through: a spurious wake costs
+# one turn, a swallowed one costs supervision. Sets CHILD_RC rather than printing it,
+# because `wait` in a command substitution runs in a subshell that owns no children.
+CHILD_RC=0
+read_child_status() {
+  local rc i=0
+  if [ "$child_host" != tmux ]; then
+    wait "$child" 2>/dev/null
+    CHILD_RC=$?
+    return 0
+  fi
+  while [ "$i" -lt 20 ]; do
+    rc=$(head -1 "$child_rc_file" 2>/dev/null || true)
+    case "$rc" in
+      ''|*[!0-9]*) ;;
+      *) CHILD_RC=$rc; return 0 ;;
+    esac
+    nap 0.1
+    i=$((i + 1))
+  done
+  CHILD_RC=0
+}
+
 mode=arm
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
@@ -387,7 +600,7 @@ if [ "$mode" = arm ] \
   # Own no marker while parked - the incumbent's is the one that must stay visible -
   # but arm the release now, because promotion happens inside the wait below and a
   # signal after it would otherwise leave OUR marker behind.
-  trap 'release_arming_marker' EXIT
+  trap 'release_arming_marker; release_watcher_claim' EXIT
   trap 'exit 143' TERM INT
   trap 'exit 129' HUP
   report_standby "$FM_ARM_IN_FLIGHT_PID"
@@ -408,7 +621,7 @@ fi
 # We own supervision from here: take the marker and clear it on every exit path,
 # so a completed or killed arm never masks a real supervision gap.
 write_arming_marker
-trap 'release_arming_marker' EXIT
+trap 'release_arming_marker; release_watcher_claim' EXIT
 
 if [ "$mode" = restart ]; then
   # Home-scoped stop of this home's supervision, arm first: a surviving arm would
@@ -445,6 +658,21 @@ fi
 child=
 child_out=
 child_confirmed=0
+child_host=child
+child_window=
+child_launcher=
+child_pid_file=
+child_rc_file=
+
+remove_child_temps() {
+  local f
+  for f in "$child_out" "$child_launcher" "$child_pid_file" "$child_rc_file"; do
+    [ -n "$f" ] || continue
+    rm -f "$f" 2>/dev/null || true
+  done
+  return 0
+}
+
 cleanup_child() {
   # A CONFIRMED watcher is NOT this arm's to take down. It holds the home lock,
   # beats on its own, and has already enqueued every wake it has, so the next arm
@@ -454,10 +682,12 @@ cleanup_child() {
   # child - one that never became the healthy watcher - is ours to stop.
   if [ -n "$child" ] && [ "$child_confirmed" -eq 0 ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
+    # An abandoned launch takes its window with it. Only an UNCONFIRMED one: killing
+    # a confirmed watcher's window is killing the watcher, which is the exact thing
+    # sparing it above exists to prevent.
+    [ -n "$child_window" ] && tmux kill-window -t "$child_window" 2>/dev/null || true
   fi
-  if [ -n "$child_out" ]; then
-    rm -f "$child_out" 2>/dev/null || true
-  fi
+  remove_child_temps
 }
 
 # Why an arm died, recorded where an investigation can find it. Every other exit
@@ -474,15 +704,22 @@ trap 'arm_signal_exit TERM 143' TERM
 trap 'arm_signal_exit INT 143' INT
 
 reap_child() {
-  if [ -n "$child" ]; then
+  if [ -n "$child" ] && [ "$child_host" != tmux ]; then
     wait "$child" 2>/dev/null || true
   fi
-  if [ -n "$child_out" ]; then
-    rm -f "$child_out" 2>/dev/null || true
-  fi
+  remove_child_temps
+  forget_child
+}
+
+forget_child() {
   child=
   child_out=
   child_confirmed=0
+  child_host=child
+  child_window=
+  child_launcher=
+  child_pid_file=
+  child_rc_file=
 }
 
 # Stay alive until the adopted identity-matched healthy holder is gone.
@@ -493,6 +730,7 @@ attach_and_wait() {  # <attached-pid>
     healthy_watcher || return 0
     if [ "$HEALTHY_PID" != "$attached_pid" ]; then
       attached_pid=$HEALTHY_PID
+      claim_watcher "$attached_pid"
       report_attached
     fi
     nap "$ATTACH_POLL"
@@ -519,8 +757,10 @@ run_cycle() {  # <cycle-mode>
   # just stopped this home's supervision and wants a fresh watcher.)
   if [ "$cycle_mode" = arm ] && healthy_watcher; then
     stand_by_for_peer_arm && return 0
+    claim_watcher "$HEALTHY_PID"
     report_attached
     attach_and_wait "$HEALTHY_PID"
+    release_watcher_claim
     CYCLE=quiet
     CYCLE_DETAIL='adopted watcher ended'
     return 0
@@ -536,17 +776,10 @@ run_cycle() {  # <cycle-mode>
   # that reason belongs in the churn log and in the eventual FAILED line instead
   # of being discarded into a silent, unexplained exit.
   #
-  # setsid gives the watcher its OWN session, so a reap aimed at this arm's process
-  # group stops at this arm and cannot reach it. Sparing a confirmed child is not
-  # enough on its own: a same-group watcher dies with `kill -TERM -<pgid>` however
-  # careful the trap is. setsid is not on every box, and without it this degrades
-  # to exactly today's launch rather than failing to arm at all.
-  if command -v setsid >/dev/null 2>&1; then
-    setsid "$WATCH" >"$child_out" 2>&1 &
-  else
-    "$WATCH" >"$child_out" 2>&1 &
-  fi
-  child=$!
+  # Where the watcher runs decides whether it survives this arm at all: the harness
+  # reap walks ppid descendants, so only a watcher whose parent is NOT this arm is out
+  # of reach. start_watcher owns that choice and its fallback.
+  start_watcher
 
   # Verify the outcome: poll until this child is the confirmed healthy watcher, or
   # until some other watcher legitimately holds the singleton (a startup race), or
@@ -557,6 +790,7 @@ run_cycle() {  # <cycle-mode>
       if [ "$HEALTHY_PID" = "$child" ]; then
         echo "watcher: started pid=$child (beacon fresh)"
         child_confirmed=1
+        claim_watcher "$child"
         # Poll rather than block in `wait`: this is where the arm spends nearly
         # all of its life, so it is also where a marker deleted by some other arm
         # would otherwise stay deleted for the whole cycle. Reaping after the fact
@@ -565,8 +799,8 @@ run_cycle() {  # <cycle-mode>
           assert_arming_marker
           nap 1
         done
-        wait "$child" 2>/dev/null
-        rc=$?
+        read_child_status
+        rc=$CHILD_RC
         if watch_output_has_wake "$child_out"; then
           print_watch_output "$child_out"
           CYCLE=wake
@@ -574,10 +808,9 @@ run_cycle() {  # <cycle-mode>
           CYCLE=quiet
           CYCLE_DETAIL="watcher pid=$child exited rc=$rc with no wake reason$(first_output_line "$child_out")"
         fi
-        rm -f "$child_out" 2>/dev/null || true
-        child=
-        child_out=
-        child_confirmed=0
+        release_watcher_claim
+        remove_child_temps
+        forget_child
         return 0
       fi
       # Another watcher won the singleton; our child stood down.
@@ -586,9 +819,11 @@ run_cycle() {  # <cycle-mode>
           reap_child
           return 0
         fi
+        claim_watcher "$HEALTHY_PID"
         report_attached
         reap_child
         attach_and_wait "$HEALTHY_PID"
+        release_watcher_claim
         CYCLE=quiet
         CYCLE_DETAIL='adopted peer watcher ended'
         return 0
@@ -599,15 +834,13 @@ run_cycle() {  # <cycle-mode>
       return 0
     fi
     if [ "$child_done" -eq 0 ] && ! fm_pid_alive "$child"; then
-      wait "$child"
-      rc=$?
+      read_child_status
+      rc=$CHILD_RC
       child_done=1
       if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
         print_watch_output "$child_out"
-        rm -f "$child_out" 2>/dev/null || true
-        child=
-        child_out=
-        child_confirmed=0
+        remove_child_temps
+        forget_child
         CYCLE=wake
         return 0
       fi
@@ -620,10 +853,8 @@ run_cycle() {  # <cycle-mode>
       detail="no live watcher with a fresh beacon$(first_output_line "$child_out")"
       echo "watcher: FAILED - $detail"
       cleanup_child
-      wait "$child" 2>/dev/null || true
-      child=
-      child_out=
-      child_confirmed=0
+      [ "$child_host" = tmux ] || wait "$child" 2>/dev/null || true
+      forget_child
       CYCLE=failed
       CYCLE_DETAIL=$detail
       return 0

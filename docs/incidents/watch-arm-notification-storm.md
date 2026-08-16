@@ -135,7 +135,8 @@ Fix:
 - The arm polls its child instead of blocking in `wait`, because the self-heal has to run where the arm spends nearly all of its life.
   It naps by backgrounding `sleep` and `wait`ing on it: bash defers a trap until the running FOREGROUND command finishes, and a plain `sleep 1` here delayed the arm's own TERM handler by up to a second, which was enough to break `--restart`.
 - Both adopt paths - the one before forking and the one after losing the singleton race - now ask `peer_arm_of_watcher` whether the watcher already has an arm behind it, and stand down if so.
-  A watcher's PARENT is its arm, which is the one signal the marker cannot give: a duplicate that started while the marker was missing has by then claimed the marker naming itself.
+  A watcher's PARENT was its arm, which is the one signal the marker cannot give: a duplicate that started while the marker was missing has by then claimed the marker naming itself.
+  That parent signal is gone since the watcher moved into tmux ([watcher-harness-reap.md](watcher-harness-reap.md)), and `state/.watch.owner-arm` carries the same answer explicitly; the rule below is unchanged.
   An ORPHAN watcher with no live arm is still adopted, which is the case attaching exists for.
 
 Three cases in `tests/fm-watch-arm-supervision.test.sh` cover it: an exiting arm leaves a live peer's marker intact, a live arm re-takes a marker deleted underneath it, and a second arm refuses to duplicate even when the marker was missing at the instant it started.
