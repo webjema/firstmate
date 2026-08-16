@@ -63,6 +63,12 @@
 # exists and differs. A project with no such directory is a silent no-op. Every
 # ship/scout spawn prints one `env-seed: project=<name> seeded=N unchanged=N conflict=N`
 # line; docs/configuration.md owns the directory contract.
+# Every spawn forwards firstmate's own cloud/API credentials to the crew through a 0600
+# file at <tasktmp>/crew-env.sh that the pane sources, never by typing the value into
+# the pane. Prints one line, carrying variable NAMES and the file path but never a
+# value: `crew-env: forwarded=<name>[,<name>...] file=<path>`, or `crew-env: forwarded=0`
+# when none are set, in which case no file is left behind. The forward_crew_credentials
+# comment below owns why the channel is a file.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -631,7 +637,13 @@ fi
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+# The root is created 0700, because forward_crew_credentials puts a credential file
+# inside it. umask rather than `mkdir -m -p`, which applies the mode only to the deepest
+# component (SC2174) and would leave the root itself at the inherited mode. A
+# pre-existing root (a respawn's, or another user's) keeps whatever mode it has, so the
+# credential file's own O_EXCL create stays the guarantee rather than this.
 TASK_TMP="/tmp/fm-$ID"
+(umask 077; mkdir -p "$TASK_TMP")
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook: every harness invokes the SAME writer,
@@ -847,6 +859,68 @@ if [ "$KIND" != secondmate ]; then
   seed_project_env "$CONFIG/project-env/$PROJ_NAME" "$WT" "$PROJ_NAME"
 fi
 
+# Credential forwarding: a crew inherits firstmate's own cloud and API credentials,
+# because a tmux window's shell inherits from the tmux SERVER, not from the client
+# that created it, so nothing firstmate exports reaches the pane on its own.
+#
+# The value must never travel through the pane. spawn_send_text_line is tmux
+# send-keys, which TYPES what it is given, and a typed `export TOKEN=<value>` lands in
+# two durable places: the pane's scrollback, which bin/fm-peek.sh reads straight into
+# firstmate's context and from there into a status line or a report - against
+# firstmate's standing never-print-a-secret rule, with nobody doing anything wrong -
+# and the pane shell's history file when the pane exits. Both are observed, not
+# theoretical: ~/.bash_history on this box already holds spawn-typed export lines.
+# Quoting does not help, because the defect is the channel and not the escaping.
+#
+# So the values go to a 0600 file under the task's own temp root and only its PATH is
+# typed. fm-teardown removes $TASK_TMP (and bin/fm-scratch-reap.sh reaps orphans), so
+# the file dies with the task. $TASK_TMP is outside every worktree, so the file cannot
+# be staged. Passing the env on window creation was the other candidate and is worse:
+# `tmux new-window -e VAR=value` puts the value in the tmux client's argv, where any
+# `ps` on the box reads it, and it would push a secret into the backend contract.
+CREW_ENV_VARS=(
+  GOOGLE_APPLICATION_CREDENTIALS
+  GOOGLE_VERTEX_PROJECT
+  GOOGLE_VERTEX_LOCATION
+  ASANA_ACCESS_TOKEN
+  ANTHROPIC_API_KEY
+  OPENAI_API_KEY
+  GEMINI_API_KEY
+  OPENROUTER_API_KEY
+)
+CREW_ENV_FILE="$TASK_TMP/crew-env.sh"
+forward_crew_credentials() {  # <target>
+  local target=$1 var names=""
+  # The path is predictable (/tmp/fm-<id>/crew-env.sh from a short kebab id), and
+  # `mkdir -p` succeeds silently on a directory somebody else already made, so on a
+  # multi-user box another local user could plant a symlink there and a plain `>`
+  # would follow it and write the credential wherever it points. So: `rm -f` first,
+  # which unlinks a symlink rather than following it, then create under `set -C`,
+  # which is O_EXCL and so loses the race rather than reusing a re-planted link.
+  # umask 077 around the creating redirect, so the file is never briefly
+  # world-readable the way create-then-chmod would leave it - the reason
+  # seed_project_env above reaches for `install -m 600` rather than cp.
+  rm -f "$CREW_ENV_FILE"
+  (umask 077; set -C; : > "$CREW_ENV_FILE") || {
+    echo "warn: crew-env: could not create $CREW_ENV_FILE; crew starts without forwarded credentials" >&2
+    return 0
+  }
+  for var in "${CREW_ENV_VARS[@]}"; do
+    [ -n "${!var:-}" ] || continue
+    printf 'export %s=%s\n' "$var" "$(shell_quote "${!var}")" >> "$CREW_ENV_FILE"
+    names="$names${names:+,}$var"
+  done
+  if [ -z "$names" ]; then
+    rm -f "$CREW_ENV_FILE"
+    echo "crew-env: forwarded=0"
+    return 0
+  fi
+  spawn_send_text_line "$target" ". $(shell_quote "$CREW_ENV_FILE")"
+  # Names only. Printing a value here would recreate the leak one layer up, in the
+  # spawn output firstmate reads.
+  echo "crew-env: forwarded=$names file=$CREW_ENV_FILE"
+}
+
 META_WINDOW=$T
 {
   echo "window=$META_WINDOW"
@@ -897,6 +971,7 @@ fi
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+forward_crew_credentials "$T"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
