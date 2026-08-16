@@ -18,6 +18,18 @@
 #
 # The starter bundle is deliberately conservative and auto-detected from
 # package.json scripts. It is a floor to tune, not a finished policy.
+#
+# THE GATE MUST REACH A VERDICT INSIDE ITS OWN BUDGET. Claude Code cancels a
+# hook that outruns the timeout in settings.json and then runs the tool anyway,
+# so an overrun is read as consent: measured on one project, seven pushes
+# completed after their gate was cancelled without concluding. Raising the
+# ceiling only moves it. So the emitted gate watches its own clock: GATE_BUDGET
+# below is the deadline it enforces on itself, GATE_HOOK_TIMEOUT is what
+# settings.json allows it, and the gap between them is what turns a slow check
+# into a named refusal instead of a silent pass. The price is real and falls on
+# the slowest pushes - a check against a cold cache is refused rather than
+# allowed - and the remedy is the one crews already follow: run the check once
+# by hand, which warms the cache, then push.
 # Usage: fm-hooks-install.sh [repo-or-worktree-dir]
 #        fm-hooks-install.sh --check [repo-or-worktree-dir]   report only, never write
 set -eu
@@ -47,6 +59,12 @@ DIR=$(cd "$DIR" && pwd -P)
 SETTINGS="$DIR/.claude/settings.json"
 HOOKDIR="$DIR/.claude/hooks"
 MARKER='fm-quality'
+
+# The two halves of the no-fail-open contract described in the header. They move
+# together: GATE_BUDGET must stay below GATE_HOOK_TIMEOUT, or the gate is back to
+# being cancelled mid-verdict. tests/fm-hooks-install.test.sh asserts the gap.
+GATE_BUDGET=280
+GATE_HOOK_TIMEOUT=300
 
 # Already has hooks of any kind? Report and stop. This is the common case for a
 # project the user already tuned by hand, and clobbering it would be a
@@ -144,11 +162,59 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 2
 fi
 EOF
+  if [ -n "$TYPECHECK_CMD" ] || [ -n "$TEST_CMD" ]; then
+    # The self-imposed deadline. A check that outruns it is refused BY NAME,
+    # because the alternative - being cancelled by the harness - lets the push
+    # through with no verdict at all. The watchdog is written in bash rather
+    # than delegated to timeout(1): where that binary is absent the hook would
+    # exit 127, and only exit 2 blocks a tool call, so the missing binary would
+    # itself be a silent fail-open.
+    printf '\nGATE_BUDGET=%s\n' "$GATE_BUDGET"
+    cat <<'EOF'
+
+gate_refuse() {
+  echo "BLOCKED: $1 did not reach a verdict within the gate's ${GATE_BUDGET}s budget, so this push is refused rather than allowed unchecked." >&2
+  echo "Run the checks by hand once - that also warms the build cache - then push." >&2
+  exit 2
+}
+
+# Runs one check under the remaining budget. SECONDS is the whole hook's age, so
+# several checks share one deadline instead of each getting a fresh one.
+#
+# The check is started under `set -m` so it leads its own process group, and the
+# watchdog signals that whole group. Signalling the check alone is not enough:
+# `npm run test` is a shell that spawns the real runner, and a surviving
+# grandchild keeps holding this hook's stdout after the hook itself is done.
+gate_run() {
+  local label=$1 left status check_pid watchdog_pid
+  shift
+  left=$(( GATE_BUDGET - SECONDS ))
+  [ "$left" -gt 0 ] || gate_refuse "$label"
+
+  set -m
+  "$@" &
+  check_pid=$!
+  set +m
+  ( sleep "$left"; kill -TERM -- -"$check_pid" ) >/dev/null 2>&1 &
+  watchdog_pid=$!
+
+  status=0
+  wait "$check_pid" || status=$?
+  kill -TERM "$watchdog_pid" >/dev/null 2>&1 || true
+
+  [ "$SECONDS" -lt "$GATE_BUDGET" ] || gate_refuse "$label"
+  if [ "$status" -ne 0 ]; then
+    echo "BLOCKED: $label failed." >&2
+    exit 2
+  fi
+}
+EOF
+  fi
   if [ -n "$TYPECHECK_CMD" ]; then
-    printf '\nif ! %s; then\n  echo "BLOCKED: typecheck failed." >&2\n  exit 2\nfi\n' "$TYPECHECK_CMD"
+    printf '\ngate_run typecheck %s\n' "$TYPECHECK_CMD"
   fi
   if [ -n "$TEST_CMD" ]; then
-    printf '\nif ! %s; then\n  echo "BLOCKED: tests failed." >&2\n  exit 2\nfi\n' "$TEST_CMD"
+    printf '\ngate_run tests %s\n' "$TEST_CMD"
   fi
   if [ -z "$TYPECHECK_CMD" ] && [ -z "$TEST_CMD" ]; then
     printf '\n# No test or typecheck script was detected at install time.\n# Add the project'"'"'s real check commands here - an empty gate is not a gate.\n'
@@ -209,7 +275,7 @@ cat > "$SETTINGS" <<EOF
           {
             "type": "command",
             "command": "\${CLAUDE_PROJECT_DIR}/.claude/hooks/fm-quality-pre-push.sh",
-            "timeout": 300,
+            "timeout": $GATE_HOOK_TIMEOUT,
             "statusMessage": "Running pre-push checks..."
           }
         ]
@@ -223,6 +289,10 @@ echo "hooks: installed the fm-quality starter bundle in $SETTINGS"
 [ -n "$TEST_CMD" ]      && echo "  pre-push test:      $TEST_CMD"
 [ -n "$TYPECHECK_CMD" ] && echo "  pre-push typecheck: $TYPECHECK_CMD"
 [ -n "$LINT_CMD" ]      && echo "  post-edit lint:     detected"
+if [ -n "$TEST_CMD" ] || [ -n "$TYPECHECK_CMD" ]; then
+  echo "  pre-push budget:    ${GATE_BUDGET}s for all checks together, under the hook's ${GATE_HOOK_TIMEOUT}s timeout"
+  echo "                      a check that overruns REFUSES the push - run it once by hand to warm caches, then push"
+fi
 if [ -z "$TEST_CMD" ] && [ -z "$TYPECHECK_CMD" ]; then
   echo "  WARNING: no test or typecheck script detected - the pre-push gate is empty until you fill it in"
 fi

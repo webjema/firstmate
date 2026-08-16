@@ -14,6 +14,14 @@
 #   (d) no detectable test/typecheck -> installs, but says loudly that the gate is empty
 #   (e) --check never writes
 #   (f) re-running is idempotent
+#   (g) the gate's own budget stays under the hook timeout that would cancel it
+#   (h) a check that outruns the budget REFUSES the push, by name
+#   (i) a check that simply fails still blocks
+#
+# (g) through (i) exist because a cancelled hook is worse than an absent one:
+# Claude Code runs the tool anyway when a hook outruns its timeout, so an
+# overrun that is not refused first is read as consent. (h) drives the emitted
+# hook end to end, with the budget shrunk to keep the test quick.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -122,9 +130,97 @@ test_rerun_is_idempotent() {
   pass "re-running is idempotent"
 }
 
+# (g) The no-fail-open invariant, asserted on the two numbers themselves. ------
+test_gate_budget_stays_under_the_hook_timeout() {
+  local dir budget timeout
+  dir=$(make_project budget '{ "test": "jest", "typecheck": "tsc --noEmit" }')
+  "$HOOKS" "$dir" >/dev/null
+
+  budget=$(sed -n 's/^GATE_BUDGET=\([0-9]\{1,\}\)$/\1/p' "$dir/.claude/hooks/fm-quality-pre-push.sh")
+  timeout=$(awk '/fm-quality-pre-push\.sh/ { seen = 1 }
+                 seen && /"timeout"/ { gsub(/[^0-9]/, ""); print; exit }' "$dir/.claude/settings.json")
+
+  [ -n "$budget" ] || fail "budget: the emitted gate sets itself no deadline"
+  [ -n "$timeout" ] || fail "budget: settings.json gives the gate no timeout"
+  [ "$budget" -lt "$timeout" ] \
+    || fail "budget: the gate's ${budget}s deadline must stay under the ${timeout}s hook timeout, or it is cancelled mid-verdict and the push proceeds"
+  pass "the gate's own deadline stays under the hook timeout that would cancel it"
+}
+
+# A committed git project whose `npm run <script>` is a shim under fakebin/, so
+# the emitted hook can be driven for real without a node toolchain. $2 is the
+# body of `npm run typecheck`, $3 the body of `npm run test`.
+make_gate_project() {
+  local name=$1 typecheck=$2 test=$3 dir
+  dir=$(make_project "$name" '{ "test": "jest", "typecheck": "tsc --noEmit" }')
+  "$HOOKS" "$dir" >/dev/null
+
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/npm" <<EOF
+#!/usr/bin/env bash
+[ "\${1:-}" = run ] || exit 0
+case "\$2" in
+  typecheck) $typecheck ;;
+  test) $test ;;
+esac
+EOF
+  chmod +x "$dir/fakebin/npm"
+
+  # Shrink the budget so an overrun is measured in seconds, not minutes. The
+  # gate's logic is the shipped one; only the number is test-sized.
+  sed -i.bak 's/^GATE_BUDGET=[0-9]\{1,\}$/GATE_BUDGET=2/' "$dir/.claude/hooks/fm-quality-pre-push.sh"
+  rm -f "$dir/.claude/hooks/fm-quality-pre-push.sh.bak"
+
+  # The gate refuses a dirty tree before it reaches any check.
+  git -C "$dir" init -q
+  git -C "$dir" add -A
+  git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm fixture
+  printf '%s\n' "$dir"
+}
+
+run_gate() {
+  local dir=$1
+  ( cd "$dir" \
+      && PATH="$dir/fakebin:$PATH" CLAUDE_PROJECT_DIR="$dir" \
+         ./.claude/hooks/fm-quality-pre-push.sh <<< '{"tool_input":{"command":"git push -u origin main"}}' 2>&1 )
+}
+
+# (h) The defect this whole file exists to keep fixed. ------------------------
+test_overrunning_check_refuses_the_push() {
+  local dir out code=0
+  dir=$(make_gate_project overrun 'exit 0' 'sleep 60')
+  out=$(run_gate "$dir") || code=$?
+
+  expect_code 2 "$code" "overrun: an unfinished check must block the push, not let it through"
+  assert_contains "$out" 'BLOCKED' "overrun: refuses out loud"
+  assert_contains "$out" 'tests' "overrun: names which check ran out of budget"
+  assert_contains "$out" 'by hand' "overrun: says how to get past it"
+  pass "a check that outruns the gate's budget refuses the push instead of passing it"
+}
+
+# (i) The refusal above must not have cost the ordinary verdict. --------------
+test_failing_check_still_blocks() {
+  local dir out code=0
+  dir=$(make_gate_project failing 'exit 0' 'echo "1 test failed"; exit 1')
+  out=$(run_gate "$dir") || code=$?
+
+  expect_code 2 "$code" "failing: a failed check must block the push"
+  assert_contains "$out" 'BLOCKED: tests failed' "failing: names the check that failed"
+  assert_contains "$out" '1 test failed' "failing: the check's own output reaches the agent"
+
+  dir=$(make_gate_project passing 'exit 0' 'exit 0')
+  code=0
+  out=$(run_gate "$dir") || code=$?
+  expect_code 0 "$code" "passing: checks that pass inside the budget let the push through"
+  pass "a check that fails still blocks, and one that passes still lets the push through"
+}
+
 test_never_clobbers_existing_hooks
 test_installs_bundle_when_absent
 test_pre_push_gate_uses_detected_scripts
 test_empty_gate_is_announced_loudly
 test_check_never_writes
 test_rerun_is_idempotent
+test_gate_budget_stays_under_the_hook_timeout
+test_overrunning_check_refuses_the_push
+test_failing_check_still_blocks
