@@ -72,7 +72,7 @@ make_unconfirmable_case() {  # <name>
   local name=$1 dir
   dir="$TMP_ROOT/$name"
   mkdir -p "$dir/bin" "$dir/state"
-  cp "$ROOT/bin/fm-watch-arm.sh" "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/"
+  cp "$ROOT/bin/fm-watch-arm.sh" "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-wake-kind-lib.sh" "$dir/bin/"
   cat > "$dir/bin/fm-watch.sh" <<'SH'
 #!/usr/bin/env bash
 set -u

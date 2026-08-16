@@ -54,14 +54,17 @@ mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# Shared wake classifier (captain-relevant verbs + signal/stale/heartbeat
-# predicates), the SAME library the away-mode daemon uses, so the triage policy
-# has one definition.
+# Shared wake classifier (captain-relevant verbs, the payload grammar, and the
+# working/paused absorb verdict), the SAME library the away-mode daemon uses, so
+# the triage policy has one definition. Which KINDS of wake exist is a separate
+# owner, bin/fm-wake-kind-lib.sh, reached through fm-wake-lib.sh above.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # The EVENT SOURCE: this watcher's poll loop over the pull primitives (capture,
-# recorded windows, and the BUSY_REGEX pane-tail match) synthesizes the
-# signal/stale/check/heartbeat wake vocabulary. tmux has no native event push, so
+# recorded windows, and the BUSY_REGEX pane-tail match) synthesizes the backend
+# half of the wake vocabulary (bin/fm-wake-kind-lib.sh owns the whole of it; the
+# disk-guard kind comes from this script's own disk probe, not from a backend
+# event). tmux has no native event push, so
 # this poll loop is the whole supervision surface. See bin/fm-backend.sh.
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"

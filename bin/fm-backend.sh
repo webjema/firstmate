@@ -15,7 +15,7 @@
 #
 # Event-source framing: a backend's supervision surface is conceptually an EVENT
 # SOURCE - it produces task events (status-changed, went-stale, exited) that map
-# onto firstmate's signal/stale/check/heartbeat wake vocabulary. tmux has no
+# onto the backend-driven wake kinds bin/fm-wake-kind-lib.sh owns. tmux has no
 # native event push, so fm-watch.sh's poll loop over the pull primitives below
 # (capture, list-live, busy-state via regex) IS the event-source implementation
 # that synthesizes those events. The pull primitives also stay available on their

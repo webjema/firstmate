@@ -20,7 +20,8 @@
 # THIS PROCESS'S EXIT IS A WAKE. On a notify-on-exit harness every exit costs
 # firstmate a full turn, so this script exits ONLY when it has something
 # firstmate must act on:
-#   - a watcher wake reason (signal:/stale:/check:/heartbeat), propagated verbatim;
+#   - a watcher wake reason, propagated verbatim (bin/fm-wake-kind-lib.sh owns
+#     which lines those are);
 #   - queued wake records the watcher enqueued but no arm was left to propagate;
 #   - one loud, bounded FAILED line when supervision genuinely cannot be held up.
 # A watcher that dies with NOTHING to report is not news: this script relaunches
@@ -329,7 +330,7 @@ report_healthy() {
 
 watch_output_has_wake() {
   local out=$1
-  grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null
+  grep -Eq "$FM_WAKE_LINE_RE" "$out" 2>/dev/null
 }
 
 # The dead watcher's own first words, if it left any, parenthesized for a churn

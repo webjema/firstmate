@@ -17,6 +17,36 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
 
+# The wake vocabulary was four hand-written copies, and the fourth kind added
+# (disk-guard) reached exactly one of them. This is the check that keeps the fifth
+# from repeating it: every kind must be accepted by BOTH call shapes and by the
+# queue's own gate, and no consumer may re-spell the alternation.
+test_wake_vocabulary_has_exactly_one_owner() {
+  local kind copies
+  # shellcheck source=bin/fm-wake-kind-lib.sh
+  . "$ROOT/bin/fm-wake-kind-lib.sh"
+  for kind in $FM_WAKE_KINDS; do
+    # The bare shape (bin/fm-watch.sh's wake() echoes its reason verbatim, and the
+    # kinds with no target are emitted with no colon at all) and the payload shape.
+    fm_is_wake_reason "$kind" || fail "bare wake kind '$kind' is not recognised as a wake"
+    fm_is_wake_reason "$kind: some payload" || fail "wake kind '$kind:' is not recognised as a wake"
+    fm_wake_kind_valid "$kind" || fail "wake kind '$kind' is rejected by the durable queue's gate"
+    printf '%s\n' "$kind" | grep -Eq "$FM_WAKE_LINE_RE" \
+      || fail "wake kind '$kind' is missed by the file-scanning regex the arm and checkpoint use"
+  done
+  # A status line the watcher prints on a singleton collision must stay a non-wake:
+  # the daemon idles it, and misreading it floods the escalation buffer.
+  fm_is_wake_reason "watcher: already running" && fail "a watcher status line is classified as a wake"
+  # Every consumer of the vocabulary must ask the owner rather than keep a copy.
+  copies=$(grep -rlE '\(signal:|signal:\*\|' "$ROOT"/bin/*.sh || true)
+  [ -z "$copies" ] || fail "the wake alternation is re-spelled outside its owner: $copies"
+  for kind in fm-watch-arm.sh fm-watch-checkpoint.sh fm-supervise-daemon.sh; do
+    grep -qE 'FM_WAKE_LINE_RE|fm_is_wake_reason' "$ROOT/bin/$kind" \
+      || fail "bin/$kind does not use bin/fm-wake-kind-lib.sh's predicate"
+  done
+  pass "every wake kind is served by one owner, and no consumer keeps a second copy"
+}
+
 test_concurrent_append_and_drain() {
   local dir state out1 out2 all pids i pid count unique malformed
   dir=$(make_case concurrent)
@@ -305,6 +335,7 @@ test_disk_guard_records_dedupe_to_the_newest() {
   pass "duplicate disk-guard records collapse to the newest"
 }
 
+test_wake_vocabulary_has_exactly_one_owner
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor

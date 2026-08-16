@@ -60,6 +60,7 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-taskstate-lib.sh" "$fake/bin/fm-taskstate-lib.sh"
   # fm-wake-lib.sh: teardown sources it to drop the task's queued wake records.
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  ln -s "$ROOT/bin/fm-wake-kind-lib.sh" "$fake/bin/fm-wake-kind-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -157,6 +158,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   ln -s "$ROOT/bin/fm-taskstate-lib.sh" "$fake/bin/fm-taskstate-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  ln -s "$ROOT/bin/fm-wake-kind-lib.sh" "$fake/bin/fm-wake-kind-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

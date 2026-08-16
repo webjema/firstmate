@@ -166,6 +166,15 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
 
+# The wake vocabulary (fm_is_wake_reason). Sourced HERE, at top level, and not
+# alongside fm-wake-lib.sh inside fm_super_main: the main loop's wake/non-wake fork
+# is a pure classifier, so it must be defined for a sourcing test too, and it must
+# be defined before the loop calls it rather than merely before its own definition.
+# The kind lib is a side-effect-free leaf, so sourcing it this early resolves no
+# home and creates no state dir.
+# shellcheck source=bin/fm-wake-kind-lib.sh
+. "$FM_DAEMON_DIR/fm-wake-kind-lib.sh"
+
 # Supervisor-pane discovery (FM_SUPERVISOR_TARGET_DEFAULT,
 # FM_SUPERVISOR_BACKEND_DEFAULT, discover_supervisor_target,
 # discover_supervisor_backend). Shared with the script-owned away launcher
@@ -1257,21 +1266,6 @@ should_force_self() {  # <reason>
   return 1
 }
 
-# A real watcher WAKE reason starts with one of these prefixes. Anything else on
-# the watcher child's stdout (e.g. "watcher: already running" on a singleton-lock
-# collision, reachable if the daemon was SIGKILL'd and its orphaned watcher child
-# still holds the #29 singleton lock) is a STATUS line, not a wake: handling it
-# as an unknown wake would flood the escalation buffer and restart the child with
-# no crash backoff. The main loop treats a non-wake line as idle (log + sleep +
-# continue), so a singleton collision cannot hot-loop escalations.
-is_wake_reason() {  # <reason>
-  local reason=$1
-  case "$reason" in
-    signal:*|stale:*|check:*|heartbeat|heartbeat:*) return 0 ;;
-  esac
-  return 1
-}
-
 # --- dispatch one wake reason to self-handle or escalate --------------------
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
@@ -1559,10 +1553,14 @@ fm_super_main() {
           continue
         fi
         # Non-wake stdout (e.g. a watcher singleton-collision "already running"
-        # status line) is NOT a wake: idling here prevents an escalation flood
-        # and a backoff-less child restart. record_crash is intentionally
-        # skipped (rc=0, this is normal idle, not a crash).
-        if ! is_wake_reason "$reason"; then
+        # status line, reachable if the daemon was SIGKILL'd and its orphaned
+        # watcher child still holds the singleton lock) is NOT a wake: idling here
+        # prevents an escalation flood and a backoff-less child restart.
+        # record_crash is intentionally skipped (rc=0, normal idle, not a crash).
+        # The flip side is that anything this predicate does not know is silently
+        # idled, so bin/fm-wake-kind-lib.sh owning the vocabulary is what keeps a
+        # real wake from being swallowed as a status line.
+        if ! fm_is_wake_reason "$reason"; then
           log "watcher non-wake stdout, idling: $reason"
           WATCHER_PID=""
           sleep "${HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}"

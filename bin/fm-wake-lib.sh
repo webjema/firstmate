@@ -2,6 +2,10 @@
 # Shared durable wake queue and portable lock helpers.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The wake-kind vocabulary and its predicates. Sourced FIRST and unconditionally:
+# fm_wake_append below gates on it, and it is a side-effect-free leaf.
+# shellcheck source=bin/fm-wake-kind-lib.sh
+. "$FM_WAKE_LIB_DIR/fm-wake-kind-lib.sh"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_WAKE_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -411,10 +415,10 @@ fm_wake_clean_field() {
 
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
-  case "$kind" in
-    signal|stale|check|heartbeat|disk-guard) ;;
-    *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
-  esac
+  fm_wake_kind_valid "$kind" || {
+    printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2
+    return 2
+  }
 
   clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
   clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)

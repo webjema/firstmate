@@ -65,7 +65,7 @@ make_arm_case() {  # <name>
   local name=$1 dir
   dir="$TMP_ROOT/$name"
   mkdir -p "$dir/bin" "$dir/state"
-  cp "$ROOT/bin/fm-watch-arm.sh" "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/"
+  cp "$ROOT/bin/fm-watch-arm.sh" "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-wake-kind-lib.sh" "$dir/bin/"
   cat > "$dir/bin/fm-watch.sh" <<'SH'
 #!/usr/bin/env bash
 # Scripted stand-in for the watcher. It takes the singleton lock exactly the way
@@ -73,6 +73,8 @@ make_arm_case() {  # <name>
 # confirms it, then acts out one scenario from state/.fake-watch-mode:
 #   quiet   - hold the lock briefly, release it, exit 0 saying nothing
 #   wake    - release, then print one wake reason line
+#   dgwake  - release, then print a BARE "disk-guard" line, the shape the real
+#             watcher's wake() emits for the disk holdback
 #   enqueue - append a durable wake record, release, say nothing
 #   hold    - hold the lock and beat until signalled. The sleep is interruptible so
 #             a TERM lands NOW: bash defers a trap until the running foreground
@@ -95,6 +97,7 @@ trap 'release; exit 143' TERM INT
 sleep "${FAKE_WATCH_HOLD:-1}"
 case "$mode" in
   wake) release; echo 'stale: fm-probe | class=none | idle=900s' ;;
+  dgwake) release; echo 'disk-guard' ;;
   enqueue) fm_wake_append stale fm-probe 'stale: fm-probe | class=none | idle=900s'; release ;;
   hold) while :; do touch "$STATE/.last-watcher-beat"; sleep 1 & wait $! 2>/dev/null || true; done ;;
   *) release ;;
@@ -210,6 +213,26 @@ test_watcher_wake_reason_still_exits() {
   grep -qF 'stale: fm-probe | class=none | idle=900s' "$armout" \
     || fail "arm did not propagate the watcher's wake reason verbatim: $(cat "$armout")"
   pass "a watcher wake reason exits the arm and reaches firstmate verbatim"
+}
+
+# The disk holdback is emitted as a BARE "disk-guard" - no colon, no payload - so a
+# predicate written for "disk-guard:" would match nothing. An arm that does not know
+# the kind reads the line as an information-free watcher death and relaunches in
+# place, and the captain is never told the disk is full.
+test_disk_guard_wake_reason_still_exits() {
+  local dir armout rc=0
+  dir=$(make_arm_case disk-guard-exit)
+  armout="$dir/arm.out"
+  set_mode "$dir" dgwake
+  # Bounded churn budget so an arm that does NOT recognise the line ends in the loud
+  # FAILED path instead of relaunching forever and hanging this case.
+  FM_ARM_RELAUNCH_MAX=2 run_arm "$dir" > "$armout" 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "arm did not exit zero on a disk-guard wake (status $rc): $(cat "$armout")"
+  grep -qFx 'disk-guard' "$armout" \
+    || fail "arm did not propagate the disk-guard wake verbatim: $(cat "$armout")"
+  grep -qF 'watcher: FAILED' "$armout" \
+    && fail "arm read the disk-guard wake as a quiet death and churned: $(cat "$armout")"
+  pass "a bare disk-guard wake exits the arm and reaches firstmate verbatim"
 }
 
 test_queued_wakes_still_exit() {
@@ -685,6 +708,7 @@ test_arm_in_flight_verifies_a_real_process() {
 
 test_quiet_watcher_death_does_not_wake_firstmate
 test_watcher_wake_reason_still_exits
+test_disk_guard_wake_reason_still_exits
 test_queued_wakes_still_exit
 test_churn_is_bounded_by_one_loud_failure
 test_second_arm_stands_by_instead_of_exiting

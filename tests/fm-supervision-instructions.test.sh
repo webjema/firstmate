@@ -8,6 +8,31 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-supervision-instructions)
 RENDER="$ROOT/bin/fm-supervision-instructions.sh"
 
+# The supervision snippets are the ONE place the wake vocabulary is deliberately
+# spelled out a second time, because they are what the model pattern-matches a wake
+# line against at runtime, with no chance to source a shell library mid-turn. That
+# copy is allowed only because this test makes it a checked projection of
+# bin/fm-wake-kind-lib.sh rather than a copy that can drift: a snippet that names ANY
+# wake kind must name them all, so adding a kind cannot leave a harness behind.
+# A snippet that names none (it defers to AGENTS.md) is left alone.
+test_supervision_snippets_name_every_wake_kind() {
+  local doc kind checked=0
+  # shellcheck source=bin/fm-wake-kind-lib.sh
+  . "$ROOT/bin/fm-wake-kind-lib.sh"
+  for doc in "$ROOT/docs/supervision-protocols/"*.md "$ROOT/AGENTS.md"; do
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks are literal Markdown code-span delimiters in the grep pattern, not a command substitution.
+    grep -qE '`stale:?`' "$doc" || continue
+    checked=$((checked + 1))
+    for kind in $FM_WAKE_KINDS; do
+      grep -qE "\`$kind:?\`" "$doc" \
+        || fail "$(basename "$doc") enumerates wake kinds but never names '$kind'; that harness would read it as a non-wake"
+    done
+  done
+  [ "$checked" -ge 4 ] \
+    || fail "expected the claude/codex/grok snippets and AGENTS.md to enumerate wake kinds, found $checked"
+  pass "every supervision snippet that names a wake kind names all of them"
+}
+
 test_selected_harness_block_only() {
   local out
   out=$("$RENDER" --harness codex)
@@ -103,6 +128,7 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_supervision_snippets_name_every_wake_kind
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
