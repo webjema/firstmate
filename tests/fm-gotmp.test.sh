@@ -148,38 +148,17 @@ test_teardown_removes_tasktmp_dir() {
 test_teardown_skips_gracefully_without_tasktmp() {
   # Backward compat: a meta from a pre-fix task has no tasktmp= line. Teardown must
   # not error and must not remove anything.
-  local id=td-absent-z3
-  local fake="$TMP_ROOT/$id-root"
-  mkdir -p "$fake/bin/backends" "$fake/state"
-  ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
-  ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
-  ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
-  ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
-  ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
-  ln -s "$ROOT/bin/fm-taskstate-lib.sh" "$fake/bin/fm-taskstate-lib.sh"
-  cat > "$fake/bin/fm-guard.sh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fake/bin/fm-guard.sh"
-  cat > "$fake/bin/fm-fleet-sync.sh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fake/bin/fm-fleet-sync.sh"
-  cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
-fm_tasks_axi_compatible() { return 1; }
-SH
-  # No tasktmp= line at all.
-  cat > "$fake/state/$id.meta" <<META
-window=fakeses:fm-$id
-worktree=$TMP_ROOT/nonexistent-wt-$id
-project=$TMP_ROOT/nonexistent-proj-$id
-harness=claude
-kind=ship
-mode=no-mistakes
-yolo=off
-META
+  #
+  # Built by make_fake_root with the tasktmp= line stripped afterwards, rather than by
+  # a second hand-rolled fixture: the hand-rolled one drifted, missing a library
+  # teardown had newly grown, and failed here for a reason that had nothing to do with
+  # what this case asserts.
+  local id=td-absent-z3 fake
+  fake=$(make_fake_root "$id" "$TMP_ROOT/unused-fm-$id")
+  grep -v '^tasktmp=' "$fake/state/$id.meta" > "$fake/state/$id.meta.tmp"
+  mv "$fake/state/$id.meta.tmp" "$fake/state/$id.meta"
+  ! grep -q '^tasktmp=' "$fake/state/$id.meta" \
+    || fail "precondition: the meta should carry no tasktmp="
   FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
     || fail "teardown exited non-zero when tasktmp= was absent"
   pass "fm-teardown skips gracefully when tasktmp= is absent (backward compat)"
