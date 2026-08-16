@@ -253,8 +253,13 @@ done < <(find "$ROOT" -mindepth 1 -maxdepth 2 -type d \
 # Best-effort: drop now-empty project-encoded parent dirs left behind.
 [ "$DRY_RUN" = 1 ] || find "$ROOT" -mindepth 1 -maxdepth 1 -type d -empty -exec rmdir {} + 2>/dev/null || true
 
-# Reclaim orphaned firstmate task temp directories (/tmp/fm-<id>) untouched for >24h.
+# Reclaim orphaned firstmate task temp directories (/tmp/fm-*) untouched for >24h.
 # This prevents buildup of tasktmp folders left by tasks that crashed or were killed before teardown.
+# HOST-WIDE ON PURPOSE, and it stays that way now that bin/fm-peer-lib.sh scopes each
+# root to its owning home: the orphans this exists to reclaim are exactly the ones
+# whose home may no longer exist, so mtime and not ownership is the safety property.
+# Scoping the glob to this home would reclaim strictly less and reclaim nothing sooner.
+# 24h untouched is far longer than any live task goes without writing its temp root.
 if [ "$DRY_RUN" = 1 ]; then
   find /tmp -maxdepth 1 -type d -name "fm-*" -mmin +1440 -exec echo "SCRATCH_REAP: would reap {} (firstmate tmp)" \; 2>/dev/null || true
 else

@@ -503,7 +503,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   assert_contains "$out" "worktree=$wt" \
     "fm-spawn.sh did not resolve a symlinked-prefix project to its real worktree when the backend reports $first_reply cwd"
 
-  rm -rf "/tmp/fm-$id"
+  rm -rf /tmp/fm-*-"$id"
 }
 
 test_spawn_symlinked_project_prefix_avoids_false_refusal() {
@@ -667,7 +667,7 @@ test_spawn_default_backend_writes_no_meta_field() {
   expect_code 0 $? "the default spawn should succeed"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "a spawn must not write backend= to meta (an absent backend= means tmux)"
-  rm -rf "/tmp/fm-$id"
+  rm -rf /tmp/fm-*-"$id"
   pass "fm-spawn.sh: a spawn writes no backend= field (missing means tmux)"
 }
 

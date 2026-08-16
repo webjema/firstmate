@@ -22,6 +22,10 @@
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
 # fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
+# Each clone is synced under a per-clone write lock, so two firstmate instances
+# sharing one projects/ take turns instead of one losing the race and leaving its
+# view stale; bin/fm-peer-lib.sh owns the lock. The full-fleet form sweeps twice,
+# without waiting and then waiting, so a contended clone cannot starve the rest.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
@@ -38,6 +42,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-peer-lib.sh
+. "$SCRIPT_DIR/fm-peer-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
 
@@ -306,14 +312,41 @@ report_stuck() {
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
 }
 
+# One writer at a time per clone. Under the shared-projects/ arrangement this
+# clone may be the same directory a peer instance is syncing right now, and a lost
+# race leaves THIS home's clone stale - the loser must wait and then sync, not give
+# up. bin/fm-peer-lib.sh owns the lock and why it is for liveness rather than
+# integrity. The whole body runs inside it, so no early return can leak it.
+# sync_project <dir> [nowait]: sync one clone under its write lock.
+# With "nowait" it returns 75 instead of waiting, so the caller can come back to a
+# contended clone after the uncontended ones rather than letting one peer's sync
+# eat the whole run's budget.
 sync_project() {
   PROJ=$1
+  local nowait=${2:-} rc=0
   label=$(project_label)
-
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
     return 0
   fi
+  if [ "$nowait" = nowait ]; then
+    fm_clone_lock_try "$PROJ" sync_project_locked "$PROJ" || rc=$?
+    [ "$rc" -ne 75 ] || return 75
+  else
+    fm_clone_lock_run "$PROJ" sync_project_locked "$PROJ" || rc=$?
+    if [ "$rc" -eq 75 ]; then
+      echo "$label: skipped: another firstmate instance has held this clone for over $(fm_clone_lock_wait_secs)s"
+      return 0
+    fi
+  fi
+  [ "$rc" -ne 10 ] || refresh_graph
+  return 0
+}
+
+sync_project_locked() {
+  PROJ=$1
+  label=$(project_label)
+
   if ! git -C "$PROJ" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "$label: skipped: not a git repo"
     return 0
@@ -431,8 +464,12 @@ sync_project() {
   else
     echo "$label: synced $before..$after"
   fi
-  refresh_graph
-  return 0
+  # 10 = the default branch moved, so the graph wants a reindex. It rides back as
+  # an exit code because the lock is held in a subshell, and the reindex itself
+  # runs OUTSIDE that subshell: it is minutes of best-effort work that touches no
+  # git state, and holding a clone lock through it starves the peer this lock
+  # exists to keep current.
+  return 10
 }
 
 if [ $# -eq 1 ]; then
@@ -441,8 +478,20 @@ if [ $# -eq 1 ]; then
 fi
 
 [ -d "$PROJECTS" ] || exit 0
+# Two passes. The first never waits, so every clone no peer is holding is synced
+# and reported before any waiting starts - bin/fm-bootstrap.sh runs this under a
+# timeout of about 20s, and one contended clone used to be able to consume all of
+# it and leave every other clone untouched.
+CONTENDED=""
 for proj in "$PROJECTS"/*; do
   [ -e "$proj" ] || continue
   [ -d "$proj" ] || continue
-  sync_project "$proj"
+  sync_project "$proj" nowait || CONTENDED="$CONTENDED$proj
+"
 done
+while IFS= read -r proj; do
+  [ -n "$proj" ] || continue
+  sync_project "$proj"
+done <<EOF
+$CONTENDED
+EOF

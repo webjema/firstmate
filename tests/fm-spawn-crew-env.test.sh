@@ -22,17 +22,31 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-crew-env)
 
-# fm-spawn writes its task temp root at the fixed path /tmp/fm-<id>, outside TMP_ROOT,
-# so this file owns removing it. It cannot be registered from make_spawn_case: that runs
-# in a command substitution, and an array append inside a subshell is lost. Leftovers are
-# not merely untidy here - a stale /tmp/fm-<id>/crew-env.sh makes the planted-symlink
-# case below pass without ever planting the symlink. Own EXIT trap per the convention in
-# tests/lib.sh, calling fm_test_cleanup so the registered dirs still go.
+# fm-spawn writes its task temp root under /tmp, outside TMP_ROOT, so this file owns
+# removing it. It cannot be registered from make_spawn_case: that runs in a command
+# substitution, and an array append inside a subshell is lost. Leftovers are not merely
+# untidy here - a stale crew-env.sh makes the planted-symlink case below pass without
+# ever planting the symlink. Own EXIT trap per the convention in tests/lib.sh, calling
+# fm_test_cleanup so the registered dirs still go.
+#
+# The glob matches on the TASK ID rather than the whole path, because the path now
+# carries a hash of the home and a killed earlier run's home is gone by the time this
+# sweeps for its leftovers.
 crew_env_cleanup() {
-  rm -rf /tmp/fm-crewenv-*
+  rm -rf /tmp/fm-*-crewenv-*
   fm_test_cleanup
 }
 trap crew_env_cleanup EXIT
+
+# task_tmp_of <home> <id>: the temp root spawn actually used, read back from the meta
+# it wrote. Reconstructing the path here instead would only restate the production
+# formula in bin/fm-peer-lib.sh, and could not fail when that formula changed.
+task_tmp_of() {  # <home> <id>
+  local home=$1 id=$2 path
+  path=$(sed -n 's/^tasktmp=//p' "$home/state/$id.meta" 2>/dev/null | tail -1)
+  [ -n "$path" ] || fail "spawn recorded no tasktmp= for $id"
+  printf '%s\n' "$path"
+}
 
 # Dummy values chosen to break naive quoting: a single quote, a space, and a `$`.
 # shell_quote must survive all three intact through the file round-trip.
@@ -75,7 +89,7 @@ SH
 
 # Build one spawn case: a firstmate home, a project clone, a real worktree standing in
 # for the treehouse slot, and a fake bin dir. Echoes a '|'-joined record because a bash
-# function cannot return several values. Clears any /tmp/fm-<id> a killed earlier run
+# function cannot return several values. Clears any temp root a killed earlier run
 # left behind, so no case can pass against stale state.
 make_spawn_case() {
   local name=$1 case_dir home proj wt fakebin id
@@ -85,7 +99,7 @@ make_spawn_case() {
   wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   id="crewenv-$name-x1"
-  rm -rf "/tmp/fm-$id"
+  rm -rf /tmp/fm-*-"$id"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf 'brief\n' > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -125,7 +139,7 @@ EOF
     ASANA_ACCESS_TOKEN="$DUMMY_TOKEN" GOOGLE_APPLICATION_CREDENTIALS="$DUMMY_GAC")
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report success"
 
-  envfile="/tmp/fm-$id/crew-env.sh"
+  envfile="$(task_tmp_of "$home" "$id")/crew-env.sh"
   assert_present "$envfile" "spawn did not write the crew env file"
   mode=$(stat -c '%a' "$envfile" 2>/dev/null || stat -f '%Lp' "$envfile")
   [ "$mode" = 600 ] || fail "crew env file mode is $mode, expected 600"
@@ -166,7 +180,7 @@ $rec
 EOF
   FM_FAKE_TMUXLOG="$case_dir/tmuxlog"
   out=$(run_spawn "$home" "$proj" "$wt" "$fakebin" "$id" ASANA_ACCESS_TOKEN="$DUMMY_TOKEN")
-  envfile="/tmp/fm-$id/crew-env.sh"
+  envfile="$(task_tmp_of "$home" "$id")/crew-env.sh"
   assert_grep 'export ASANA_ACCESS_TOKEN=' "$envfile" "the set var was not written"
   assert_no_grep 'ANTHROPIC_API_KEY' "$envfile" "an unset var was exported as empty"
   assert_no_grep 'OPENAI_API_KEY' "$envfile" "an unset var was exported as empty"
@@ -189,7 +203,7 @@ EOF
   expect_code 0 "$status" "spawn with no credentials in the environment"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report success"
   assert_contains "$out" "crew-env: forwarded=0" "spawn did not report the zero count line"
-  assert_absent "/tmp/fm-$id/crew-env.sh" "spawn left an empty crew env file behind"
+  assert_absent "$(task_tmp_of "$home" "$id")/crew-env.sh" "spawn left an empty crew env file behind"
   assert_no_grep 'crew-env.sh' "$FM_FAKE_TMUXLOG" \
     "spawn told the pane to source a file it did not write"
   pass "spawn with no credentials writes no file and reports a zero count"
@@ -204,20 +218,28 @@ $rec
 EOF
   FM_FAKE_TMUXLOG="$case_dir/tmuxlog"
   run_spawn "$home" "$proj" "$wt" "$fakebin" "$id" ASANA_ACCESS_TOKEN="$DUMMY_TOKEN" >/dev/null
-  assert_present "/tmp/fm-$id/crew-env.sh" "precondition: spawn should have written the env file"
+  assert_present "$(task_tmp_of "$home" "$id")/crew-env.sh" "precondition: spawn should have written the env file"
   [ -z "$(git -C "$wt" status --porcelain)" ] \
     || fail "spawn wrote something into the crew's checkout: $(git -C "$wt" status --porcelain)"
   assert_no_grep "$DUMMY_TOKEN_TAIL" "$FM_FAKE_TMUXLOG" "the credential VALUE was handed to tmux"
   pass "the crew env file lives outside the worktree, so git never sees it"
 }
 
-# The env file's path is predictable (/tmp/fm-<id>/crew-env.sh from a short kebab id)
-# and `mkdir -p` succeeds on a directory somebody else already made, so a plain `>`
-# would follow a planted symlink and write the credential wherever it points. Writing
-# through the link is the one unrecoverable failure here, so it is tested rather than
-# argued.
+# The env file's path is predictable - a short kebab task id under a temp root named
+# from the home, neither of which is a secret - and `mkdir -p` succeeds on a directory
+# somebody else already made, so a plain `>` would follow a planted symlink and write
+# the credential wherever it points. Writing through the link is the one unrecoverable
+# failure here, so it is tested rather than argued.
+#
+# This is the one case that must know the path BEFORE spawn runs, because that is the
+# attacker's position, so it computes it the way an attacker would: from the same
+# library production uses. That alone would be a tautology, so it also asserts that the
+# root spawn recorded is the one the symlink was planted in - which fails if the
+# formula ever moves out from under this test.
+# shellcheck source=bin/fm-peer-lib.sh
+. "$ROOT/bin/fm-peer-lib.sh"
 test_planted_symlink_is_not_written_through() {
-  local rec case_dir home proj wt fakebin id decoy
+  local rec case_dir home proj wt fakebin id decoy planted
   rec=$(make_spawn_case symlink)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
@@ -225,12 +247,15 @@ EOF
   FM_FAKE_TMUXLOG="$case_dir/tmuxlog"
   decoy="$case_dir/decoy.txt"
   printf 'untouched\n' > "$decoy"
-  mkdir -p "/tmp/fm-$id"
-  ln -s "$decoy" "/tmp/fm-$id/crew-env.sh"
+  planted=$(fm_task_tmp_root "$home" "$id")
+  mkdir -p "$planted"
+  ln -s "$decoy" "$planted/crew-env.sh"
   run_spawn "$home" "$proj" "$wt" "$fakebin" "$id" ASANA_ACCESS_TOKEN="$DUMMY_TOKEN" >/dev/null
+  [ "$(task_tmp_of "$home" "$id")" = "$planted" ] \
+    || fail "spawn used a different temp root than the one the symlink was planted in"
   assert_no_grep "$DUMMY_TOKEN_TAIL" "$decoy" "spawn wrote the credential through a planted symlink"
   assert_grep 'untouched' "$decoy" "spawn truncated the symlink's target"
-  [ ! -L "/tmp/fm-$id/crew-env.sh" ] || fail "the crew env file is still a symlink, not a real file"
+  [ ! -L "$planted/crew-env.sh" ] || fail "the crew env file is still a symlink, not a real file"
   pass "spawn replaces a planted symlink instead of writing the credential through it"
 }
 

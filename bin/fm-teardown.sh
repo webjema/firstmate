@@ -131,6 +131,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-taskstate-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-peer-lib.sh
+. "$SCRIPT_DIR/fm-peer-lib.sh"
 FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
@@ -160,8 +162,8 @@ PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
-# tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
-# (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
+# tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root;
+# absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
@@ -1024,10 +1026,14 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
-# Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
+# Remove the per-task temp root (incl. its gotmp/) recorded by spawn, and recompute
+# it as a backstop for a meta that lost the line. Read before the state-file rm below.
+# The recompute used to be a bare /tmp/fm-<id>, which under a shared host deleted
+# whichever OTHER instance's task happened to share the id, credential file and all.
+# Dropping that spelling leaves a task spawned before the rename with no teardown-time
+# reclaim; bin/fm-scratch-reap.sh's /tmp/fm-* sweep still collects it.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-rm -rf "/tmp/fm-$ID" 2>/dev/null || true
+rm -rf "$(fm_task_tmp_root "$FM_HOME" "$ID")" 2>/dev/null || true
 
 # Asynchronously prune stale treehouse worktrees for this project to reclaim disk space
 if command -v treehouse >/dev/null 2>&1 && [ -n "$PROJ" ] && [ -d "$PROJ" ]; then
