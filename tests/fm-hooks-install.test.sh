@@ -14,6 +14,16 @@
 #   (d) no detectable test/typecheck -> installs, but says loudly that the gate is empty
 #   (e) --check never writes
 #   (f) re-running is idempotent
+#   (g) the gate's own budget stays under the hook timeout that would cancel it
+#   (h) a check that outruns the budget REFUSES the push, by name
+#   (i) a check that ignores TERM is ended anyway, inside the budget
+#   (j) a check that simply fails still blocks
+#
+# (g) through (j) exist because a cancelled hook is worse than an absent one: a
+# hook that outruns its timeout is cancelled, and a cancelled hook does not
+# block, so the push carries on ungated unless the gate refused first. (h) and
+# (i) drive the emitted hook end to end, with the deadline shrunk to keep the
+# test quick.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -122,9 +132,119 @@ test_rerun_is_idempotent() {
   pass "re-running is idempotent"
 }
 
+# (g) The no-fail-open invariant, asserted on the two numbers themselves. ------
+test_gate_budget_stays_under_the_hook_timeout() {
+  local dir budget grace timeout
+  dir=$(make_project budget '{ "test": "jest", "typecheck": "tsc --noEmit" }')
+  "$HOOKS" "$dir" >/dev/null
+
+  budget=$(sed -n 's/^GATE_BUDGET=\([0-9]\{1,\}\)$/\1/p' "$dir/.claude/hooks/fm-quality-pre-push.sh")
+  grace=$(sed -n 's/^GATE_GRACE=\([0-9]\{1,\}\)$/\1/p' "$dir/.claude/hooks/fm-quality-pre-push.sh")
+  timeout=$(awk '/fm-quality-pre-push\.sh/ { seen = 1 }
+                 seen && /"timeout"/ { gsub(/[^0-9]/, ""); print; exit }' "$dir/.claude/settings.json")
+
+  [ -n "$budget" ] || fail "budget: the emitted gate sets itself no deadline"
+  [ -n "$grace" ] || fail "budget: the emitted gate sets no grace before it kills"
+  [ -n "$timeout" ] || fail "budget: settings.json gives the gate no timeout"
+  [ "$(( budget + grace ))" -lt "$timeout" ] \
+    || fail "budget: the gate's ${budget}s deadline plus its ${grace}s grace must stay under the ${timeout}s hook timeout, or it is cancelled mid-verdict and the push proceeds"
+  pass "the gate's own deadline stays under the hook timeout that would cancel it"
+}
+
+# A committed git project whose `npm run <script>` is a shim under fakebin/, so
+# the emitted hook can be driven for real without a node toolchain. $2 is the
+# body of `npm run typecheck`, $3 the body of `npm run test`.
+make_gate_project() {
+  local name=$1 typecheck=$2 test=$3 dir
+  dir=$(make_project "$name" '{ "test": "jest", "typecheck": "tsc --noEmit" }')
+  "$HOOKS" "$dir" >/dev/null
+
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/npm" <<EOF
+#!/usr/bin/env bash
+[ "\${1:-}" = run ] || exit 0
+case "\$2" in
+  typecheck) $typecheck ;;
+  test) $test ;;
+esac
+EOF
+  chmod +x "$dir/fakebin/npm"
+
+  # Shrink the deadline so an overrun is measured in seconds, not minutes. The
+  # gate's logic is the shipped one; only the numbers are test-sized.
+  sed -i.bak -e 's/^GATE_BUDGET=[0-9]\{1,\}$/GATE_BUDGET=3/' \
+             -e 's/^GATE_GRACE=[0-9]\{1,\}$/GATE_GRACE=1/' \
+             "$dir/.claude/hooks/fm-quality-pre-push.sh"
+  rm -f "$dir/.claude/hooks/fm-quality-pre-push.sh.bak"
+
+  # The gate refuses a dirty tree before it reaches any check.
+  git -C "$dir" init -q
+  git -C "$dir" add -A
+  git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm fixture
+  printf '%s\n' "$dir"
+}
+
+run_gate() {
+  local dir=$1
+  ( cd "$dir" \
+      && PATH="$dir/fakebin:$PATH" CLAUDE_PROJECT_DIR="$dir" \
+         ./.claude/hooks/fm-quality-pre-push.sh <<< '{"tool_input":{"command":"git push -u origin main"}}' 2>&1 )
+}
+
+# (h) The defect this whole file exists to keep fixed. ------------------------
+test_overrunning_check_refuses_the_push() {
+  local dir out code=0
+  dir=$(make_gate_project overrun 'exit 0' 'sleep 60')
+  out=$(run_gate "$dir") || code=$?
+
+  expect_code 2 "$code" "overrun: an unfinished check must block the push, not let it through"
+  assert_contains "$out" 'BLOCKED' "overrun: refuses out loud"
+  assert_contains "$out" 'tests' "overrun: names which check ran out of budget"
+  assert_contains "$out" 'by hand' "overrun: says how to get past it"
+  pass "a check that outruns the gate's budget refuses the push instead of passing it"
+}
+
+# (i) The budget is a deadline, not a request. A check that declines to die on TERM
+# would otherwise carry the hook past the harness timeout, which cancels it and
+# leaves the push unblocked - the very failure the budget exists to prevent. ----
+test_deadline_survives_a_check_that_ignores_term() {
+  local dir out code=0 started elapsed
+  dir=$(make_gate_project stubborn 'exit 0' 'trap "" TERM; sleep 60')
+  started=$SECONDS
+  out=$(run_gate "$dir") || code=$?
+  elapsed=$(( SECONDS - started ))
+
+  expect_code 2 "$code" "stubborn: a check that ignores TERM must still be refused"
+  assert_contains "$out" 'BLOCKED' "stubborn: refuses out loud"
+  [ "$elapsed" -lt 20 ] \
+    || fail "stubborn: the gate took ${elapsed}s to refuse a 3s budget - it is waiting on the check instead of ending it"
+  pass "a check that ignores TERM is killed at the deadline rather than allowed to outlast it"
+}
+
+# (j) The refusals above must not have cost the ordinary verdicts. ------------
+test_failing_check_still_blocks() {
+  local dir out code=0
+  dir=$(make_gate_project failing 'exit 0' 'echo "1 test failed"; exit 1')
+  out=$(run_gate "$dir") || code=$?
+
+  expect_code 2 "$code" "failing: a failed check must block the push"
+  assert_contains "$out" 'BLOCKED: tests failed' "failing: names the check that failed"
+  assert_contains "$out" '1 test failed' "failing: the check's own output reaches the agent"
+
+  dir=$(make_gate_project passing 'exit 0' 'exit 0')
+  code=0
+  out=$(run_gate "$dir") || code=$?
+  expect_code 0 "$code" "passing: checks that pass inside the budget let the push through"
+  pass "a check that fails still blocks, and one that passes still lets the push through"
+}
+
 test_never_clobbers_existing_hooks
 test_installs_bundle_when_absent
 test_pre_push_gate_uses_detected_scripts
 test_empty_gate_is_announced_loudly
 test_check_never_writes
 test_rerun_is_idempotent
+test_gate_budget_stays_under_the_hook_timeout
+test_overrunning_check_refuses_the_push
+test_deadline_survives_a_check_that_ignores_term
+test_failing_check_still_blocks
