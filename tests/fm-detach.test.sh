@@ -21,6 +21,7 @@
 #   (g) reclaim --force past a live agent    -> teardown runs, meta purged
 #   (h) reclaim refuses uncommitted work     -> exit 1, meta preserved (safety reused)
 #   (i) reclaim a detached meta with NO window= -> NO empty-target kill (self-destruct guard)
+#   (j) detach purges watcher markers + queued wakes -> sibling and CI check wake kept
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -272,3 +273,87 @@ assert_no_grep 'kill:[]' "$c/state/killlog" "i: NO empty-target kill-window issu
 assert_grep 'kill:[' "$c/state/killlog" "i: the reclaim path did exercise the kill (guard is not vacuous)"
 assert_absent "$c/state/task-x1.meta" "i: meta purged by teardown once reclaimed"
 pass "i: reclaiming a detached task with no window= never issues an empty-target kill"
+
+# --- supervision debris: watcher markers and queued wakes ---
+#
+# Detach drops window= from the meta exactly the way the PR-open release does, so
+# a window-keyed watcher marker or stale wake missed here is permanently
+# unaddressable: nothing can ever derive the key again. bin/fm-taskstate-lib.sh
+# and bin/fm-wake-lib.sh own the two clearing procedures so detach and teardown
+# cannot drift; this case is detach's half of that contract.
+#
+# The sibling task's id CONTAINS the detached one ("sub-task-x1" vs "task-x1") and
+# is still live. That is the guard that matters: a glob or substring sweep over the
+# state dir or the queue takes the live task's supervision with it.
+
+# Every watcher marker bin/fm-watch.sh writes for <id> on window <ses>:fm-<id>.
+watch_markers_for() {  # <state-dir> <id>
+  local state=$1 id=$2 m key
+  key=$(printf 'firstmate:fm-%s' "$id" | tr ':/.' '___')
+  for m in hash count stale stale-since wedge-escalations paused paused-rechecked paused-resurfaced; do
+    printf '%s/.%s-%s\n' "$state" "$m" "$key"
+  done
+  printf '%s/.hb-surfaced-%s\n' "$state" "$id"
+  printf '%s/.seen-%s_status\n' "$state" "$id"
+  printf '%s/.seen-%s_turn-ended\n' "$state" "$id"
+}
+
+seed_watch_markers() {  # <state-dir> <id>
+  local f
+  while IFS= read -r f; do
+    printf 'marker\n' > "$f"
+  done < <(watch_markers_for "$1" "$2")
+}
+
+# Append a wake record with the production library, scoped to <state>. Copied from
+# tests/wake-helpers.sh, which cannot be sourced here: it defines its own make_case.
+append_wake() {  # <state> <kind> <key> <payload>
+  local state=$1 kind=$2 key=$3 payload=$4 lib="$ROOT/bin/fm-wake-lib.sh"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    fm_wake_append "$2" "$3" "$4"
+  ' _ "$lib" "$kind" "$key" "$payload"
+}
+
+wake_queue_has() {  # <queue> <kind> <key>
+  awk -F '\t' -v k="$2" -v key="$3" 'NF >= 5 && $3 == k && $4 == key { found = 1 } END { exit !found }' "$1"
+}
+
+# (j) detach purges the watcher's per-task markers and the task's queued wakes.
+c=$(make_case detach-purges-debris)
+write_active_meta "$c" ship
+seed_watch_markers "$c/state" task-x1
+seed_watch_markers "$c/state" sub-task-x1
+append_wake "$c/state" signal 'task-x1.status' 'signal: task-x1.status'
+append_wake "$c/state" signal 'task-x1.turn-ended' 'signal: task-x1.turn-ended'
+append_wake "$c/state" stale 'firstmate:fm-task-x1' 'stale: firstmate:fm-task-x1'
+# Detach never touches state/<id>.check.sh, so a PR watch armed before the
+# hand-over must keep reporting - its queued wake included.
+append_wake "$c/state" check "$c/state/task-x1.check.sh" 'check: merged'
+append_wake "$c/state" signal 'sub-task-x1.status' 'signal: sub-task-x1.status'
+append_wake "$c/state" stale 'firstmate:fm-sub-task-x1' 'stale: firstmate:fm-sub-task-x1'
+append_wake "$c/state" heartbeat heartbeat heartbeat
+run "$c" -- task-x1
+expect_code 0 "$CODE" "j: detach exits 0"
+while IFS= read -r f; do
+  assert_absent "$f" "j: detach LEAKED the watcher marker $(basename "$f"), now unaddressable forever"
+done < <(watch_markers_for "$c/state" task-x1)
+while IFS= read -r f; do
+  assert_present "$f" "j: detach ATE a live sibling task's marker $(basename "$f")"
+done < <(watch_markers_for "$c/state" sub-task-x1)
+! wake_queue_has "$c/state/.wake-queue" signal 'task-x1.status' \
+  || fail "j: a signal wake for the detached task is still queued"
+! wake_queue_has "$c/state/.wake-queue" signal 'task-x1.turn-ended' \
+  || fail "j: a turn-end wake for the detached task is still queued"
+! wake_queue_has "$c/state/.wake-queue" stale 'firstmate:fm-task-x1' \
+  || fail "j: a stale wake for the detached task's pane is still queued"
+wake_queue_has "$c/state/.wake-queue" check "$c/state/task-x1.check.sh" \
+  || fail "j: DROPPED THE CI CHECK WAKE - firstmate is now blind to this PR"
+wake_queue_has "$c/state/.wake-queue" signal 'sub-task-x1.status' \
+  || fail "j: detach ATE a live sibling task's signal wake"
+wake_queue_has "$c/state/.wake-queue" stale 'firstmate:fm-sub-task-x1' \
+  || fail "j: detach ATE a live sibling task's stale wake"
+wake_queue_has "$c/state/.wake-queue" heartbeat heartbeat \
+  || fail "j: detach ATE the fleet-wide heartbeat wake"
+pass "j: detach purges the watcher markers and queued wakes it is the last to be able to address"

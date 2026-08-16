@@ -52,6 +52,13 @@
 #   (q6) pre-rename released meta w/ raw stale worktree=     -> ALLOW, slot untouched
 #   (q7) released + PR still open, teardown re-run           -> no-op, slot untouched
 #
+# And the supervision-debris contract (F4): a torn-down task must leave behind no
+# watcher marker and no queued wake, because a wake for a task that no longer exists
+# can only be drained and discarded at the cost of a firstmate turn.
+#   (q8) full teardown + every watcher marker seeded         -> all purged, sibling kept
+#   (q9) full teardown + queued wakes for task and sibling   -> task's dropped, rest kept
+#   (q10) PR-open release + window-keyed markers and wakes   -> purged, CI check wake kept
+#
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
@@ -768,6 +775,156 @@ test_second_teardown_after_the_merge_purges_the_state() {
   assert_absent "$case_dir/state/task-x1.check.sh" "post-merge purge: CI poll should be gone once merged"
   assert_absent "$case_dir/state/task-x1.ci-seen" "post-merge purge: ci-seen should be gone once merged"
   pass "the second teardown, after the merge, purges the supervision state for real"
+}
+
+# --- supervision debris: watcher markers and queued wakes (F4) ---
+#
+# bin/fm-watch.sh writes per-task markers under two keys that are NOT the bare task
+# id, so the id-keyed removal list missed every one of them: the pane-staleness
+# family keys on the WINDOW target with ':/.' folded to '_', and the signal scan on
+# the status/turn-end file BASENAME with '.' folded to '_'. It also queues wake
+# records naming the task, which nothing dropped at teardown - firstmate drained
+# them, found no crew, and burned a turn each time.
+#
+# Both cases run a sibling task whose id CONTAINS the torn-down id ("sub-task-x1"
+# vs "task-x1") and is still live. That is the guard that matters: a glob or a
+# grep -l over the state dir or the queue kills the live task's supervision too.
+
+# Every watcher marker bin/fm-watch.sh writes for <id> on window fm-<id>.
+watch_markers_for() {  # <state-dir> <id>
+  local state=$1 id=$2 m
+  for m in hash count stale stale-since wedge-escalations paused paused-rechecked paused-resurfaced; do
+    printf '%s/.%s-fm-%s\n' "$state" "$m" "$id"
+  done
+  printf '%s/.hb-surfaced-%s\n' "$state" "$id"
+  printf '%s/.seen-%s_status\n' "$state" "$id"
+  printf '%s/.seen-%s_turn-ended\n' "$state" "$id"
+}
+
+seed_watch_markers() {  # <state-dir> <id>
+  local f
+  while IFS= read -r f; do
+    printf 'marker\n' > "$f"
+  done < <(watch_markers_for "$1" "$2")
+}
+
+# Append a wake record with the production library, scoped to <state>. Copied from
+# tests/wake-helpers.sh, which cannot be sourced here: it defines its own make_case.
+append_wake() {  # <state> <kind> <key> <payload>
+  local state=$1 kind=$2 key=$3 payload=$4 lib="$ROOT/bin/fm-wake-lib.sh"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    fm_wake_append "$2" "$3" "$4"
+  ' _ "$lib" "$kind" "$key" "$payload"
+}
+
+wake_queue_has() {  # <queue> <kind> <key>
+  awk -F '\t' -v k="$2" -v key="$3" 'NF >= 5 && $3 == k && $4 == key { found = 1 } END { exit !found }' "$1"
+}
+
+test_teardown_purges_the_watchers_per_task_markers() {
+  local case_dir state rc f
+  case_dir=$(make_case watch-markers)
+  state="$case_dir/state"
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  seed_watch_markers "$state" task-x1
+  # A DIFFERENT, still-live task whose id has the torn-down id as a suffix.
+  seed_watch_markers "$state" sub-task-x1
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "watch-markers: teardown should succeed on landed work"
+  while IFS= read -r f; do
+    assert_absent "$f" "watch-markers: teardown left the watcher marker $(basename "$f") behind"
+  done < <(watch_markers_for "$state" task-x1)
+  while IFS= read -r f; do
+    assert_present "$f" "watch-markers: teardown ATE a live sibling task's marker $(basename "$f")"
+  done < <(watch_markers_for "$state" sub-task-x1)
+  pass "teardown purges the watcher's per-task markers and leaves a live sibling's alone"
+}
+
+test_teardown_drops_queued_wake_records_for_the_task() {
+  local case_dir state queue rc
+  case_dir=$(make_case wake-records)
+  state="$case_dir/state"
+  queue="$state/.wake-queue"
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  arm_ci_poll "$case_dir"
+  # One record per producer key shape in bin/fm-watch.sh.
+  append_wake "$state" signal 'task-x1.status' 'signal: task-x1.status'
+  append_wake "$state" signal 'task-x1.turn-ended' 'signal: task-x1.turn-ended'
+  append_wake "$state" stale 'fm-task-x1' 'stale: fm-task-x1'
+  append_wake "$state" check "$state/task-x1.check.sh" 'check: merged'
+  # The live sibling and the fleet-wide heartbeat must all survive.
+  append_wake "$state" signal 'sub-task-x1.status' 'signal: sub-task-x1.status'
+  append_wake "$state" stale 'fm-sub-task-x1' 'stale: fm-sub-task-x1'
+  append_wake "$state" heartbeat heartbeat heartbeat
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "wake-records: teardown should succeed on landed work"
+  ! wake_queue_has "$queue" signal 'task-x1.status' \
+    || fail "wake-records: a signal wake for the torn-down task is still queued"
+  ! wake_queue_has "$queue" signal 'task-x1.turn-ended' \
+    || fail "wake-records: a turn-end wake for the torn-down task is still queued"
+  ! wake_queue_has "$queue" stale 'fm-task-x1' \
+    || fail "wake-records: a stale wake for the torn-down task's dead pane is still queued"
+  ! wake_queue_has "$queue" check "$state/task-x1.check.sh" \
+    || fail "wake-records: a check wake for the deleted CI poll is still queued"
+  wake_queue_has "$queue" signal 'sub-task-x1.status' \
+    || fail "wake-records: teardown ATE a live sibling task's signal wake"
+  wake_queue_has "$queue" stale 'fm-sub-task-x1' \
+    || fail "wake-records: teardown ATE a live sibling task's stale wake"
+  wake_queue_has "$queue" heartbeat heartbeat \
+    || fail "wake-records: teardown ATE the fleet-wide heartbeat wake"
+  pass "teardown drops the task's own queued wakes and leaves a live sibling's alone"
+}
+
+test_pr_open_release_purges_window_keyed_markers_and_stale_wakes() {
+  local case_dir state queue rc
+  case_dir=$(make_case release-markers)
+  state="$case_dir/state"
+  queue="$state/.wake-queue"
+  write_meta "$case_dir" PR ship
+  wt_commit_file "$case_dir" feature.txt shipped "the crew's change"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_gh_pr_open "$case_dir"
+  append_pr_meta_url "$case_dir"
+  arm_ci_poll "$case_dir"
+  seed_watch_markers "$state" task-x1
+  append_wake "$state" stale 'fm-task-x1' 'stale: fm-task-x1'
+  # The CI poll is the whole point of the release phase, so its wake must survive.
+  append_wake "$state" check "$state/task-x1.check.sh" 'check: merged'
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "release-markers: teardown must succeed once the PR is open"
+  # Release drops window= from the meta, so this is the last point at which the
+  # window-keyed markers are addressable at all. Miss them here and they are permanent.
+  assert_absent "$state/.hash-fm-task-x1" \
+    "release-markers: released task kept its pane-hash marker, now unaddressable forever"
+  assert_absent "$state/.stale-fm-task-x1" "release-markers: released task kept its stale marker"
+  assert_absent "$state/.seen-task-x1_status" "release-markers: released task kept its signal seen-marker"
+  ! wake_queue_has "$queue" stale 'fm-task-x1' \
+    || fail "release-markers: a stale wake for the released task's dead pane is still queued"
+  wake_queue_has "$queue" check "$state/task-x1.check.sh" \
+    || fail "release-markers: DROPPED THE CI CHECK WAKE - firstmate is now blind to this PR"
+  pass "the PR-open release purges the window-keyed markers and stale wakes while the CI watch survives"
 }
 
 # --- released meta + re-leased pool slot (teardown-stale-worktree, 2026-07-16) ---
@@ -1594,6 +1751,9 @@ test_pr_mode_truly_unpushed_refuses
 test_pr_open_releases_workspace_but_keeps_the_ci_watch_and_merge_state
 test_merge_still_works_after_the_workspace_is_released
 test_second_teardown_after_the_merge_purges_the_state
+test_teardown_purges_the_watchers_per_task_markers
+test_teardown_drops_queued_wake_records_for_the_task
+test_pr_open_release_purges_window_keyed_markers_and_stale_wakes
 test_released_then_relet_dirty_slot_phase2_purges_without_touching_it
 test_released_then_relet_clean_slot_phase2_never_returns_the_other_lease
 test_legacy_released_meta_with_raw_stale_worktree_is_not_inspected

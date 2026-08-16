@@ -44,6 +44,23 @@ An arm `SIGKILL`ed before its `EXIT` trap ran leaves an unverifiable orphan mark
 So a stale or absent marker still blocks, and a turn that ends with no re-arm in flight - the real blind-turn case - still fires.
 `fm_watcher_healthy` itself stays a pure liveness predicate that the arm wrapper relies on to confirm its own watcher; the `state/.watch.arming` tolerance is layered on top of it by the guards, never inside it.
 
+## Blind-turn streak
+
+The guard fires at most once per turn, because every harness integration below carries a loop guard, so consecutive firings are consecutive blind turn ends rather than repeated invocations inside one turn.
+It counts them so a banner that has been printed unchanged for hours can say so instead of reading as a fresh alarm every time.
+
+The counter lives in `.turnend-blind-streak` inside the state directory the predicate already resolved - `FM_STATE_OVERRIDE`, else `FM_HOME/state` - so the main primary and every secondmate home count their own streaks and never read each other's.
+The file is one line, `<count> <epoch>`: the number of consecutive turn ends that fired, and the epoch of the first of them.
+The first firing writes `1 <now>`, and every later firing increments the count and carries the original epoch forward, which is what the banner's age is measured from.
+A missing, unreadable, or malformed file - either field absent or non-numeric - counts as zero, so the next firing starts a clean streak at `1 <now>` instead of propagating a corrupt count.
+A failed write is ignored rather than allowed to suppress the banner, and costs at most one turn of continuity.
+
+From the second consecutive firing on, the verdict line gains `(still: <count> turns in a row, <age>)` and the repair instruction is replaced by an escalation, because the reader has already been handed that instruction and what is new is that it did not work.
+
+Every turn that reaches the predicate and ends NOT blind removes the file: no supervisable work, a healthy watcher, or a re-arm in flight.
+The earlier fail-open exits - empty payload, missing `jq`, `stop_hook_active`, an out-of-scope checkout - leave it untouched, because none of them is evidence that the lapse ended.
+A streak that outlived its condition would report an old lapse as a live one, which is a worse defect than the repetition it exists to describe.
+
 ## One authoritative liveness answer
 
 "Is a live watcher supervising THIS home?" has exactly one answer: `fm_watcher_healthy` (home-lock ownership), never beacon freshness.
@@ -179,5 +196,6 @@ No Herdr command was issued and no fleet state was touched; the experiment wrote
 ## Tests
 
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+The blind-turn streak's repeat wording, its reset when the condition clears or a re-arm is in flight, and its per-home isolation are covered by `test_hook_repeat_firing_reports_the_streak`, `test_hook_streak_resets_when_condition_clears`, `test_hook_streak_resets_while_a_rearm_is_in_flight`, and `test_hook_streak_is_per_home`.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.

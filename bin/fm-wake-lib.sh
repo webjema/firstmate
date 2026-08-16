@@ -412,7 +412,7 @@ fm_wake_clean_field() {
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
   case "$kind" in
-    signal|stale|check|heartbeat) ;;
+    signal|stale|check|heartbeat|disk-guard) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
 
@@ -434,6 +434,46 @@ fm_wake_append() {
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
+}
+
+# Drop queued wake records that name one task, inverting the record fm_wake_append
+# writes just above - which is why it lives here and not in its callers. A wake for
+# a task that no longer exists is guaranteed non-actionable: firstmate drains it,
+# finds no crew, no pane and no check, and burns a turn on it.
+#
+# Matching is EXACT on the kind and key columns, because every producer's key is a
+# whole value: the status/turn-end file BASENAME for signal, the WINDOW target
+# verbatim for stale, the check script's full PATH for check. Never a substring
+# search over the record, because one task id can be a substring of another. Held
+# under the queue's own lock so a watcher appending concurrently cannot lose its wake.
+#
+# with-check is passed only by a FULL teardown. The PR-open release and detach both
+# keep state/<id>.check.sh alive as the sole source of CI and merge wakes, so its
+# queued wakes must stay too.
+fm_wake_drop_task_records() {  # <state-dir> <id> <window-target> [with-check]
+  local state=$1 id=$2 win=${3:-} with_check=${4:-} queue lock drop tmp
+  queue="$state/.wake-queue"
+  lock="$state/.wake-queue.lock"
+  [ -s "$queue" ] || return 0
+  drop="$state/.wake-queue.drop.$$"
+  tmp="$state/.wake-queue.purge.$$"
+  {
+    printf 'signal\t%s.status\n' "$id"
+    printf 'signal\t%s.turn-ended\n' "$id"
+    [ -z "$win" ] || printf 'stale\t%s\n' "$win"
+    [ -z "$with_check" ] || printf 'check\t%s/%s.check.sh\n' "$state" "$id"
+  } > "$drop"
+  fm_lock_acquire_wait "$lock"
+  if awk -F '\t' '
+      FNR == NR { drop[$1 SUBSEP $2] = 1; next }
+      NF < 5 || !(($3 SUBSEP $4) in drop)
+    ' "$drop" "$queue" > "$tmp"; then
+    mv "$tmp" "$queue"
+  else
+    rm -f "$tmp"
+  fi
+  fm_lock_release "$lock"
+  rm -f "$drop"
 }
 
 fm_wake_restore_queue() {

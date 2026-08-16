@@ -595,6 +595,131 @@ test_hook_exempts_linked_worktree_with_non_ascii_marker() {
   pass "fm-turnend-guard: a non-ASCII marker cannot spoof inclusion; linked worktree stays exempt"
 }
 
+# --- HOOK: verdict wording and repetition awareness -------------------------
+#
+# The verdict names what the guard actually MEASURED - home-lock ownership
+# (fm_watcher_healthy) - not the broader claim that supervision is off. The
+# banner is also repetition-aware: firing on N consecutive turns must read as one
+# unresolved condition, not N new alarms, and must not re-hand guidance the
+# reader already has. Neither changes the predicate or the exit code.
+
+REPEAT_MARKER='turns in a row'
+VERDICT_MARKER='NO WATCHER HOLDS THIS HOME LOCK'
+
+test_hook_verdict_names_the_measured_fact() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-verdict-wording")
+  : > "$dir/state/task1.meta"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "rewording the verdict must not change the blocking exit code"
+  assert_contains "$out" "$VERDICT_MARKER" "verdict must name the measured fact (home-lock ownership)"
+  assert_not_contains "$out" "SUPERVISION IS OFF" "verdict must not claim the broader 'supervision is off'"
+  pass "fm-turnend-guard: verdict names the home-lock fact it measured, not 'supervision is off'"
+}
+
+test_hook_first_firing_reads_as_a_new_alarm() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-streak-first")
+  : > "$dir/state/task1.meta"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "the first firing must still block"
+  assert_contains "$out" "$REQUIRED_REASON" "the first firing must carry the full repair instruction"
+  assert_not_contains "$out" "$REPEAT_MARKER" "the first firing must not claim a repeat"
+  pass "fm-turnend-guard: the first firing reads as a new alarm and carries the repair instruction"
+}
+
+test_hook_repeat_firing_reports_the_streak() {
+  local dir first second third status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-streak-repeat")
+  : > "$dir/state/task1.meta"
+  first=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "firing 1 must block"
+  assert_not_contains "$first" "$REPEAT_MARKER" "firing 1 must not claim a repeat"
+  second=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "firing 2 must still block with the same exit code"
+  assert_contains "$second" "2 $REPEAT_MARKER" "firing 2 must say it is the second consecutive blind turn"
+  assert_contains "$second" 'TURN WOULD END BLIND' "a repeat must still read as a block"
+  assert_not_contains "$second" "$REQUIRED_REASON" "a repeat must not re-hand guidance already given"
+  third=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "firing 3 must still block with the same exit code"
+  assert_contains "$third" "3 $REPEAT_MARKER" "firing 3 must count up, not restate firing 2"
+  pass "fm-turnend-guard: consecutive firings report the streak instead of repeating one alarm N times"
+}
+
+test_hook_streak_resets_when_condition_clears() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-streak-reset")
+  : > "$dir/state/task1.meta"
+  run_hook "$dir" false >/dev/null
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "the second blind turn must block"
+  assert_contains "$out" "2 $REPEAT_MARKER" "the second blind turn must report a streak of 2"
+  # The condition clears: a live, identity-matched watcher lock with a fresh beacon.
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a supervised turn must end silently"
+  [ -z "$out" ] || fail "guard produced output on a supervised turn: $out"
+  # The condition returns: this is a NEW lapse, so the banner must read as one.
+  rm -rf "$dir/state/.watch.lock"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "the new lapse must block"
+  assert_not_contains "$out" "$REPEAT_MARKER" "a cleared condition must reset the streak, not carry the old one forward"
+  assert_contains "$out" "$REQUIRED_REASON" "a reset firing must carry the full repair instruction again"
+  pass "fm-turnend-guard: the streak resets once the condition clears (fire, fire, clear, fire reads as first again)"
+}
+
+# A re-armed turn is not a blind one, so it clears the streak on the same rule as
+# any other supervised turn end: any turn that does NOT end blind resets the count.
+test_hook_streak_resets_while_a_rearm_is_in_flight() {
+  local dir dead out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-streak-reset-arming")
+  dead=$(nonexistent_pid)
+  : > "$dir/state/task1.meta"
+  record_watcher_lock "$dir" "$dead" "dead watcher identity"
+  run_hook "$dir" false >/dev/null
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "the second blind turn must block"
+  assert_contains "$out" "2 $REPEAT_MARKER" "the streak must be live before the re-arm clears it"
+  : > "$dir/state/.watch.arming"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "a re-arm in flight must still end the turn silently"
+  [ -z "$out" ] || fail "guard produced output while a re-arm was in flight: $out"
+  rm -f "$dir/state/.watch.arming"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "the guard must block again once the re-arm is gone"
+  assert_not_contains "$out" "$REPEAT_MARKER" "an in-flight re-arm must reset the streak like any other supervised turn end"
+  pass "fm-turnend-guard: an in-flight re-arm clears the streak (any non-blind turn end resets it)"
+}
+
+# Per-home, like every other volatile supervision signal: a secondmate's home has
+# its own streak and must never be counted into (or reset by) the main home's.
+test_hook_streak_is_per_home() {
+  local main second out status
+  main=$(make_primary_dir "$TMP_ROOT/hook-streak-home-a")
+  second=$(make_secondmate_dir "$TMP_ROOT/hook-streak-home-b")
+  : > "$main/state/task1.meta"
+  : > "$second/state/task1.meta"
+  run_hook "$main" false >/dev/null
+  run_hook "$main" false >/dev/null
+  out=$(run_hook "$second" false); status=$?
+  expect_code 2 "$status" "the second home must block on its own account"
+  assert_not_contains "$out" "$REPEAT_MARKER" "a second home must not inherit the first home's streak"
+  out=$(run_hook "$main" false); status=$?
+  expect_code 2 "$status" "the first home must keep blocking"
+  assert_contains "$out" "3 $REPEAT_MARKER" "another home's firing must not reset this home's streak"
+  pass "fm-turnend-guard: consecutive-firing counts are per-home and never cross homes"
+}
+
 test_hook_silent_in_crewmate_worktree() {
   local base dir out status
   base="$TMP_ROOT/hook-crew-base"
@@ -1016,6 +1141,12 @@ test_hook_silent_in_secondmate_child_worktree
 test_hook_blocks_in_treehouse_leased_secondmate_home
 test_hook_exempts_linked_worktree_with_stray_marker
 test_hook_exempts_linked_worktree_with_non_ascii_marker
+test_hook_verdict_names_the_measured_fact
+test_hook_first_firing_reads_as_a_new_alarm
+test_hook_repeat_firing_reports_the_streak
+test_hook_streak_resets_when_condition_clears
+test_hook_streak_resets_while_a_rearm_is_in_flight
+test_hook_streak_is_per_home
 test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin

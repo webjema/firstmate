@@ -1026,7 +1026,12 @@ EOF
       dg_out=$(timeout "$DISK_GUARD_TIMEOUT" "$FM_ROOT/bin/fm-disk-guard.sh" 2>/dev/null || true)
       if [ -n "$dg_out" ]; then
         triage_log "disk guard: $(echo "$dg_out" | tr '\n' ' ')"
-        dg_held=$(echo "$dg_out" | grep 'LEASED and were not touched' || true)
+        # Both lines of the guard's escalation, never just the first. bin/fm-disk-guard.sh
+        # emits the holdback as a PAIR - the size line, then the `treehouse destroy ...`
+        # line that releases it - and AGENTS.md tells the captain to relay the payload's
+        # commands verbatim, so a payload carrying only the size makes that impossible
+        # and leaves the captain retyping a command it was supposed to be handed.
+        dg_held=$(echo "$dg_out" | grep -E 'LEASED and were not touched|release them yourself with:' || true)
         if [ -n "$dg_held" ]; then
           dg_hash=$(printf '%s' "$dg_held" | cksum | awk '{print $1}')
           if [ "$dg_hash" != "$(cat "$STATE/.disk-guard-surfaced" 2>/dev/null || echo)" ]; then

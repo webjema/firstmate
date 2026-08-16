@@ -31,6 +31,58 @@ LIB="$ROOT/bin/fm-wake-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
+# A CONFIRMED watcher OUTLIVES the arm that started it now, and a failed assertion
+# aborts this whole file, so any case that ends before its own kill line leaves a
+# real arm and a real watcher polling on the box for good - orphans from three
+# earlier runs were found before this existed. Both record their own pid inside the
+# case's state dir (the stand-in below writes .case-watcher-pid, because it
+# deliberately takes no lock), so reap exactly those: the pids come from THIS run's
+# temp root, and the args check keeps a recycled pid from being mistaken for one.
+# Neither runs from a path that names the temp root, so a pattern kill cannot scope
+# itself to this run - and it would match this runner's own command line.
+reap_pid_if() {  # <pid> <command-substring it must carry to be ours>
+  local pid=$1 want=$2
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$pid" = "$$" ] && return 0
+  case "$(ps -o args= -p "$pid" 2>/dev/null || true)" in
+    *"$want"*) kill -9 "$pid" 2>/dev/null || true ;;
+  esac
+}
+
+reap_case_processes() {
+  local pidfile
+  # Arms first: one reaped after its watcher would only relaunch another.
+  for pidfile in "$TMP_ROOT"/*/state/.watch.arming; do
+    [ -f "$pidfile" ] || continue
+    reap_pid_if "$(sed -n 's/^pid=//p' "$pidfile" 2>/dev/null | head -1)" /fm-watch-arm.sh
+  done
+  for pidfile in "$TMP_ROOT"/*/state/.watch.lock/pid "$TMP_ROOT"/*/state/.case-watcher-pid; do
+    [ -f "$pidfile" ] || continue
+    reap_pid_if "$(cat "$pidfile" 2>/dev/null || true)" /fm-watch.sh
+  done
+}
+trap 'reap_case_processes; fm_test_cleanup' EXIT
+
+# A firstmate home whose bin/ holds the REAL arm and lib beside a stand-in watcher
+# that stays alive and NEVER becomes confirmable: it takes no lock and writes no
+# beacon, so the arm's honesty gate can never pass it. The arm resolves its watcher
+# as $SCRIPT_DIR/fm-watch.sh, so the stand-in has to live in that bin/ to be forked
+# at all.
+make_unconfirmable_case() {  # <name>
+  local name=$1 dir
+  dir="$TMP_ROOT/$name"
+  mkdir -p "$dir/bin" "$dir/state"
+  cp "$ROOT/bin/fm-watch-arm.sh" "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/"
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$$" > "${FM_STATE_OVERRIDE:?}/.case-watcher-pid"
+while :; do sleep 1; done
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+  printf '%s\n' "$dir"
+}
+
 
 test_singleton_start() {
   local dir state fakebin out1 out2 pid1 pid2 live i
@@ -134,7 +186,8 @@ test_guard_warnings() {
     '●'*) ;;
     *) fail "no-watcher banner is not the first thing the guard prints (got '$first')" ;;
   esac
-  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard banner missing the alarm title"
+  grep -F 'WATCHER DOWN - NO WATCHER HOLDS THIS HOME LOCK' "$err" >/dev/null || fail "guard banner missing the alarm title"
+  ! grep -F 'SUPERVISION IS OFF' "$err" >/dev/null || fail "guard banner claimed the broader 'supervision is off'"
   grep -F '2 task(s) in flight' "$err" >/dev/null || fail "guard banner missing the in-flight count"
   grep -F 'last beat: never' "$err" >/dev/null || fail "guard banner missing the beacon age"
   grep -F 'guarded operation WILL still run' "$err" >/dev/null || fail "guard banner missing generic continuation wording"
@@ -182,7 +235,7 @@ test_guard_warnings() {
   printf 'project=x\n' > "$state/task.meta"
   touch "$state/.last-watcher-beat"
   FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard trusted a fresh beacon with no live lock as healthy"
+  grep -F 'WATCHER DOWN - NO WATCHER HOLDS THIS HOME LOCK' "$err" >/dev/null || fail "guard trusted a fresh beacon with no live lock as healthy"
   pass "guard banner leads when down with pending wakes, silent for a live lock, and DOWN for a fresh-beacon orphan"
 }
 
@@ -602,13 +655,55 @@ test_arm_starts_and_self_heals() {
   pass "arm starts+confirms a fresh watcher on a clean lock and self-heals a dead-pid lock (never healthy off a dead pid)"
 }
 
-test_arm_hup_cleans_child_and_temp_output() {
+# The other half of cleanup_child, and the one the arm still owns: a child that
+# never became the healthy watcher holds no lock, beats for nobody, and has no way
+# to be adopted, so leaving it behind leaks a process nothing will ever reclaim.
+test_arm_hup_kills_an_unconfirmed_child_and_temp_output() {
+  local dir state armout i armpid child status
+  dir=$(make_unconfirmable_case arm-hup-unconfirmed)
+  state="$dir/state"
+  armout="$dir/arm.out"
+  # A long confirm window keeps the arm polling - and its child unconfirmed - for
+  # the whole case, instead of racing the FAILED line the deadline would print.
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=120 "$dir/bin/fm-watch-arm.sh" > "$armout" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 300 ] && [ ! -s "$state/.case-watcher-pid" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  child=$(cat "$state/.case-watcher-pid" 2>/dev/null || true)
+  [ -n "$child" ] || fail "the arm never forked a watcher to leave unconfirmed: $(cat "$armout")"
+  is_live_non_zombie "$child" || fail "the unconfirmed child was not running before the HUP"
+  ! grep -qF 'watcher: started pid=' "$armout" \
+    || fail "arm confirmed a child that holds no lock and writes no beacon: $(cat "$armout")"
+  ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "arm left no temp output for the HUP to clean up"
+  kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
+  wait_for_exit "$armpid" 300
+  status=$?
+  [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
+  i=0
+  while [ "$i" -lt 300 ] && is_live_non_zombie "$child"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! is_live_non_zombie "$child" || fail "HUP left the arm's UNCONFIRMED child running - nothing else will ever reclaim it"
+  ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
+  pass "arm kills the child it never confirmed, and its temp output, on HUP"
+}
+
+# The 2026-08-16 outage, asked as a question about the LOCK. The harness reaps this
+# arm as one of its own background tasks and the traps answered by SIGTERMing the
+# watcher they had started, so every reap silently handed this home's lock back to
+# nobody. A confirmed watcher is not the arm's to take down: it still holds the
+# lock and still beats, which is exactly what the guards' liveness gate asks.
+test_arm_hup_spares_its_confirmed_watcher_and_cleans_temp_output() {
   local dir state fakebin armout i armpid lock_pid status
   dir=$(make_case arm-hup-cleanup)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 300 ]; do
@@ -618,18 +713,28 @@ test_arm_hup_cleans_child_and_temp_output() {
   done
   grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP cleanup check"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$lock_pid" "$armout" \
+    || fail "the lock is not held by the watcher the arm confirmed (lock '$lock_pid'): $(cat "$armout")"
   kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
   wait_for_exit "$armpid" 300
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
+  # Watch it well past the point where a kill sent on the arm's way out would have
+  # landed; checking once, immediately, races it.
   i=0
-  while [ "$i" -lt 300 ] && is_live_non_zombie "$lock_pid"; do
+  while [ "$i" -lt 20 ]; do
+    is_live_non_zombie "$lock_pid" \
+      || fail "HUP took the arm's CONFIRMED watcher down with it - every harness reap is then a silent supervision outage"
     sleep 0.1
     i=$((i + 1))
   done
-  ! is_live_non_zombie "$lock_pid" || fail "HUP cleanup left watcher child running"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$lock_pid" ] \
+    || fail "the surviving watcher no longer holds this home's lock"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' _ "$LIB" "$state" "$WATCH" "$dir" \
+    || fail "the surviving watcher fails the guards' liveness gate (lock ownership + fresh beacon), so supervision still reads as off"
   ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
-  pass "arm cleans child watcher and temp output on HUP"
+  kill "$lock_pid" 2>/dev/null || true
+  pass "arm spares its confirmed watcher on HUP - lock still held, beacon still fresh - and still cleans its temp output"
 }
 
 test_arm_propagates_immediate_wake_before_confirmation() {
@@ -773,7 +878,8 @@ test_watch_restart_reports_healthy_peer_without_attaching
 test_watcher_self_evicts_on_lock_takeover
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_arm_starts_and_self_heals
-test_arm_hup_cleans_child_and_temp_output
+test_arm_hup_kills_an_unconfirmed_child_and_temp_output
+test_arm_hup_spares_its_confirmed_watcher_and_cleans_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable

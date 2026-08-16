@@ -22,6 +22,12 @@
 #      stood by for is gone. --restart stops the incumbent arm before taking over.
 #   6. fm_arm_in_flight verifies a real live arm rather than trusting a marker's
 #      mtime, so a long-lived arm is not misread as a blind turn.
+#   7. A CONFIRMED watcher survives the arm that started it. The harness reaps this
+#      process as one of its own background tasks - 157 of 196 arms over 15 days
+#      died that way - and the traps used to take the watcher with them, so every
+#      reap was a silent supervision outage. Nothing is lost by sparing it: the
+#      watcher enqueues each wake before printing it, so the next arm adopts it and
+#      the queue is drained. --restart still stops supervision deliberately.
 #
 # These background a real arm and bounded-wait on its behavior, so this file runs in
 # bin/fm-test.sh's serial tail.
@@ -32,6 +38,24 @@ set -u
 
 LIB="$ROOT/bin/fm-wake-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-watch-arm-supervision)
+
+# A scripted watcher now OUTLIVES the arm that started it, by design, and a case
+# that fails leaves its arm mid-cycle, so nothing reaps either once a case ends.
+# Match on the command line naming THIS run's temp root rather than on recorded
+# pids: it covers arms, watchers and launchers alike, and a recycled pid can never
+# be mistaken for one of ours. The runner's own command line does not name the temp
+# root, so it cannot reap itself.
+reap_case_processes() {
+  local pid args
+  while read -r pid args; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ "$pid" = "$$" ] && continue
+    case "$args" in
+      *"$TMP_ROOT"*) kill -9 "$pid" 2>/dev/null || true ;;
+    esac
+  done < <(ps -eo pid=,args= 2>/dev/null || true)
+}
+trap 'reap_case_processes; fm_test_cleanup' EXIT
 
 # A self-contained firstmate home whose bin/ holds the REAL arm and lib next to a
 # SCRIPTED stand-in watcher. The arm resolves its watcher as $SCRIPT_DIR/fm-watch.sh
@@ -50,7 +74,10 @@ make_arm_case() {  # <name>
 #   quiet   - hold the lock briefly, release it, exit 0 saying nothing
 #   wake    - release, then print one wake reason line
 #   enqueue - append a durable wake record, release, say nothing
-#   hold    - hold the lock until signalled
+#   hold    - hold the lock and beat until signalled. The sleep is interruptible so
+#             a TERM lands NOW: bash defers a trap until the running foreground
+#             command finishes, and a watcher that ignores TERM for an hour would
+#             make "--restart takes the old watcher down" untestable.
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
@@ -69,7 +96,7 @@ sleep "${FAKE_WATCH_HOLD:-1}"
 case "$mode" in
   wake) release; echo 'stale: fm-probe | class=none | idle=900s' ;;
   enqueue) fm_wake_append stale fm-probe 'stale: fm-probe | class=none | idle=900s'; release ;;
-  hold) sleep 3600 ;;
+  hold) while :; do touch "$STATE/.last-watcher-beat"; sleep 1 & wait $! 2>/dev/null || true; done ;;
   *) release ;;
 esac
 exit 0
@@ -85,6 +112,23 @@ set_mode() {  # <dir> <mode>
 watcher_runs() {  # <dir>
   [ -f "$1/state/.fake-watch-runs" ] || { echo 0; return 0; }
   wc -l < "$1/state/.fake-watch-runs" | tr -d ' '
+}
+
+# The pid the arm CONFIRMED, read back from the one line that only ever names a
+# confirmed watcher.
+confirmed_watcher_pid() {  # <arm-output>
+  sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$1" 2>/dev/null | head -1
+}
+
+# The production liveness gate, asked exactly as bin/fm-guard.sh asks it: this is
+# what decides whether firstmate is told supervision is off.
+watcher_healthy() {  # <dir>
+  FM_STATE_OVERRIDE="$1/state" bash -c \
+    '. "$1"; fm_watcher_healthy "$2/state" "$2/bin/fm-watch.sh" 300 "$2"' _ "$LIB" "$1"
+}
+
+pgid_of() {  # <pid>
+  ps -o pgid= -p "$1" 2>/dev/null | tr -d ' '
 }
 
 wait_for_text() {  # <file> <text> [limit]
@@ -238,6 +282,9 @@ test_second_arm_stands_by_instead_of_exiting() {
 # the incumbent ARM, not on its watcher cycle: when that arm is gone the standby
 # takes the marker and holds a watcher up in its place, which is what keeps
 # bin/fm-supervision-live.sh answering "live" across the handover.
+# The incumbent's watcher outlives the incumbent now, so "holds a watcher up in its
+# place" means ADOPTING that one - starting a second beside it would be the
+# duplicate the whole file exists to prevent.
 test_standby_takes_over_when_the_incumbent_arm_ends() {
   local dir armout secondout armpid secondpid runs owner i
   dir=$(make_arm_case standby-takeover)
@@ -253,7 +300,7 @@ test_standby_takes_over_when_the_incumbent_arm_ends() {
     || fail "second arm did not stand by: $(cat "$secondout")"
   kill "$armpid" 2>/dev/null || true
   wait "$armpid" 2>/dev/null || true
-  wait_for_text "$secondout" 'watcher: started pid=' \
+  wait_for_text "$secondout" 'watcher: attached pid=' \
     || fail "the standby never took supervision over from the arm it was standing by for: $(cat "$secondout")"
   is_live_non_zombie "$secondpid" || fail "the promoted arm exited instead of supervising: $(cat "$secondout")"
   i=0
@@ -266,7 +313,8 @@ test_standby_takes_over_when_the_incumbent_arm_ends() {
   [ "$owner" = "$secondpid" ] \
     || fail "the promoted arm does not own the marker, so both guards still read supervision as unheld (owner=$owner, arm=$secondpid)"
   runs=$(watcher_runs "$dir")
-  [ "$runs" -ge 2 ] || fail "the promoted arm did not start a watcher of its own (runs=$runs)"
+  [ "$runs" -eq 1 ] || fail "the promoted arm started a second watcher beside the one that outlived its arm (runs=$runs)"
+  watcher_healthy "$dir" || fail "supervision was not held across the handover"
   kill "$secondpid" 2>/dev/null || true
   wait "$secondpid" 2>/dev/null || true
   pass "a standby takes supervision over when the arm it stood by for is gone"
@@ -396,6 +444,208 @@ test_restart_stops_the_incumbent_arm() {
   pass "--restart stops this home's incumbent arm before taking the cycle"
 }
 
+# The 2026-08-16 outage, in one case. The harness reaps this arm as one of its own
+# background tasks - it did so to 157 of 196 arms over 15 days - and the arm's
+# signal traps answered by SIGTERMing the watcher they had started. Every reap was
+# therefore a silent supervision outage, and firstmate only found out when the
+# turn-end guard fired. A confirmed watcher is not the arm's to take down: it holds
+# the lock, beats on its own, and has already enqueued every wake it has.
+test_reaped_arm_leaves_its_confirmed_watcher_supervising() {
+  local dir armout secondout armpid secondpid watcher runs i
+  dir=$(make_arm_case reaped-arm)
+  armout="$dir/arm.out"
+  secondout="$dir/arm2.out"
+  set_mode "$dir" hold
+  run_arm_bg "$dir" "$armout"
+  armpid=$ARM_PID
+  wait_for_text "$armout" 'watcher: started pid=' || fail "arm never confirmed a watcher: $(cat "$armout")"
+  watcher=$(confirmed_watcher_pid "$armout")
+  [ -n "$watcher" ] || fail "could not read the confirmed watcher's pid: $(cat "$armout")"
+
+  # The reap. Watch the watcher for well past the point where a kill sent on the
+  # arm's way out would have landed - checking once, immediately, races it.
+  kill -TERM "$armpid" 2>/dev/null || true
+  wait_for_exit "$armpid" 100
+  i=0
+  while [ "$i" -lt 20 ]; do
+    is_live_non_zombie "$watcher" \
+      || fail "the arm killed its own confirmed watcher on the way out - every harness reap is a silent supervision outage"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_healthy "$dir" \
+    || fail "the surviving watcher does not pass the guards' liveness gate, so supervision still reads as off"
+
+  # And supervision costs nothing to resume: the next arm adopts the survivor.
+  run_arm_bg "$dir" "$secondout"
+  secondpid=$ARM_PID
+  wait_for_text "$secondout" "watcher: attached pid=$watcher" \
+    || fail "the next arm did not adopt the watcher that outlived its arm: $(cat "$secondout")"
+  runs=$(watcher_runs "$dir")
+  [ "$runs" -eq 1 ] || fail "the next arm started a second watcher instead of adopting the live one (runs=$runs)"
+  kill "$secondpid" 2>/dev/null || true
+  wait "$secondpid" 2>/dev/null || true
+  pass "a reaped arm leaves its confirmed watcher supervising, and the next arm adopts it"
+}
+
+# Sparing a confirmed watcher must not blunt the DELIBERATE stop. --restart takes
+# supervision down by signalling the pids this home recorded, not through the
+# signal traps, so it still replaces a healthy watcher with a fresh one.
+test_restart_still_takes_the_old_watcher_down() {
+  local dir armout restartout armpid restartpid watcher fresh i
+  dir=$(make_arm_case restart-stops-watcher)
+  armout="$dir/arm.out"
+  restartout="$dir/restart.out"
+  set_mode "$dir" hold
+  run_arm_bg "$dir" "$armout"
+  armpid=$ARM_PID
+  wait_for_text "$armout" 'watcher: started pid=' || fail "incumbent arm never confirmed a watcher: $(cat "$armout")"
+  watcher=$(confirmed_watcher_pid "$armout")
+  [ -n "$watcher" ] || fail "could not read the confirmed watcher's pid: $(cat "$armout")"
+  run_arm_bg "$dir" "$restartout" --restart
+  restartpid=$ARM_PID
+  i=0
+  while [ "$i" -lt 300 ] && is_live_non_zombie "$watcher"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! is_live_non_zombie "$watcher" \
+    || fail "--restart left the old watcher running; a deliberate stop that stops nothing is worse than none"
+  wait_for_text "$restartout" 'watcher: started pid=' || fail "--restart did not own a fresh cycle: $(cat "$restartout")"
+  fresh=$(confirmed_watcher_pid "$restartout")
+  [ -n "$fresh" ] && [ "$fresh" != "$watcher" ] || fail "--restart re-reported the old watcher instead of a fresh one (old=$watcher, new=$fresh)"
+  kill "$restartpid" 2>/dev/null || true
+  wait "$restartpid" 2>/dev/null || true
+  pass "--restart still takes this home's watcher down and replaces it"
+}
+
+# The worse shape of the same reap: the harness signals the arm's whole process
+# GROUP. Sparing the child is no defence there - a same-group watcher dies with the
+# arm however careful the trap is - so the watcher gets its own session.
+# The arm runs under a launcher that is itself a session leader, which is both how a
+# harness background task is really shaped (the arm is a plain `&` child, not a
+# group leader) and the only way the group kill below cannot escape into the runner.
+test_watcher_survives_a_process_group_reap() {
+  local dir armout launcher armpid watcher arm_pgid watcher_pgid i
+  if ! command -v setsid >/dev/null 2>&1; then
+    pass "containing a process-group reap needs setsid, which this box does not have - skipped"
+    return 0
+  fi
+  dir=$(make_arm_case pgroup-reap)
+  armout="$dir/arm.out"
+  launcher="$dir/launch.sh"
+  set_mode "$dir" hold
+  cat > "$launcher" <<SH
+#!/usr/bin/env bash
+FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \\
+  FM_ARM_BACKOFF_MAX=1 FM_ARM_CONFIRM_TIMEOUT=6 FM_ARM_ATTACH_POLL=0.1 \\
+  FM_ARM_STANDBY_POLL=0.2 FM_ARM_STANDBY_SETTLE=0.2 \\
+  "$dir/bin/fm-watch-arm.sh" > "$armout" 2>&1 &
+printf '%s\n' "\$!" > "$dir/armpid"
+wait
+SH
+  setsid bash "$launcher" >/dev/null 2>&1 &
+  wait_for_text "$armout" 'watcher: started pid=' || fail "arm never confirmed a watcher: $(cat "$armout" 2>/dev/null)"
+  armpid=$(cat "$dir/armpid" 2>/dev/null)
+  watcher=$(confirmed_watcher_pid "$armout")
+  [ -n "$armpid" ] && [ -n "$watcher" ] || fail "could not read the arm and watcher pids (arm=$armpid, watcher=$watcher)"
+  arm_pgid=$(pgid_of "$armpid")
+  watcher_pgid=$(pgid_of "$watcher")
+  [ -n "$arm_pgid" ] || fail "could not read the arm's process group"
+  [ "$watcher_pgid" != "$arm_pgid" ] \
+    || fail "the watcher shares the arm's process group ($arm_pgid), so a group-wide reap takes supervision with it"
+  # Refuse to fire a group kill that could reach this runner. It cannot, because the
+  # launcher is a session leader - but a wrong pgid here would kill the suite.
+  [ "$arm_pgid" != "$(pgid_of $$)" ] || fail "refusing to reap: the arm shares THIS test runner's process group"
+
+  kill -TERM -"$arm_pgid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 100 ] && is_live_non_zombie "$armpid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! is_live_non_zombie "$armpid" || fail "the group reap did not reach the arm, so this case proves nothing"
+  i=0
+  while [ "$i" -lt 20 ]; do
+    is_live_non_zombie "$watcher" \
+      || fail "a process-group reap of the arm took the watcher with it"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_healthy "$dir" || fail "the surviving watcher does not pass the guards' liveness gate"
+  pass "a watcher in its own session survives a process-group reap of its arm"
+}
+
+# setsid EXECS when it can and FORKS when its caller already leads its process
+# group, and in the fork case the pid the arm captured is the setsid process, not
+# the watcher. The arm deliberately does NOT re-point at the pid the lock names:
+# nothing distinguishes "the watcher setsid forked away from me" from "an orphan
+# watcher that was already here", so re-pointing let an arm claim a stranger's
+# watcher as its own child and then supervise it down the own-child loop instead
+# of attach_and_wait, blind to a lock steal. The fork case must therefore be
+# judged on its outcome, not on which line the arm prints: one watcher, adopted,
+# passing the liveness gate, and still up after this arm is reaped.
+test_arm_supervises_a_watcher_setsid_forked_away() {
+  local dir armout armpid watcher runs i
+  dir=$(make_arm_case setsid-forked)
+  armout="$dir/arm.out"
+  set_mode "$dir" hold
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/setsid" <<'SH'
+#!/usr/bin/env bash
+# `setsid --fork` in miniature: the pid the caller captures exits at once and the
+# real command is reparented away from it.
+"$@" &
+exit 0
+SH
+  chmod +x "$dir/fakebin/setsid"
+  ( exec env PATH="$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" \
+      FM_STATE_OVERRIDE="$dir/state" FM_ARM_BACKOFF_MAX=1 FM_ARM_CONFIRM_TIMEOUT=6 \
+      FM_ARM_ATTACH_POLL=0.1 "$dir/bin/fm-watch-arm.sh" ) > "$armout" 2>&1 &
+  armpid=$!
+  wait_for_text "$armout" 'watcher: attached pid=' \
+    || fail "the arm did not adopt the watcher setsid forked away from it: $(cat "$armout")"
+  grep -q 'watcher: FAILED' "$armout" \
+    && fail "the arm burned its confirm timeout beside a live watcher: $(cat "$armout")"
+  watcher=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null)
+  [ -n "$watcher" ] || fail "no watcher holds the lock after setsid forked: $(cat "$armout")"
+  runs=$(watcher_runs "$dir")
+  [ "$runs" -eq 1 ] || fail "the arm started more than one watcher (runs=$runs)"
+  watcher_healthy "$dir" || fail "the adopted watcher does not pass the guards' liveness gate"
+  kill -TERM "$armpid" 2>/dev/null || true
+  wait_for_exit "$armpid" 100
+  i=0
+  while [ "$i" -lt 20 ]; do
+    is_live_non_zombie "$watcher" \
+      || fail "reaping the arm took down the watcher it had adopted"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  pass "a watcher setsid forked away is adopted, supervised, and survives the arm's reap"
+}
+
+# Diagnostic, not a fix: the traps used to exit without a word, which is why 157
+# kills over 15 days left not one line in state/.watch-arm.log and the outage was
+# invisible until someone counted the corpses. One line, naming the signal and
+# whether supervision survived, is what would have identified this on day one.
+test_a_reaped_arm_records_the_signal_that_killed_it() {
+  local dir armout armpid watcher
+  dir=$(make_arm_case reap-forensics)
+  armout="$dir/arm.out"
+  set_mode "$dir" hold
+  run_arm_bg "$dir" "$armout"
+  armpid=$ARM_PID
+  wait_for_text "$armout" 'watcher: started pid=' || fail "arm never confirmed a watcher: $(cat "$armout")"
+  watcher=$(confirmed_watcher_pid "$armout")
+  kill -TERM "$armpid" 2>/dev/null || true
+  wait_for_exit "$armpid" 100
+  wait_for_text "$dir/state/.watch-arm.log" "signal: TERM - watcher pid=$watcher confirmed=1" 50 \
+    || fail "a reaped arm left no record of the signal or of whether supervision survived it: $(cat "$dir/state/.watch-arm.log" 2>/dev/null)"
+  grep -qE 'signal: TERM' "$armout" \
+    && fail "the death record reached firstmate's wake instead of staying in the churn log: $(cat "$armout")"
+  pass "a reaped arm records the signal that killed it and whether its watcher survived"
+}
+
 test_arm_in_flight_verifies_a_real_process() {
   # The guards ask this predicate whether a re-arm is genuinely in flight. A
   # long-lived arm's marker mtime says nothing about whether it is working, so a
@@ -443,4 +693,9 @@ test_exiting_arm_leaves_a_live_peers_marker_alone
 test_live_arm_retakes_a_deleted_marker
 test_second_arm_stands_by_even_when_the_marker_was_missing
 test_restart_stops_the_incumbent_arm
+test_reaped_arm_leaves_its_confirmed_watcher_supervising
+test_restart_still_takes_the_old_watcher_down
+test_watcher_survives_a_process_group_reap
+test_arm_supervises_a_watcher_setsid_forked_away
+test_a_reaped_arm_records_the_signal_that_killed_it
 test_arm_in_flight_verifies_a_real_process

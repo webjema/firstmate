@@ -107,6 +107,32 @@ fi
 [ -d "$FM_ROOT/bin" ] || exit 0
 [ -d "$STATE" ] || exit 0
 
+# --- consecutive-firing streak -----------------------------------------------
+# The loop guard above bounds this script to one FIRING per turn, so the counter
+# below counts consecutive blind turn ends, not invocations. It lives in this
+# home's own state dir next to the other volatile supervision signals, so a
+# secondmate's home never shares the main home's streak. Every path that ends a
+# turn NOT blind clears it: a streak that outlives its condition would report an
+# old lapse as a live one, which is a worse defect than the repetition it exists
+# to describe.
+STREAK_FILE="$STATE/.turnend-blind-streak"
+
+end_turn_supervised() {
+  rm -f "$STREAK_FILE" 2>/dev/null || true
+  exit 0
+}
+
+fm_duration_desc() {
+  local s=$1
+  if [ "$s" -lt 60 ]; then
+    printf '%ds' "$s"
+  elif [ "$s" -lt 3600 ]; then
+    printf '%dm' "$((s / 60))"
+  else
+    printf '%dh%02dm' "$((s / 3600))" "$(((s % 3600) / 60))"
+  fi
+}
+
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -115,8 +141,8 @@ fi
 # is user-driven with no firstmate supervision, so a home whose only tasks are
 # detached demands no live watcher and must be free to end a turn idle.
 fm_supervision_status "$STATE" "$GRACE"
-[ "$FM_SUP_SUPERVISABLE" -gt 0 ] || exit 0
-fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
+[ "$FM_SUP_SUPERVISABLE" -gt 0 ] || end_turn_supervised
+fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && end_turn_supervised
 
 # A re-arm actively in flight is not a blind turn. bin/fm-watch-arm.sh holds
 # state/.watch.arming for as long as an arm process is alive - the startup
@@ -129,19 +155,43 @@ fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
 # genuinely dead watcher. A stale or absent marker still blocks, so a turn that
 # ends with no re-arm in flight - the real blind-turn case - still fires.
 if fm_arm_in_flight "$STATE" "$SCRIPT_DIR/fm-watch-arm.sh" "${FM_ARMING_GRACE:-30}" "$FM_HOME"; then
-  exit 0
+  end_turn_supervised
 fi
 
-afk=0
-[ -e "$STATE/.afk" ] && afk=1
-REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --repair-line 2>/dev/null \
-  || printf '%s\n' 'tasks in flight, no live watcher - resume supervision according to the session-start operating block before ending the turn')
+# Consecutive count and the epoch this run of blind turn ends started, so the
+# banner can say "still" instead of reading as a fresh alarm every turn.
+STREAK=0
+STREAK_SINCE=0
+if [ -f "$STREAK_FILE" ]; then
+  read -r STREAK STREAK_SINCE < "$STREAK_FILE" 2>/dev/null || true
+fi
+case "${STREAK:-}" in ''|*[!0-9]*) STREAK=0 ;; esac
+case "${STREAK_SINCE:-}" in ''|*[!0-9]*) STREAK_SINCE=0 ;; esac
+NOW=$(date +%s)
+STREAK=$((STREAK + 1))
+[ "$STREAK" -gt 1 ] && [ "$STREAK_SINCE" -gt 0 ] || STREAK_SINCE=$NOW
+printf '%s %s\n' "$STREAK" "$STREAK_SINCE" > "$STREAK_FILE" 2>/dev/null || true
+
 rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+if [ "$STREAK" -gt 1 ]; then
+  # Same unresolved condition, so name it as one and drop the repair instruction
+  # the reader has already been handed STREAK-1 times; what is new on this firing
+  # is that the instruction has not worked, which is the thing to act on or say.
+  verdict=$(printf 'TURN WOULD END BLIND - NO WATCHER HOLDS THIS HOME LOCK (still: %s turns in a row, %s)' \
+    "$STREAK" "$(fm_duration_desc "$((NOW - STREAK_SINCE))")")
+  guidance='Repair instruction already given on the first of these turns (session-start operating block). Act on it, or report what is blocking it.'
+else
+  verdict='TURN WOULD END BLIND - NO WATCHER HOLDS THIS HOME LOCK'
+  afk=0
+  [ -e "$STATE/.afk" ] && afk=1
+  guidance=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --repair-line 2>/dev/null \
+    || printf '%s\n' 'tasks in flight, no live watcher - resume supervision according to the session-start operating block before ending the turn')
+fi
 {
   printf '●%s\n' "$rule"
-  printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
-  printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SUPERVISABLE" "$FM_SUP_BEACON_DESC"
-  printf '●  %s\n' "$REASON"
+  printf '●  %s\n' "$verdict"
+  printf '●  %s task(s) in flight; last watcher beat: %s.\n' "$FM_SUP_SUPERVISABLE" "$FM_SUP_BEACON_DESC"
+  printf '●  %s\n' "$guidance"
   printf '●%s\n' "$rule"
 } >&2
 exit 2

@@ -53,6 +53,17 @@
 # returns a FAILED line. A live cycle already present means re-arm ADOPTS it - it
 # never starts a second watcher.
 #
+# A CONFIRMED WATCHER OUTLIVES THIS ARM. The harness reaps its own background
+# tasks, and this arm is one of them; a signal handler that took the watcher down
+# on the way out therefore killed a healthy watcher on every reap, silently. It
+# does not, and it costs nothing to spare one: fm-watch.sh enqueues every wake into
+# the durable queue BEFORE it prints it, so this process's stdout is only a latency
+# fast-path and a watcher that survives its arm loses no wake - the next arm adopts
+# it and the queue is drained normally. The watcher is started under `setsid` where
+# available so a reap aimed at this arm's process GROUP cannot reach it either.
+# Only an unconfirmed or failed child is this arm's to stop. Deliberate stops are
+# unaffected: --restart signals the recorded arm and lock pids directly.
+#
 # ONE ARM PER HOME, AND A DUPLICATE NEVER EXITS. A second arm launched while a
 # live, identity-matched arm already holds state/.watch.arming becomes a silent
 # STANDBY: it starts no watcher, attaches to no cycle, and parks on the INCUMBENT
@@ -432,16 +443,34 @@ fi
 
 child=
 child_out=
+child_confirmed=0
 cleanup_child() {
-  if [ -n "$child" ] && fm_pid_alive "$child"; then
+  # A CONFIRMED watcher is NOT this arm's to take down. It holds the home lock,
+  # beats on its own, and has already enqueued every wake it has, so the next arm
+  # adopts it and the queue is drained normally - an arm that dies is a lost
+  # fast-path, never a lost wake. Killing it here is what turned each harness reap
+  # of this process into a silent supervision outage. Only an unconfirmed or failed
+  # child - one that never became the healthy watcher - is ours to stop.
+  if [ -n "$child" ] && [ "$child_confirmed" -eq 0 ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
   fi
   if [ -n "$child_out" ]; then
     rm -f "$child_out" 2>/dev/null || true
   fi
 }
-trap 'cleanup_child; exit 129' HUP
-trap 'cleanup_child; exit 143' TERM INT
+
+# Why an arm died, recorded where an investigation can find it. Every other exit
+# path already logs; these did not, so a reap left no trace at all and the outage
+# it caused was invisible until someone counted the corpses. Diagnostic only: it
+# writes to the churn log, never to stdout, so it adds nothing to the wake.
+arm_signal_exit() {  # <signal-name> <exit-code>
+  arm_log "signal: $1 - watcher pid=${child:-none} confirmed=$child_confirmed"
+  cleanup_child
+  exit "$2"
+}
+trap 'arm_signal_exit HUP 129' HUP
+trap 'arm_signal_exit TERM 143' TERM
+trap 'arm_signal_exit INT 143' INT
 
 reap_child() {
   if [ -n "$child" ]; then
@@ -452,6 +481,7 @@ reap_child() {
   fi
   child=
   child_out=
+  child_confirmed=0
 }
 
 # Stay alive until the adopted identity-matched healthy holder is gone.
@@ -504,7 +534,17 @@ run_cycle() {  # <cycle-mode>
   # Capture stderr too: a watcher that refuses to start says so on stderr, and
   # that reason belongs in the churn log and in the eventual FAILED line instead
   # of being discarded into a silent, unexplained exit.
-  "$WATCH" >"$child_out" 2>&1 &
+  #
+  # setsid gives the watcher its OWN session, so a reap aimed at this arm's process
+  # group stops at this arm and cannot reach it. Sparing a confirmed child is not
+  # enough on its own: a same-group watcher dies with `kill -TERM -<pgid>` however
+  # careful the trap is. setsid is not on every box, and without it this degrades
+  # to exactly today's launch rather than failing to arm at all.
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$WATCH" >"$child_out" 2>&1 &
+  else
+    "$WATCH" >"$child_out" 2>&1 &
+  fi
   child=$!
 
   # Verify the outcome: poll until this child is the confirmed healthy watcher, or
@@ -515,6 +555,7 @@ run_cycle() {  # <cycle-mode>
     if healthy_watcher; then
       if [ "$HEALTHY_PID" = "$child" ]; then
         echo "watcher: started pid=$child (beacon fresh)"
+        child_confirmed=1
         # Poll rather than block in `wait`: this is where the arm spends nearly
         # all of its life, so it is also where a marker deleted by some other arm
         # would otherwise stay deleted for the whole cycle. Reaping after the fact
@@ -523,7 +564,7 @@ run_cycle() {  # <cycle-mode>
           assert_arming_marker
           nap 1
         done
-        wait "$child"
+        wait "$child" 2>/dev/null
         rc=$?
         if watch_output_has_wake "$child_out"; then
           print_watch_output "$child_out"
@@ -535,6 +576,7 @@ run_cycle() {  # <cycle-mode>
         rm -f "$child_out" 2>/dev/null || true
         child=
         child_out=
+        child_confirmed=0
         return 0
       fi
       # Another watcher won the singleton; our child stood down.
@@ -564,6 +606,7 @@ run_cycle() {  # <cycle-mode>
         rm -f "$child_out" 2>/dev/null || true
         child=
         child_out=
+        child_confirmed=0
         CYCLE=wake
         return 0
       fi
@@ -579,6 +622,7 @@ run_cycle() {  # <cycle-mode>
       wait "$child" 2>/dev/null || true
       child=
       child_out=
+      child_confirmed=0
       CYCLE=failed
       CYCLE_DETAIL=$detail
       return 0
