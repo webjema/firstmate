@@ -65,8 +65,10 @@
 # line; docs/configuration.md owns the directory contract.
 # Every spawn forwards firstmate's own cloud/API credentials to the crew through a 0600
 # file at <tasktmp>/crew-env.sh that the pane sources, never by typing the value into
-# the pane, and prints one `crew-env: forwarded=<names>|0` line naming vars only. The
-# forward_crew_credentials comment below owns why the channel is a file.
+# the pane. Prints one line, carrying variable NAMES and the file path but never a
+# value: `crew-env: forwarded=<name>[,<name>...] file=<path>`, or `crew-env: forwarded=0`
+# when none are set, in which case no file is left behind. The forward_crew_credentials
+# comment below owns why the channel is a file.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -635,7 +637,13 @@ fi
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+# The root is created 0700, because forward_crew_credentials puts a credential file
+# inside it. umask rather than `mkdir -m -p`, which applies the mode only to the deepest
+# component (SC2174) and would leave the root itself at the inherited mode. A
+# pre-existing root (a respawn's, or another user's) keeps whatever mode it has, so the
+# credential file's own O_EXCL create stays the guarantee rather than this.
 TASK_TMP="/tmp/fm-$ID"
+(umask 077; mkdir -p "$TASK_TMP")
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook: every harness invokes the SAME writer,
@@ -883,10 +891,17 @@ CREW_ENV_VARS=(
 CREW_ENV_FILE="$TASK_TMP/crew-env.sh"
 forward_crew_credentials() {  # <target>
   local target=$1 var names=""
-  # umask around the creating redirect, so the file is never briefly world-readable
-  # the way create-then-chmod would leave it - the reason seed_project_env above
-  # reaches for `install -m 600` rather than cp.
-  (umask 077; : > "$CREW_ENV_FILE") || {
+  # The path is predictable (/tmp/fm-<id>/crew-env.sh from a short kebab id), and
+  # `mkdir -p` succeeds silently on a directory somebody else already made, so on a
+  # multi-user box another local user could plant a symlink there and a plain `>`
+  # would follow it and write the credential wherever it points. So: `rm -f` first,
+  # which unlinks a symlink rather than following it, then create under `set -C`,
+  # which is O_EXCL and so loses the race rather than reusing a re-planted link.
+  # umask 077 around the creating redirect, so the file is never briefly
+  # world-readable the way create-then-chmod would leave it - the reason
+  # seed_project_env above reaches for `install -m 600` rather than cp.
+  rm -f "$CREW_ENV_FILE"
+  (umask 077; set -C; : > "$CREW_ENV_FILE") || {
     echo "warn: crew-env: could not create $CREW_ENV_FILE; crew starts without forwarded credentials" >&2
     return 0
   }

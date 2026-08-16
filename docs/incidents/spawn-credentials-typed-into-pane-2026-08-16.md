@@ -55,6 +55,13 @@ Remediation, in the order it should be done:
 3. Rotating `ASANA_ACCESS_TOKEN` is the only complete remediation, because steps 1 and 2 cannot prove the value was never read.
    That is the user's call, not an agent's, and it is the reason this file exists rather than a chat message.
 
+## What the fix does not cover
+
+It closes the spawn-time channel only.
+The credential is still in the crew agent's shell environment, which is the point of forwarding it, so an `env`, a `printenv`, or a verbose tool error in that pane still writes the value into scrollback that `bin/fm-peek.sh` reads into firstmate's context.
+Forwarding a secret to a crew cannot give a stronger guarantee than that.
+So step 1 above is an ongoing habit before peeking a pane that has handled credentials, not a one-off cleanup for this incident.
+
 ## Why the fix is a file and not `tmux new-window -e`
 
 Passing the environment at window creation was the other candidate.

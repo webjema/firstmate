@@ -9,7 +9,7 @@
 # a 0600 file under the task's temp root and types only its path.
 #
 # The load-bearing assertion in every case below is that the VALUE never appears in
-# anything sent to the pane, nor in the spawn output firstmate reads.
+# anything handed to tmux by any verb, nor in the spawn output firstmate reads.
 #
 # These drive the REAL fm-spawn.sh to completion against a fake tmux and a real git
 # worktree, following the full-fake-spawn convention in tests/fm-spawn-env-seed.test.sh.
@@ -22,32 +22,49 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-crew-env)
 
+# fm-spawn writes its task temp root at the fixed path /tmp/fm-<id>, outside TMP_ROOT,
+# so this file owns removing it. It cannot be registered from make_spawn_case: that runs
+# in a command substitution, and an array append inside a subshell is lost. Leftovers are
+# not merely untidy here - a stale /tmp/fm-<id>/crew-env.sh makes the planted-symlink
+# case below pass without ever planting the symlink. Own EXIT trap per the convention in
+# tests/lib.sh, calling fm_test_cleanup so the registered dirs still go.
+crew_env_cleanup() {
+  rm -rf /tmp/fm-crewenv-*
+  fm_test_cleanup
+}
+trap crew_env_cleanup EXIT
+
 # Dummy values chosen to break naive quoting: a single quote, a space, and a `$`.
 # shell_quote must survive all three intact through the file round-trip.
 DUMMY_TOKEN="dummy-asana'tok en\$X"
 DUMMY_GAC="/dummy/creds path.json"
-# shell_quote rewrites an embedded single quote as '\'', so grepping the sendlog for
+# shell_quote rewrites an embedded single quote as '\'', so grepping the tmux log for
 # DUMMY_TOKEN whole would MISS a typed-but-quoted secret - which is exactly the leak,
 # since scrollback renders the quoted form perfectly readable. Assert on the fragment
 # after the quote, which shell_quote passes through byte for byte.
 DUMMY_TOKEN_TAIL="tok en\$X"
 
-# A fake tmux that RECORDS every send-keys argv to $FM_FAKE_SENDLOG. That log is how
-# the tests prove the value never travelled through the pane.
+# A fake tmux that RECORDS the argv of EVERY invocation to $FM_FAKE_TMUXLOG. That log
+# is how the tests prove the value never travelled to the pane.
+#
+# Logging every verb rather than just send-keys is deliberate: `tmux new-window -e
+# VAR=value` is the rejected alternative that puts the value in the tmux client's argv,
+# and a fake that swallowed new-window would let exactly that regression pass every
+# assertion here. The log has to cover the tmux SURFACE, not one verb of it.
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+printf '%s\n' "$*" >> "${FM_FAKE_TMUXLOG:-/dev/null}"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  send-keys) printf '%s\n' "$*" >> "${FM_FAKE_SENDLOG:-/dev/null}"; exit 0 ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys|has-session|new-session|new-window|kill-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -58,9 +75,8 @@ SH
 
 # Build one spawn case: a firstmate home, a project clone, a real worktree standing in
 # for the treehouse slot, and a fake bin dir. Echoes a '|'-joined record because a bash
-# function cannot return several values. The task temp root fm-spawn will create
-# (/tmp/fm-<id>, outside TMP_ROOT) is registered for removal so the test cleans up what
-# fm-teardown would have.
+# function cannot return several values. Clears any /tmp/fm-<id> a killed earlier run
+# left behind, so no case can pass against stale state.
 make_spawn_case() {
   local name=$1 case_dir home proj wt fakebin id
   case_dir="$TMP_ROOT/$name"
@@ -69,11 +85,11 @@ make_spawn_case() {
   wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   id="crewenv-$name-x1"
+  rm -rf "/tmp/fm-$id"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf 'brief\n' > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   touch "$home/state/.last-watcher-beat"
-  FM_TEST_CLEANUP_DIRS+=("/tmp/fm-$id")
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$id"
 }
 
@@ -90,7 +106,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    FM_FAKE_SENDLOG="$FM_FAKE_SENDLOG" \
+    FM_FAKE_TMUXLOG="$FM_FAKE_TMUXLOG" \
     PATH="$fakebin:$PATH" \
     "$@" \
     "$SPAWN" "$id" "$proj" claude 2>&1
@@ -104,7 +120,7 @@ test_value_never_travels_through_the_pane() {
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
 EOF
-  FM_FAKE_SENDLOG="$case_dir/sendlog"
+  FM_FAKE_TMUXLOG="$case_dir/tmuxlog"
   out=$(run_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
     ASANA_ACCESS_TOKEN="$DUMMY_TOKEN" GOOGLE_APPLICATION_CREDENTIALS="$DUMMY_GAC")
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report success"
@@ -116,18 +132,18 @@ EOF
 
   # The defect this change exists to close, asserted on both readable surfaces and at
   # the channel itself: nothing that assigns a credential may be typed at all.
-  assert_no_grep 'export ASANA_ACCESS_TOKEN' "$FM_FAKE_SENDLOG" \
-    "a credential assignment was typed into the pane"
-  assert_no_grep "$DUMMY_TOKEN_TAIL" "$FM_FAKE_SENDLOG" \
-    "the credential VALUE was typed into the pane"
-  assert_no_grep "$DUMMY_GAC" "$FM_FAKE_SENDLOG" \
-    "the credential VALUE was typed into the pane"
+  assert_no_grep 'export ASANA_ACCESS_TOKEN' "$FM_FAKE_TMUXLOG" \
+    "a credential assignment was handed to tmux"
+  assert_no_grep "$DUMMY_TOKEN_TAIL" "$FM_FAKE_TMUXLOG" \
+    "the credential VALUE was handed to tmux"
+  assert_no_grep "$DUMMY_GAC" "$FM_FAKE_TMUXLOG" \
+    "the credential VALUE was handed to tmux"
   assert_not_contains "$out" "$DUMMY_TOKEN_TAIL" \
     "the credential VALUE appeared in the spawn output firstmate reads"
 
   # ... and the crew still actually gets it. Source the file the way the pane does and
   # read the values back, which also proves shell_quote survived the round-trip.
-  assert_grep ". '$envfile'" "$FM_FAKE_SENDLOG" "spawn never told the pane to source the env file"
+  assert_grep ". '$envfile'" "$FM_FAKE_TMUXLOG" "spawn never told the pane to source the env file"
   sourced=$(env -u ASANA_ACCESS_TOKEN -u GOOGLE_APPLICATION_CREDENTIALS \
     bash -c ". '$envfile'; printf '%s|%s' \"\$ASANA_ACCESS_TOKEN\" \"\$GOOGLE_APPLICATION_CREDENTIALS\"")
   [ "$sourced" = "$DUMMY_TOKEN|$DUMMY_GAC" ] \
@@ -148,7 +164,7 @@ test_unset_vars_are_omitted() {
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
 EOF
-  FM_FAKE_SENDLOG="$case_dir/sendlog"
+  FM_FAKE_TMUXLOG="$case_dir/tmuxlog"
   out=$(run_spawn "$home" "$proj" "$wt" "$fakebin" "$id" ASANA_ACCESS_TOKEN="$DUMMY_TOKEN")
   envfile="/tmp/fm-$id/crew-env.sh"
   assert_grep 'export ASANA_ACCESS_TOKEN=' "$envfile" "the set var was not written"
@@ -167,14 +183,14 @@ test_no_credentials_leaves_no_file() {
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
 EOF
-  FM_FAKE_SENDLOG="$case_dir/sendlog"
+  FM_FAKE_TMUXLOG="$case_dir/tmuxlog"
   out=$(run_spawn "$home" "$proj" "$wt" "$fakebin" "$id")
   status=$?
   expect_code 0 "$status" "spawn with no credentials in the environment"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report success"
   assert_contains "$out" "crew-env: forwarded=0" "spawn did not report the zero count line"
   assert_absent "/tmp/fm-$id/crew-env.sh" "spawn left an empty crew env file behind"
-  assert_no_grep 'crew-env.sh' "$FM_FAKE_SENDLOG" \
+  assert_no_grep 'crew-env.sh' "$FM_FAKE_TMUXLOG" \
     "spawn told the pane to source a file it did not write"
   pass "spawn with no credentials writes no file and reports a zero count"
 }
@@ -186,16 +202,40 @@ test_env_file_is_outside_the_worktree() {
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
 EOF
-  FM_FAKE_SENDLOG="$case_dir/sendlog"
+  FM_FAKE_TMUXLOG="$case_dir/tmuxlog"
   run_spawn "$home" "$proj" "$wt" "$fakebin" "$id" ASANA_ACCESS_TOKEN="$DUMMY_TOKEN" >/dev/null
   assert_present "/tmp/fm-$id/crew-env.sh" "precondition: spawn should have written the env file"
   [ -z "$(git -C "$wt" status --porcelain)" ] \
     || fail "spawn wrote something into the crew's checkout: $(git -C "$wt" status --porcelain)"
-  assert_no_grep "$DUMMY_TOKEN_TAIL" "$FM_FAKE_SENDLOG" "the credential VALUE was typed into the pane"
+  assert_no_grep "$DUMMY_TOKEN_TAIL" "$FM_FAKE_TMUXLOG" "the credential VALUE was handed to tmux"
   pass "the crew env file lives outside the worktree, so git never sees it"
+}
+
+# The env file's path is predictable (/tmp/fm-<id>/crew-env.sh from a short kebab id)
+# and `mkdir -p` succeeds on a directory somebody else already made, so a plain `>`
+# would follow a planted symlink and write the credential wherever it points. Writing
+# through the link is the one unrecoverable failure here, so it is tested rather than
+# argued.
+test_planted_symlink_is_not_written_through() {
+  local rec case_dir home proj wt fakebin id decoy
+  rec=$(make_spawn_case symlink)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  FM_FAKE_TMUXLOG="$case_dir/tmuxlog"
+  decoy="$case_dir/decoy.txt"
+  printf 'untouched\n' > "$decoy"
+  mkdir -p "/tmp/fm-$id"
+  ln -s "$decoy" "/tmp/fm-$id/crew-env.sh"
+  run_spawn "$home" "$proj" "$wt" "$fakebin" "$id" ASANA_ACCESS_TOKEN="$DUMMY_TOKEN" >/dev/null
+  assert_no_grep "$DUMMY_TOKEN_TAIL" "$decoy" "spawn wrote the credential through a planted symlink"
+  assert_grep 'untouched' "$decoy" "spawn truncated the symlink's target"
+  [ ! -L "/tmp/fm-$id/crew-env.sh" ] || fail "the crew env file is still a symlink, not a real file"
+  pass "spawn replaces a planted symlink instead of writing the credential through it"
 }
 
 test_value_never_travels_through_the_pane
 test_unset_vars_are_omitted
 test_no_credentials_leaves_no_file
 test_env_file_is_outside_the_worktree
+test_planted_symlink_is_not_written_through
