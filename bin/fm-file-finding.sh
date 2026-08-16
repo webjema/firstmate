@@ -41,9 +41,16 @@
 # appended to backlog.md directly, which AGENTS.md section 9 sanctions and which is better
 # than holding a finding hostage to a tool version.
 #
-# ASANA TARGET. Project 1214790864559256 ("Optiroq v1"), section 1217536112998256
-# ("Triage"), overridable with FM_ASANA_PROJECT / FM_ASANA_SECTION. Triage rather than the
-# pipeline's own queue section is deliberate: a filed finding must be read by a human
+# ASANA TARGET. A local knob, never a built-in default: which tracker a fleet files into is
+# a decision only its user can make, and a shipped default would point every other install
+# at a board it does not own. $FM_HOME/config/product-tracker (local, gitignored) carries
+# `project=<gid>` and `section=<gid>`, one per line; FM_ASANA_PROJECT / FM_ASANA_SECTION
+# override per key. With no project configured, a product finding takes the OUTAGE path
+# below - held locally with the reason "no product tracker configured", which reads
+# differently from an unreachable tracker on purpose, because only one of the two is fixed
+# by waiting. With a project but no section the card is still filed, into wherever the board
+# puts a sectionless task, and the script warns. A section is wanted because it should be a
+# triage one rather than the pipeline's own queue: a filed finding must be read by a human
 # before it becomes authorized work, so filing never auto-starts work. Auth is
 # ASANA_ACCESS_TOKEN, which bin/fm-spawn.sh forwards to every crew through a 0600 file,
 # so a crewmate can file the moment it finds something - the finding survives a firstmate
@@ -114,8 +121,20 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 FINDINGS="$STATE/findings"
 
 ASANA_API="${FM_ASANA_API:-https://app.asana.com/api/1.0}"
-ASANA_PROJECT="${FM_ASANA_PROJECT:-1214790864559256}"
-ASANA_SECTION="${FM_ASANA_SECTION:-1217536112998256}"
+ASANA_PROJECT="${FM_ASANA_PROJECT:-}"
+ASANA_SECTION="${FM_ASANA_SECTION:-}"
+# The env vars are set above, so "keep what is already set" is what makes them win over the
+# file. A file with no trailing newline still yields its last line.
+if [ -f "$CONFIG/product-tracker" ]; then
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    k=$(printf '%s' "$k" | tr -d '[:space:]')
+    v=$(printf '%s' "${v:-}" | tr -d '[:space:]')
+    case "$k" in
+      project) [ -n "$ASANA_PROJECT" ] || ASANA_PROJECT=$v ;;
+      section) [ -n "$ASANA_SECTION" ] || ASANA_SECTION=$v ;;
+    esac
+  done < "$CONFIG/product-tracker"
+fi
 SCAN_PAGES="${FM_FINDING_SCAN_PAGES:-20}"
 HTTP_TIMEOUT="${FM_FINDING_HTTP_TIMEOUT:-20}"
 
@@ -268,6 +287,13 @@ FILED_URL=""
 ALREADY=0
 asana_file() {  # <title> <notes> <trailer>
   local title=$1 notes=$2 trailer=$3 gid payload
+  # No configured board is a different thing from an unreachable one, and only one of them
+  # is fixed by waiting, so it says so. Never a built-in default: which tracker a fleet
+  # files into is the user's decision, and a stranger's board would swallow the finding.
+  [ -n "$ASANA_PROJECT" ] || {
+    API_ERR="no product tracker configured - set project= in $CONFIG/product-tracker (see --help)"
+    return 1
+  }
   [ -n "${ASANA_ACCESS_TOKEN:-}" ] || { API_ERR="ASANA_ACCESS_TOKEN is not set"; return 1; }
   command -v curl >/dev/null 2>&1 || { API_ERR="curl is not installed"; return 1; }
 
@@ -286,6 +312,12 @@ asana_file() {  # <title> <notes> <trailer>
   FILED_URL=$(printf '%s' "$API_BODY" | jq -r '.data.permalink_url // empty' 2>/dev/null || printf '')
   [ -n "$FILED_URL" ] || FILED_URL=$(asana_url_for "$gid")
 
+  # A configured project with no section still files - the card exists and is deduplicated,
+  # it just lands wherever the board puts a sectionless task. Worth a warning, not a refusal.
+  if [ -z "$ASANA_SECTION" ]; then
+    echo "warn: no triage section configured; $FILED_URL landed in the project's default place" >&2
+    return 0
+  fi
   payload=$(jq -n --arg p "$ASANA_PROJECT" --arg s "$ASANA_SECTION" \
     '{data:{project:$p,section:$s}}')
   asana_api POST "/tasks/$gid/addProject" "$payload" ||

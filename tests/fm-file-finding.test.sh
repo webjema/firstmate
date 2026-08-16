@@ -19,6 +19,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-file-finding)
+# Made-up gids. The script ships no default board, so a real one must never appear here
+# either - a fixture is exactly how a private gid gets back into tracked code.
 PROJECT_GID=9990001
 SECTION_GID=9990002
 
@@ -144,6 +146,7 @@ new_case() {
   export FAKE_ASANA_LOG="$CASE_DIR/asana.log"
   export FAKE_ASANA_ADDPROJECT="$CASE_DIR/addproject.log"
   export FAKE_TASKS_LOG="$CASE_DIR/tasks-axi.log"
+  unset TRACKER_PROJECT TRACKER_SECTION  # set them in a test to unconfigure the board
   : > "$FAKE_TASKS_LOG"  # so a "tasks-axi was never called" assertion reads a real empty file
   unset FAKE_ASANA_FAIL FAKE_ASANA_ENDLESS
   printf '[]\n' > "$FAKE_ASANA_STORE"
@@ -157,8 +160,8 @@ run_file() {  # <cwd> <args...>
     cd "$cwd" || exit 1
     FM_HOME="$HOME_DIR" \
     FM_ASANA_API="http://asana.invalid/api/1.0" \
-    FM_ASANA_PROJECT="$PROJECT_GID" \
-    FM_ASANA_SECTION="$SECTION_GID" \
+    FM_ASANA_PROJECT="${TRACKER_PROJECT-$PROJECT_GID}" \
+    FM_ASANA_SECTION="${TRACKER_SECTION-$SECTION_GID}" \
     ASANA_ACCESS_TOKEN=fake-token \
     "$ROOT/bin/fm-file-finding.sh" "$@"
   )
@@ -405,6 +408,44 @@ test_a_later_filing_drains_what_the_outage_held() {
   pass "fm-file-finding.sh: a later successful filing drains what an outage held"
 }
 
+# firstmate is distributable, so it ships no default board: a built-in one would point every
+# other install, and every second home on this box, at a tracker it does not own. A home that
+# has not chosen one holds the finding rather than posting it somewhere wrong - and says so
+# in words a crew can tell apart from an outage, because only the outage clears by waiting.
+test_no_configured_tracker_holds_instead_of_guessing() {
+  local out
+  new_case unconfigured
+  TRACKER_PROJECT='' TRACKER_SECTION=''
+  out=$(run_file "$PROJ_DIR" "${STD_ARGS[@]}") ||
+    fail "an unconfigured tracker must not fail the crew's task: $out"
+  assert_contains "$out" "no product tracker configured" \
+    "the reason must name the missing config, not read like an outage"
+  assert_absent "$FAKE_ASANA_LOG" "an unconfigured home must not post to any board"
+  assert_grep '"state": "pending"' "$(only_record)" "the finding must be held, not dropped"
+  assert_grep "the cached key outlives its lease" "$(only_record)" \
+    "the held record must carry the finding itself"
+  pass "fm-file-finding.sh: no configured tracker holds the finding instead of guessing a board"
+}
+
+# The board is a local knob, so the config file alone - no environment at all - must be
+# enough to file, and `flush` must then recover what was held before it existed.
+test_config_file_supplies_the_board() {
+  local out
+  new_case configured
+  TRACKER_PROJECT='' TRACKER_SECTION=''
+  run_file "$PROJ_DIR" "${STD_ARGS[@]}" >/dev/null || fail "the deferral must not fail the task"
+  mkdir -p "$HOME_DIR/config"
+  printf 'project=%s\nsection=%s' "$PROJECT_GID" "$SECTION_GID" \
+    > "$HOME_DIR/config/product-tracker"  # no trailing newline: the last line must still count
+  out=$(run_file "$PROJ_DIR" flush) || fail "flush failed: $out"
+  assert_contains "$out" "filed: " "the configured board must be used once it is set"
+  assert_grep "\"section\": \"$SECTION_GID\"" "$FAKE_ASANA_ADDPROJECT" \
+    "the card must be moved into the configured triage section"
+  assert_grep "/projects/$PROJECT_GID/tasks" "$FAKE_ASANA_LOG" \
+    "the scan must run against the configured project"
+  pass "fm-file-finding.sh: config/product-tracker alone is enough to file"
+}
+
 # The same defect reported with different wording for WHY is the same finding: the key is
 # built from title + where + repo, so a resumed crew re-filing it does not duplicate.
 test_key_ignores_reworded_why() {
@@ -436,4 +477,6 @@ test_manual_backend_still_records_the_finding
 test_unreadable_scan_payload_defers
 test_routing_follows_the_repo_the_finding_is_about
 test_a_later_filing_drains_what_the_outage_held
+test_no_configured_tracker_holds_instead_of_guessing
+test_config_file_supplies_the_board
 test_key_ignores_reworded_why

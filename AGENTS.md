@@ -203,7 +203,8 @@ Severity, whose code it is, and whether it feels worth someone's time set a file
 
 Where it goes turns on one question too: does a human tracking the user's product need to see this?
 `bin/fm-file-finding.sh` is the only way to file, and it owns that routing, the deduplication, and what happens when a tracker is unreachable - name the task or the repo the finding is about (`--task`, `--repo`) and it lands in the right queue, held for triage, never dispatchable on its own.
-A tracker it cannot reach leaves the finding held locally instead of dropped; `bin/fm-file-finding.sh flush` re-files those, and nothing else will.
+A tracker it cannot reach leaves the finding held locally instead of dropped, and so does a home with no product tracker configured yet - the first clears itself, the second needs `config/product-tracker` set once.
+`bin/fm-file-finding.sh flush` re-files what was held, and nothing else will.
 Crewmates file directly through it and report what they filed.
 
 ### Adding a project
