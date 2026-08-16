@@ -70,10 +70,15 @@ make_bare_home() {
 # the second would be told to operate read-only, and the arrangement would be a
 # single-instance arrangement with extra steps.
 test_two_homes_take_independent_session_locks() {
-  local a b out_a out_b before after
+  local a b out_a out_b before after shared_before shared_after
   a=$(make_bare_home lock-a)
   b=$(make_bare_home lock-b)
   before=$(git -C "$ROOT" status --porcelain)
+  # The checkout's own state/.lock is SNAPSHOTTED, not asserted absent: this suite
+  # runs from a live firstmate home, where that file exists by definition, and a
+  # case that reads ambient state fails for a reason that has nothing to do with
+  # what it asserts. What must hold is that neither instance touched it.
+  shared_before=$(cat "$ROOT/state/.lock" 2>/dev/null || printf '<absent>')
 
   out_a=$(PATH="$FAKEBIN:$PATH" FM_HOME="$a" "$ROOT/bin/fm-lock.sh" 2>&1)
   out_b=$(PATH="$FAKEBIN:$PATH" FM_HOME="$b" "$ROOT/bin/fm-lock.sh" 2>&1)
@@ -85,7 +90,9 @@ test_two_homes_take_independent_session_locks() {
   after=$(git -C "$ROOT" status --porcelain)
   [ "$before" = "$after" ] \
     || fail "running two instances changed the shared checkout's working tree"$'\n'"$after"
-  assert_absent "$ROOT/state/.lock" "an instance wrote its session lock into the shared checkout"
+  shared_after=$(cat "$ROOT/state/.lock" 2>/dev/null || printf '<absent>')
+  [ "$shared_before" = "$shared_after" ] \
+    || fail "an instance wrote its session lock into the shared checkout's state/.lock"
   pass "two homes over one checkout take independent session locks and leave the checkout alone"
 }
 
@@ -283,18 +290,131 @@ test_a_wedged_holder_expires_rather_than_hanging() {
   pass "a sync whose wait expires reports the holder and skips instead of hanging"
 }
 
+# One contended clone must not consume the whole sweep. bin/fm-bootstrap.sh runs a
+# full-fleet sync under a timeout of about 20s, so a clone a peer is holding could
+# eat all of it and leave every other clone untouched - strictly worse than the
+# skip-and-move-on the lock replaced. The budget here is deliberately shorter than
+# the holder, which is that case exactly. sweep-alpha sorts first, so a sweep that
+# waits before it works reaches nothing else.
+test_a_contended_clone_does_not_starve_the_sweep() {
+  local home lockpath marker peer_pid sync_pid outfile
+  home=$(make_bare_home syncsweep "$TMP_ROOT/syncsweep-projects")
+  build_sync_fixture "$home" sweep-alpha >/dev/null
+  build_sync_fixture "$home" sweep-beta >/dev/null
+  lockpath=$(clone_lock_path_of "$home/projects/sweep-alpha")
+  mkdir -p "$(dirname "$lockpath")"
+  marker="$TMP_ROOT/sweep-holding"
+  outfile="$TMP_ROOT/sweep-out"
+
+  ( flock 9 && touch "$marker" && sleep 15 ) 9>"$lockpath" >/dev/null 2>&1 &
+  peer_pid=$!
+  wait_for_file "$marker"
+
+  FM_HOME="$home" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_GRAPH_REINDEX_MODE=off FM_CLONE_LOCK_WAIT_SECS=60 \
+    "$ROOT/bin/fm-fleet-sync.sh" >"$outfile" 2>/dev/null &
+  sync_pid=$!
+  sleep 5
+  kill "$sync_pid" 2>/dev/null || true
+  wait "$sync_pid" 2>/dev/null || true
+  rm -f "$marker"
+  kill "$peer_pid" 2>/dev/null || true
+  wait "$peer_pid" 2>/dev/null || true
+
+  assert_contains "$(cat "$outfile")" "sweep-beta: synced" \
+    "a clone a peer was holding starved the rest of the sweep, so nothing else synced inside the budget"
+  pass "a contended clone does not starve the uncontended ones in a full-fleet sweep"
+}
+
+# make_graph_stub_root <name>: a stand-in $FM_ROOT whose graph reindex blocks until
+# its marker is removed, so a case can observe whether the clone lock is still held
+# while the reindex runs. Carries only the three helpers fm-fleet-sync.sh reaches
+# for through $FM_ROOT.
+make_graph_stub_root() {
+  local dir="$TMP_ROOT/graphroot-$1"
+  mkdir -p "$dir/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/bin/fm-guard.sh"
+  printf '#!/usr/bin/env bash\necho "PR off"\n' > "$dir/bin/fm-project-mode.sh"
+  cat > "$dir/bin/fm-graph-reindex.sh" <<SH
+#!/usr/bin/env bash
+touch "$TMP_ROOT/graph-$1-running"
+while [ -e "$TMP_ROOT/graph-$1-running" ]; do sleep 0.1; done
+SH
+  chmod +x "$dir/bin/fm-guard.sh" "$dir/bin/fm-project-mode.sh" "$dir/bin/fm-graph-reindex.sh"
+  printf '%s\n' "$dir"
+}
+
+# The reindex is minutes of best-effort work that touches no git state. Held inside
+# the clone's write lock it decides another instance's sync outcome, which is the
+# starvation this lock exists to end rather than cause.
+test_the_graph_reindex_runs_outside_the_clone_lock() {
+  local home clone root lockpath rc sync_pid
+  home=$(make_bare_home syncgraph "$TMP_ROOT/syncgraph-projects")
+  clone=$(build_sync_fixture "$home" graphed)
+  root=$(make_graph_stub_root graphed)
+  lockpath=$(clone_lock_path_of "$clone")
+  mkdir -p "$(dirname "$lockpath")"
+
+  FM_HOME="$home" FM_PROJECTS_OVERRIDE="$home/projects" FM_ROOT_OVERRIDE="$root" \
+    "$ROOT/bin/fm-fleet-sync.sh" graphed >/dev/null 2>&1 &
+  sync_pid=$!
+  wait_for_file "$TMP_ROOT/graph-graphed-running"
+
+  rc=0
+  ( flock -w 2 9 || exit 75 ) 9>"$lockpath" >/dev/null 2>&1 || rc=$?
+  rm -f "$TMP_ROOT/graph-graphed-running"
+  wait "$sync_pid" 2>/dev/null || true
+
+  [ "$rc" -eq 0 ] \
+    || fail "the clone stayed locked through the graph reindex, so a peer starves on work that touches no git state"
+  pass "the graph reindex runs outside the clone's write lock"
+}
+
+# The lock lives on an open file descriptor, and a descriptor is inherited. A body
+# that leaves anything running in the background - git's own detached `gc --auto`
+# runs on this path - would otherwise hold the clone long after the runner returned,
+# and one such orphan wedges every peer's sync of that clone for as long as it lives.
+test_a_background_child_does_not_inherit_the_clone_lock() {
+  local clone lockpath rc
+  clone="$TMP_ROOT/fdleak-clone"
+  mkdir -p "$clone"
+  lockpath=$(clone_lock_path_of "$clone")
+
+  ( . "$ROOT/bin/fm-peer-lib.sh"
+    # shellcheck disable=SC2329  # run by name, through the lock runner
+    leaves_a_child() { ( sleep 10 ) >/dev/null 2>&1 & }
+    fm_clone_lock_run "$clone" leaves_a_child ) >/dev/null 2>&1
+
+  rc=0
+  ( flock -w 2 9 || exit 75 ) 9>"$lockpath" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "a background child left by the locked command kept holding the clone lock"
+  pass "a background child left behind by a locked command does not keep the clone locked"
+}
+
 # --- contended: the updater's refusal ---------------------------------------
 
-# make_scratch_checkout: a stand-in $FM_ROOT for the updater to act on, so no case
-# here can fast-forward the real checkout it is running from. Its bin/ carries only
-# what the updater's peer check reaches for by path.
+# make_scratch_checkout [name]: a stand-in $FM_ROOT for the updater to act on, so no
+# case here can fast-forward the real checkout it is running from. Its bin/ carries
+# only what the updater's peer check reaches for by path.
 make_scratch_checkout() {
-  local dir="$TMP_ROOT/scratch-root"
+  local dir="$TMP_ROOT/scratch-root-${1:-default}"
   mkdir -p "$dir/bin"
   fm_git_init_commit "$dir"
   ln -sf "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   ln -sf "$ROOT/bin/fm-peer-lib.sh" "$dir/bin/fm-peer-lib.sh"
   printf '%s\n' "$dir"
+}
+
+register_live_peer() {  # <cache> <home> <checkout> ; echoes the holder pid
+  local cache=$1 home=$2 checkout=$3 sleeper
+  sleep 30 >/dev/null 2>&1 &
+  sleeper=$!
+  printf '%s\n' "$sleeper" > "$home/state/.lock"
+  FM_PEER_CACHE_DIR="$cache" bash -c \
+    '. "$1/bin/fm-peer-lib.sh"; fm_peer_register "$2" "$3" "$4"' \
+    _ "$ROOT" "$home" "$home/state" "$checkout"
+  printf '%s\n' "$sleeper"
 }
 
 test_update_refuses_while_a_peer_is_live_and_names_it() {
@@ -305,12 +425,9 @@ test_update_refuses_while_a_peer_is_live_and_names_it() {
   peer=$(make_bare_home update-peer)
   me=$(make_bare_home update-me)
 
-  # A peer mid-turn: its session lock held by a live process the fake ps calls claude.
-  sleep 30 >/dev/null 2>&1 &
-  sleeper=$!
-  printf '%s\n' "$sleeper" > "$peer/state/.lock"
-  FM_PEER_CACHE_DIR="$cache" bash -c \
-    '. "$1/bin/fm-peer-lib.sh"; fm_peer_register "$2" "$3"' _ "$ROOT" "$peer" "$peer/state"
+  # A peer mid-turn on THIS checkout: its session lock held by a live process the
+  # fake ps calls claude.
+  sleeper=$(register_live_peer "$cache" "$peer" "$root")
 
   rc=0
   out=$(PATH="$FAKEBIN:$PATH" FM_PEER_CACHE_DIR="$cache" FM_HOME="$me" \
@@ -331,6 +448,36 @@ test_update_refuses_while_a_peer_is_live_and_names_it() {
   assert_not_contains "$out" "another firstmate instance is live on this checkout" \
     "the updater still refuses after the peer's session ended"
   pass "the updater refuses while a peer shares this checkout, names it, and stops once it is gone"
+}
+
+# THE OTHER DIRECTION, and the one that turned the refusal into a refusal that never
+# clears. Every secondmate home is its own full checkout, and its charter has it run
+# bin/fm-session-start.sh and then idle - so it registers here and stays registered
+# for as long as it is up. Matching on liveness alone made /updatefirstmate refuse
+# against the one command whose own job includes fast-forwarding that secondmate.
+test_update_ignores_a_live_peer_on_another_checkout() {
+  local cache peer me mine theirs out sleeper entries
+  cache="$TMP_ROOT/update-cache-foreign"
+  mine=$(make_scratch_checkout mine)
+  theirs=$(make_scratch_checkout theirs)
+  peer=$(make_bare_home foreign-peer)
+  me=$(make_bare_home foreign-me)
+
+  sleeper=$(register_live_peer "$cache" "$peer" "$theirs")
+  out=$(PATH="$FAKEBIN:$PATH" FM_PEER_CACHE_DIR="$cache" FM_HOME="$me" \
+        FM_ROOT_OVERRIDE="$mine" "$ROOT/bin/fm-update.sh" 2>&1 || true)
+
+  assert_not_contains "$out" "another firstmate instance is live on this checkout" \
+    "a live instance running from a DIFFERENT checkout blocked this checkout's self-update"
+  # Its entry is not this caller's to prune either: pruning it would make the peer
+  # invisible to the instance that does share its checkout.
+  entries=$(find "$cache/sessions" -type f 2>/dev/null | wc -l)
+  [ "$entries" -eq 1 ] \
+    || fail "the updater pruned a live peer's registry entry from another checkout ($entries left)"
+
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+  pass "a live instance on another checkout neither blocks this one's update nor loses its entry"
 }
 
 # --- the bare home ----------------------------------------------------------
@@ -386,6 +533,28 @@ test_a_bare_home_verifies_and_runs() {
   expect_code 1 "$rc" "verify accepted a home that had grown its own checkout"
   assert_contains "$out" "not a bare home" "verify refused without saying what is wrong"
   pass "a bare home verifies and runs, and stops verifying once it is no longer bare"
+}
+
+# env.sh is SOURCED, so its values have to survive sourcing rather than merely read
+# correctly. A clones path holding $, a backtick or $(...) would otherwise be
+# expanded - or run - on every session start, and verify has to read it back the same
+# way the operator does or it would pass on a file that hands the session a different
+# directory than it names.
+test_env_sh_survives_a_path_the_shell_would_expand() {
+  local projects home out got
+  projects="$TMP_ROOT/cl\$ones-\$(id -u)"
+  mkdir -p "$projects"
+  home="$TMP_ROOT/envquote"
+  "$ROOT/bin/fm-home-init.sh" "$home" --projects "$projects" >/dev/null
+
+  # shellcheck source=/dev/null
+  got=$( . "$home/env.sh" >/dev/null 2>&1; printf '%s' "${FM_PROJECTS_OVERRIDE:-}" )
+  [ "$got" = "$projects" ] \
+    || fail "sourcing env.sh gave a different clones directory than the home was created with: '$got' not '$projects'"
+
+  out=$("$ROOT/bin/fm-home-init.sh" --verify "$home" 2>&1) \
+    || fail "verify refused a home whose clones path holds shell metacharacters: $out"
+  pass "env.sh survives a clones path the shell would otherwise expand"
 }
 
 # --- private: the per-task temp root ----------------------------------------
@@ -454,7 +623,12 @@ test_second_warmer_yields_to_the_first
 test_one_clone_reached_two_ways_takes_one_lock
 test_a_blocked_sync_waits_and_then_syncs
 test_a_wedged_holder_expires_rather_than_hanging
+test_a_contended_clone_does_not_starve_the_sweep
+test_the_graph_reindex_runs_outside_the_clone_lock
+test_a_background_child_does_not_inherit_the_clone_lock
 test_update_refuses_while_a_peer_is_live_and_names_it
+test_update_ignores_a_live_peer_on_another_checkout
 test_a_bare_home_is_not_foreign_and_a_checkout_home_is
 test_a_bare_home_verifies_and_runs
+test_env_sh_survives_a_path_the_shell_would_expand
 test_two_homes_do_not_share_one_task_temp_root

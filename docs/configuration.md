@@ -169,13 +169,14 @@ Create one with `bin/fm-home-init.sh <home-dir> [--projects <dir>]`, and re-chec
 It writes `<home>/env.sh`, which the operator sources before starting that instance's session; that file is how `FM_PROJECTS_OVERRIDE` reaches an instance whose home holds no code to set it.
 The home stays bare on purpose, and the script's header owns why that is load-bearing rather than tidy.
 
-Sharing turns three previously private things into contended ones, all owned by [`bin/fm-peer-lib.sh`](../bin/fm-peer-lib.sh):
-a per-clone write lock so two instances syncing one clone take turns instead of one going stale,
-a live-peer session registry so `bin/fm-update.sh` refuses to swap `bin/` beneath a peer that is mid-turn,
-and a per-task temp root named from the home so two instances running a task with the same id do not share one directory or delete each other's.
-The worktree pool is shared already: treehouse keys a pool by the clone's basename and its origin URL, so two clones of one upstream resolve to one pool whatever their paths, and `bin/fm-pool-lib.sh` derives the warm lock the same way so both instances contend for the same lock.
+Sharing turns three previously private things into contended ones, all owned by [`bin/fm-peer-lib.sh`](../bin/fm-peer-lib.sh): a per-clone write lock so two instances syncing one clone take turns instead of one going stale, a live-peer session registry so `bin/fm-update.sh` refuses to swap `bin/` beneath a peer that is mid-turn, and a per-task temp root named from the home so two instances running a task with the same id do not share one directory or delete each other's.
 
-`FM_CLONE_LOCK_WAIT_SECS` bounds how long an instance waits for the per-clone write lock, defaulting to 300; on expiry the caller reports and skips rather than hanging.
+The worktree pool is shared already, and `bin/fm-pool-lib.sh` derives the warm lock from the same identity treehouse keys the pool by: the clone's basename plus a hash of its origin URL.
+That URL is matched literally, so `https://host/org/repo`, the same URL with `.git`, the same URL with a trailing slash, and the `git@` spelling are four different pools.
+Clone every instance's copy of a repository with the same URL spelling and into the same directory name, or they will not share a pool and will not contend for one warm lock.
+
+`FM_CLONE_LOCK_WAIT_SECS` bounds how long an instance waits for the per-clone write lock, defaulting to 60; on expiry the caller reports and skips rather than hanging.
+A full-fleet sync tries every clone without waiting first, so a clone a peer is holding never delays the rest of the sweep.
 `FM_PEER_CACHE_DIR` relocates the lock and registry directory, which defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/firstmate` and is per-user rather than per-home because its whole job is to be shared.
 Nothing is ever written inside a clone.
 

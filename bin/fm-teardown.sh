@@ -1011,12 +1011,12 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (incl. its gotmp/) recorded by spawn. Read before the
-# state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-# The recompute is a backstop for a meta that lost its tasktmp= line, and it goes
-# through fm-peer-lib.sh so it names THIS home's root. It used to be a bare
-# /tmp/fm-<id>, which under a shared host deleted whichever instance's task happened
-# to share the id - including the 0700 credential file inside it.
+# Remove the per-task temp root (incl. its gotmp/) recorded by spawn, and recompute
+# it as a backstop for a meta that lost the line. Read before the state-file rm below.
+# The recompute used to be a bare /tmp/fm-<id>, which under a shared host deleted
+# whichever OTHER instance's task happened to share the id, credential file and all.
+# Dropping that spelling leaves a task spawned before the rename with no teardown-time
+# reclaim; bin/fm-scratch-reap.sh's /tmp/fm-* sweep still collects it.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 rm -rf "$(fm_task_tmp_root "$FM_HOME" "$ID")" 2>/dev/null || true
 

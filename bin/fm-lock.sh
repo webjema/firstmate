@@ -63,5 +63,5 @@ echo "$me" > "$LOCK"
 # Announce this session to its peers. Only bin/fm-update.sh reads the registry,
 # and only to refuse swapping the shared checkout under a peer mid-turn; fm-peer-lib.sh
 # owns why it has to be announced rather than discovered.
-fm_peer_register "$FM_HOME" "$STATE"
+fm_peer_register "$FM_HOME" "$STATE" "$FM_ROOT"
 echo "lock acquired: harness pid $me"

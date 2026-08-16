@@ -59,8 +59,10 @@ fi
 # other instance running from it, mid-turn. An update is never urgent and a live
 # peer is a reason to wait, not a race to win, so this refuses and names the
 # peers. bin/fm-peer-lib.sh owns how a peer is discovered and how its liveness is
-# decided. With no peers - the single-instance arrangement, and every instance
-# started before it announced itself - nothing here fires.
+# decided, and only peers on THIS checkout count - a secondmate runs its own, and
+# updating it is this script's job rather than a reason to refuse. With no peers -
+# the single-instance arrangement, and every instance started before it announced
+# itself - nothing here fires.
 
 peers=$(fm_peer_live_homes "$FM_ROOT" "$STATE")
 if [ -n "$peers" ]; then

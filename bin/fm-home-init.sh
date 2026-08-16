@@ -132,7 +132,11 @@ verify_home() {
     check_fail "$ENV_FILE is missing; the instance has no way to set FM_PROJECTS_OVERRIDE"
     return 0
   fi
-  projects=$(sed -n 's/^export FM_PROJECTS_OVERRIDE=//p' "$ENV_FILE" | tail -1 | sed 's/^"//; s/"$//')
+  # Read back by SOURCING it in a subshell, because sourcing is what the operator
+  # does with it: a readback that parsed the text instead would pass on a file
+  # whose quoting gives the session a different directory than it names.
+  # shellcheck source=/dev/null
+  projects=$( . "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${FM_PROJECTS_OVERRIDE:-}" )
   if [ -z "$projects" ]; then
     check_fail "$ENV_FILE names no FM_PROJECTS_OVERRIDE"
   elif [ ! -d "$projects" ]; then
@@ -179,16 +183,20 @@ mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/config"
 # projects yet, which is a normal first run, not an error to report back.
 mkdir -p "$PROJECTS"
 
-cat > "$ENV_FILE" <<ENVFILE
+{
+  cat <<ENVFILE
 # Environment for one bare firstmate instance. Source it before starting the session:
 #   . $ENV_FILE && $FM_ROOT/bin/fm-session-start.sh
 #
 # Written by bin/fm-home-init.sh; re-run it to refresh. FM_ROOT is deliberately NOT
 # set: every script resolves the checkout from its own location, so the checkout you
 # launch from is the checkout you get, and this file cannot go stale against a move.
-export FM_HOME="$HOME_DIR"
-export FM_PROJECTS_OVERRIDE="$PROJECTS"
 ENVFILE
+  # %q, not quotes: this file is SOURCED, so a path holding \$, a backtick or
+  # \$(...) would otherwise be expanded - or run - on every session start.
+  printf 'export FM_HOME=%q\n' "$HOME_DIR"
+  printf 'export FM_PROJECTS_OVERRIDE=%q\n' "$PROJECTS"
+} > "$ENV_FILE"
 
 verify_home
 if [ "$problems" -gt 0 ]; then
@@ -198,7 +206,7 @@ fi
 
 cat <<DONE
 fm-home-init: bare home ready at $HOME_DIR
-  code:    $FM_ROOT   (shared; nothing was written into it)
+  code:    $FM_ROOT   (shared; no tracked file was touched)
   clones:  $PROJECTS  (shared)
   start:   . $ENV_FILE && $FM_ROOT/bin/fm-session-start.sh
 DONE

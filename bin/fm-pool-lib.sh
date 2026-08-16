@@ -26,25 +26,28 @@ set -u
 # fm_pool_key <project-real-path>: a stable, filesystem-safe slug for one POOL.
 #
 # TREEHOUSE DOES NOT KEY A POOL BY THE CLONE'S PATH, and an earlier version of this
-# comment said it did. Measured on this box 2026-08-16 by reading five live pool
-# directory names against their clones' `git remote get-url origin`:
+# comment said it did. Measured 2026-08-16 against treehouse v2.0.0, two ways: by
+# reading five live pool directory names on this box against their clones'
+# `git remote get-url origin`, and by making scratch clones with a redirected pool
+# root. Shape of the result, with the operator's own names generalised:
 #
-#   ~/.treehouse/OptiroqAllma-bca1f1        https://github.com/Symanty/OptiroqAllma/
-#   ~/.treehouse/optiroq-dev-9ae0cf         https://github.com/Symanty/OptiroqAllma.git
-#   ~/.treehouse/optiroq-80b6c6             https://github.com/Symanty/OptiroqAllma
-#   ~/.treehouse/optiroq-workstation-a63d47 https://github.com/webjema/optiroq-workstation
-#   ~/.treehouse/thecompany-f6ab70          https://github.com/webjema/thecompany.git
+#   ~/.treehouse/<basename>-<6 hex>   <-- first 6 hex of sha256(origin URL)
 #
-# Every one is basename(clone-dir) plus the first 6 hex of sha256(origin URL). The
-# URL is compared literally, so the same GitHub repo spelled three ways is three
-# pools (the first three rows). Two clones at DIFFERENT paths with the same
-# basename and the same URL are ONE pool - which is exactly the case the old key
-# got wrong: two homes each holding projects/OptiroqAllma addressed the single pool
-# OptiroqAllma-bca1f1 while taking two different locks (OptiroqAllma-2105885136 and
-# OptiroqAllma-2255873798), so they did not exclude each other at all and could
-# both warm it, over-provisioning by GBs. Hashing the URL instead of the path is
-# the whole fix; the dep-cache lock beside this one was always keyed by the real
-# pool directory (bin/fm-worktree-provision.sh pool_key_of).
+#   repo-e3a59a    https://host/org/repo        three spellings of ONE upstream,
+#   repo-d1d768    https://host/org/repo.git      three separate pools
+#   repo-f860c9    git@host:org/repo.git
+#   other-a9b5a3   (no origin remote)           <-- sha256 of the repo PATH
+#
+# THE URL IS COMPARED LITERALLY, so `.git`, a trailing slash and the ssh spelling
+# are three different pools, and this box really does carry three for one upstream.
+# `git remote get-url` applies the same insteadOf rewriting treehouse does, so both
+# read one URL. Two clones at DIFFERENT paths with the same basename and the same
+# URL are ONE pool - which is exactly the case the old key got wrong: two homes each
+# holding projects/<name> addressed one pool while taking two different locks keyed
+# by their own paths, so they did not exclude each other at all and could both warm
+# it, over-provisioning by GBs. Hashing the URL instead of the path is the whole fix;
+# the dep-cache lock beside this one was always keyed by the real pool directory
+# (bin/fm-worktree-provision.sh pool_key_of).
 #
 # WHAT THE LOCK ACTUALLY NEEDS is that two homes on one pool derive the SAME
 # string, not that the string equals treehouse's directory name. Reproducing that
