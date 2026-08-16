@@ -203,9 +203,9 @@ test_overrunning_check_refuses_the_push() {
   pass "a check that outruns the gate's budget refuses the push instead of passing it"
 }
 
-# The budget is a deadline, not a request. A check that declines to die on TERM
+# (i) The budget is a deadline, not a request. A check that declines to die on TERM
 # would otherwise carry the hook past the harness timeout, which cancels it and
-# lets the push through - the very failure the budget exists to prevent.
+# lets the push through - the very failure the budget exists to prevent. --------
 test_deadline_survives_a_check_that_ignores_term() {
   local dir out code=0 started elapsed
   dir=$(make_gate_project stubborn 'exit 0' 'trap "" TERM; sleep 60')
@@ -220,7 +220,7 @@ test_deadline_survives_a_check_that_ignores_term() {
   pass "a check that ignores TERM is killed at the deadline rather than allowed to outlast it"
 }
 
-# (i) The refusal above must not have cost the ordinary verdict. --------------
+# (j) The refusals above must not have cost the ordinary verdicts. ------------
 test_failing_check_still_blocks() {
   local dir out code=0
   dir=$(make_gate_project failing 'exit 0' 'echo "1 test failed"; exit 1')
