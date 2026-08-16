@@ -315,6 +315,19 @@ for status in "$STATE"/*.status; do
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
+subsection "Findings held by an unreachable tracker (state/findings/)"
+HELD_FINDINGS=0
+for rec in "$STATE"/findings/*.json; do
+  [ -f "$rec" ] || continue
+  grep -q '"state": *"pending"' "$rec" || continue
+  HELD_FINDINGS=$((HELD_FINDINGS + 1))
+done
+if [ "$HELD_FINDINGS" -gt 0 ]; then
+  printf '%s finding(s) filed nowhere yet; re-file with: bin/fm-file-finding.sh flush\n' "$HELD_FINDINGS"
+else
+  printf '(none)\n'
+fi
+
 subsection "AFK"
 if [ -e "$STATE/.afk" ]; then
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'

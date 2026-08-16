@@ -66,6 +66,14 @@
 # via bin/fm-graph-lib.sh), that block also names the graph project, states the
 # HEAD-pinned staleness boundary, and forbids the crew re-indexing; when it is not
 # indexed, or the graph is unavailable, the guidance is absent rather than untrue.
+# EVERY scaffold - ship, scout, and secondmate charter - carries the found-it-didn't-fix
+# block: a finding that does not stop the crew finishing is filed as a tracked task with
+# bin/fm-file-finding.sh and the crew keeps going, and a finding that DOES stop it is
+# raised instead, never filed and abandoned. AGENTS.md section 5 owns the rule and the
+# script's header owns the mechanics. It is built once by findings_block() and
+# interpolated into all three, differing only in the command and in where the crew lists
+# what it filed. Naming a command here is safe where naming a review command was not:
+# this one is firstmate's own script, not something the harness may or may not expose.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path,
 # and a quality-floor step so a project without Claude Code quality hooks gets them
@@ -140,6 +148,30 @@ Keep your own working context lean so a long task never crowds out the work itse
 EOF
 )
 
+# Shared found-it-didn't-fix block, in EVERY mode. A scout that trips over three defects
+# while investigating a fourth is the highest-value case for it, so it is not a ship-only
+# clause. AGENTS.md section 5 owns the rule and bin/fm-file-finding.sh owns the mechanics;
+# this is the crew-facing statement of the same contract, because a crewmate never reads
+# firstmate's AGENTS.md. Two parameters only: the command, and where the crew lists what
+# it filed.
+# Unlike the review gate, this DOES name a command - the reasoning there was that firstmate
+# cannot know which commands a HARNESS exposes. This one is firstmate's own script, always
+# present, exactly like fm-hooks-install.sh and fm-ensure-agents-md.sh below.
+findings_block() {  # <command-prefix> <where-to-list-them>
+  local cmd=$1 list=$2
+  cat <<EOF
+# Findings you did not fix
+You will notice defects and risks that are not part of this task. A report is not a queue: a finding you only write up is read once and never becomes work.
+**One question decides what happens, and it is the only one: does this stop you finishing THIS task?**
+- **No** - file it as a tracked task and keep going. Do not fix it, do not widen your diff, do not stop to ask whether it is worth filing:
+  \`$cmd --blocking no --title "<what is wrong>" --where "<file:line>" --why "<why you believe it is wrong>" --expected "<what you expected instead>"\`
+  File it the moment you find it rather than batching them to the end, because a compaction or a crash between finding and filing is exactly how findings are lost. The script picks the right tracker, refuses to file the same finding twice, and holds it locally when a tracker is unreachable - so it never fails your task and never drops the finding. Add \`--priority 0-4\` when the severity is worth recording.
+- **Yes** - it blocks you, and filing is not a way past it. Fix it only if the scope is small and clearly adjacent, and say that you did; otherwise append \`blocked:\` or \`needs-decision:\` under the Rules above and stop. The script refuses \`--blocking yes\` for exactly this reason.
+Severity, whose code it is, and whether it feels worth someone's time set the filed task's priority; they never decide whether to file.
+$list
+EOF
+}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -203,6 +235,8 @@ This is also how you return the answer to a marked from-firstmate request above.
 When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved: {how it was decided or unblocked}\` (keyed with \`[key=<slug>]\` if you opened it with one) so it is durably closed instead of resurfacing behind later unrelated events.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
+$(findings_block 'bin/fm-file-finding.sh' 'Name every finding you filed when you report the outcome, so the main firstmate can relay it; brief your own crewmates with this same rule.')
+
 # Definition of done
 You are persistent by default. Do not exit just because your queue is empty.
 On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
@@ -219,6 +253,12 @@ exit 0
 fi
 
 REPO=${POS[1]}
+
+# A crew's shell does not inherit FM_HOME (bin/fm-spawn.sh forwards credentials, not
+# firstmate's own env), so the home is pinned into the command the brief names; without
+# it a crew would file into whichever home owns bin/, which is the wrong one for a
+# secondmate's crew.
+CREW_FILE_CMD="FM_HOME=$(shell_quote "$FM_HOME") $(shell_quote "$FM_ROOT/bin/fm-file-finding.sh") --task $ID"
 
 # Graph guidance, appended to the context-discipline block for ship and scout
 # briefs. TRUTHFUL OR ABSENT: emitted only when this project is actually in the
@@ -291,6 +331,8 @@ $CONTEXT_DISCIPLINE
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
    When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
+
+$(findings_block "$CREW_FILE_CMD" 'List every finding you filed in your report, with its filed-task reference, so the report says what became work and what is still only a recommendation. A defect you tripped over while investigating something else is the case this rule exists for.')
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -416,6 +458,8 @@ $RULE1
 6. If a decision belongs to a human (product choices, destructive actions, a conflict with the Direction above),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
    When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
+
+$(findings_block "$CREW_FILE_CMD" 'List every finding you filed, with its filed-task reference, in the summary you report at the end and in the PR body if you open one.')
 
 # Quality floor
 The project's Claude Code hooks are the mechanical floor: they enforce secret-scanning, lint, typecheck, and tests whether or not you cooperate.

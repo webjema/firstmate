@@ -118,6 +118,23 @@ A workspace reset runs `git clean -fd` with no `-x` (`bin/fm-pool-warm.sh`), so 
 A crew that lands in a bare slot then honestly reports a credential absent that the box already holds.
 Seeding at spawn makes every slot correct the next time it is used, instead of a one-off sync that re-rots on the next warm.
 
+## Product tracker for filed findings (config/product-tracker)
+
+`config/product-tracker` (local, gitignored) names the board `bin/fm-file-finding.sh` files product-scoped findings into, one `key=value` per line: `project=<gid>` and `section=<gid>`.
+`FM_ASANA_PROJECT` and `FM_ASANA_SECTION` override the file per key, and `FM_ASANA_API` overrides the API base for tests.
+
+```
+project=1200000000000001
+section=1200000000000002
+```
+
+There is deliberately no built-in default.
+Which tracker a fleet files into is a decision only its user can make, and a shipped default would point every other install - and every second home on this box - at a board it does not own.
+With no project configured, a product finding is held locally with the reason `no product tracker configured` rather than filed anywhere, and `bin/fm-file-finding.sh flush` re-files everything held once the file exists.
+That reason is worded differently from an unreachable tracker on purpose: only one of the two clears itself by waiting.
+With a project but no section, the card is filed into the project's default place and the run warns; the section should be a triage one, so that a filed finding is read by a human before it becomes authorized work.
+Findings scoped to firstmate's own repo never touch this board at all - they go to this home's `data/backlog.md`, held.
+
 ## User preferences (data/user.md)
 
 Personal preferences for one user's fleet live locally in `data/user.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.
@@ -315,6 +332,12 @@ FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=30       # min mtime age before fm-fleet
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane signatures, shared by the watcher, fm-crew-state's pane fallback, and the tmux helper
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after ghost and border stripping
 FM_COMPOSER_GHOST_LUMA_MAX=128   # max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost)
+# filed findings (bin/fm-file-finding.sh); the target itself is config/product-tracker above
+FM_ASANA_PROJECT=       # product board gid override; unset means config/product-tracker's project=, and with neither the finding is held locally instead of filed
+FM_ASANA_SECTION=       # triage section gid override; unset means config/product-tracker's section=, and with neither the card is filed into the project's default place
+FM_ASANA_API=https://app.asana.com/api/1.0   # API base; overridden only by tests, which must never reach the real API
+FM_FINDING_SCAN_PAGES=20    # pages of 100 open tasks scanned for the dedupe trailer before the scan reports "cannot verify" and defers rather than risk a duplicate
+FM_FINDING_HTTP_TIMEOUT=20  # seconds per tracker HTTP call; a slow tracker defers the finding, it never fails the crew's task
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
