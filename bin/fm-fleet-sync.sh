@@ -22,6 +22,9 @@
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
 # fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
+# Each clone is synced under a per-clone write lock, so two firstmate instances
+# sharing one projects/ take turns instead of one losing the race and leaving its
+# view stale; bin/fm-peer-lib.sh owns the lock.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
@@ -38,6 +41,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-peer-lib.sh
+. "$SCRIPT_DIR/fm-peer-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
 
@@ -306,14 +311,30 @@ report_stuck() {
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
 }
 
+# One writer at a time per clone. Under the shared-projects/ arrangement this
+# clone may be the same directory a peer instance is syncing right now, and a lost
+# race leaves THIS home's clone stale - the loser must wait and then sync, not give
+# up. bin/fm-peer-lib.sh owns the lock and why it is for liveness rather than
+# integrity. The whole body runs inside it, so no early return can leak it.
 sync_project() {
   PROJ=$1
   label=$(project_label)
-
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
     return 0
   fi
+  local rc=0
+  fm_clone_lock_run "$PROJ" sync_project_locked "$PROJ" || rc=$?
+  if [ "$rc" -eq 75 ]; then
+    echo "$label: skipped: another firstmate instance has held this clone for over $(fm_clone_lock_wait_secs)s"
+  fi
+  return 0
+}
+
+sync_project_locked() {
+  PROJ=$1
+  label=$(project_label)
+
   if ! git -C "$PROJ" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "$label: skipped: not a git repo"
     return 0

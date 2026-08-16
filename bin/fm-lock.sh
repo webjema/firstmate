@@ -13,6 +13,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
 mkdir -p "$STATE"
+# shellcheck source=bin/fm-peer-lib.sh
+. "$SCRIPT_DIR/fm-peer-lib.sh"
 
 # Known harness command names; extend when a new adapter is verified.
 HARNESS_RE='claude|codex|opencode|grok|^pi$'
@@ -58,4 +60,8 @@ if [ -f "$LOCK" ]; then
   fi
 fi
 echo "$me" > "$LOCK"
+# Announce this session to its peers. Only bin/fm-update.sh reads the registry,
+# and only to refuse swapping the shared checkout under a peer mid-turn; fm-peer-lib.sh
+# owns why it has to be announced rather than discovered.
+fm_peer_register "$FM_HOME" "$STATE"
 echo "lock acquired: harness pid $me"

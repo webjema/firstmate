@@ -196,11 +196,12 @@ clear_blocked() {  # <project>
   rm -f "$STATE/.pool-warm-blocked.$(fm_pool_key "$1")" 2>/dev/null || true
 }
 
-# warm_lock_dir <project-real-path>: the POOL-scoped lock. Keyed by the project's
-# physical path (what treehouse itself keys a pool by) and held under the shared
-# treehouse root, so every firstmate home - primary and secondmates alike - that
-# points at the same clone contends for the SAME lock. A home-scoped lock would
-# let two homes warm the same pool at once and over-provision it by GBs.
+# warm_lock_dir <project-real-path>: the POOL-scoped lock, held under the shared
+# treehouse root so every firstmate home - primary and secondmates alike - that
+# points at the same pool contends for the SAME lock. A home-scoped lock would let
+# two homes warm one pool at once and over-provision it by GBs.
+# fm-pool-lib.sh's fm_pool_key owns what "the same pool" means and how it is
+# measured; do not restate it here.
 warm_lock_dir() {  # <project-real-path>
   printf '%s/.fm-warm-locks/%s' "$TREEHOUSE_ROOT" "$(fm_pool_key "$1")"
 }

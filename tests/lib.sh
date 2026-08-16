@@ -211,3 +211,14 @@ assert_absent() {
 assert_present() {
   [ -e "$1" ] || fail "$2"
 }
+
+# --- shared-peer cache isolation --------------------------------------------
+#
+# bin/fm-peer-lib.sh keeps the per-clone write lock and the live-session registry
+# in ONE per-user directory, because their whole job is to be shared between
+# instances - so its default is the operator's real ~/.cache/firstmate, and any
+# suite that runs fleet sync, the session lock or the updater would write there.
+# Redirected here, once, rather than in each suite: a test that has to REMEMBER to
+# isolate itself is a test that will forget. Set FM_PEER_CACHE_DIR before sourcing
+# to point a suite at a directory it wants to inspect.
+export FM_PEER_CACHE_DIR="${FM_PEER_CACHE_DIR:-$(fm_test_tmproot fm-peer-cache)}"

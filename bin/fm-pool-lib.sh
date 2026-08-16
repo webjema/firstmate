@@ -24,13 +24,56 @@
 set -u
 
 # fm_pool_key <project-real-path>: a stable, filesystem-safe slug for one POOL.
-# Keyed by the project's physical path because that is what treehouse itself keys
-# a pool by - so every firstmate home pointing at the same clone derives the same
-# key, which is what makes the warm lock pool-scoped rather than home-scoped.
+#
+# TREEHOUSE DOES NOT KEY A POOL BY THE CLONE'S PATH, and an earlier version of this
+# comment said it did. Measured on this box 2026-08-16 by reading five live pool
+# directory names against their clones' `git remote get-url origin`:
+#
+#   ~/.treehouse/OptiroqAllma-bca1f1        https://github.com/Symanty/OptiroqAllma/
+#   ~/.treehouse/optiroq-dev-9ae0cf         https://github.com/Symanty/OptiroqAllma.git
+#   ~/.treehouse/optiroq-80b6c6             https://github.com/Symanty/OptiroqAllma
+#   ~/.treehouse/optiroq-workstation-a63d47 https://github.com/webjema/optiroq-workstation
+#   ~/.treehouse/thecompany-f6ab70          https://github.com/webjema/thecompany.git
+#
+# Every one is basename(clone-dir) plus the first 6 hex of sha256(origin URL). The
+# URL is compared literally, so the same GitHub repo spelled three ways is three
+# pools (the first three rows). Two clones at DIFFERENT paths with the same
+# basename and the same URL are ONE pool - which is exactly the case the old key
+# got wrong: two homes each holding projects/OptiroqAllma addressed the single pool
+# OptiroqAllma-bca1f1 while taking two different locks (OptiroqAllma-2105885136 and
+# OptiroqAllma-2255873798), so they did not exclude each other at all and could
+# both warm it, over-provisioning by GBs. Hashing the URL instead of the path is
+# the whole fix; the dep-cache lock beside this one was always keyed by the real
+# pool directory (bin/fm-worktree-provision.sh pool_key_of).
+#
+# WHAT THE LOCK ACTUALLY NEEDS is that two homes on one pool derive the SAME
+# string, not that the string equals treehouse's directory name. Reproducing that
+# name is what makes the lock legible next to the pool it guards; if a future
+# treehouse renamed its pools, both homes would still agree and the lock would
+# still hold.
+#
+# A clone with no origin remote falls back to the physical path, which is what
+# this function always did: without a remote there is no shared identity to key
+# by, and per-path is then the honest answer.
 fm_pool_key() {  # <project-real-path>
-  local path=$1 hash
-  hash=$(printf '%s' "$path" | cksum | awk '{print $1}')
+  local path=$1 url hash
+  url=$(git -C "$path" remote get-url origin 2>/dev/null || true)
+  if [ -n "$url" ]; then
+    hash=$(printf '%s' "$url" | fm_pool_sha256 | cut -c1-6)
+  fi
+  [ -n "${hash:-}" ] || hash=$(printf '%s' "$path" | cksum | awk '{print $1}')
   printf '%s-%s' "$(basename "$path")" "$hash"
+}
+
+# fm_pool_sha256: hex sha256 of stdin. Mirrors bin/fm-session-start.sh's ladder
+# because stock macOS ships `shasum` and not `sha256sum`; prints nothing when
+# neither exists, which sends fm_pool_key to its path fallback.
+fm_pool_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  fi
 }
 
 # fm_pool_read <project-real-path>: read the pool once. Returns 1 when treehouse
