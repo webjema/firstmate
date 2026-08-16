@@ -19,17 +19,19 @@
 # The starter bundle is deliberately conservative and auto-detected from
 # package.json scripts. It is a floor to tune, not a finished policy.
 #
-# THE GATE MUST REACH A VERDICT INSIDE ITS OWN BUDGET. Claude Code cancels a
-# hook that outruns the timeout in settings.json and then runs the tool anyway,
-# so an overrun is read as consent: measured on one project, seven pushes
-# completed after their gate was cancelled without concluding. Raising the
-# ceiling only moves it. So the emitted gate watches its own clock: GATE_BUDGET
-# below is the deadline it enforces on itself, GATE_HOOK_TIMEOUT is what
-# settings.json allows it, and the gap between them is what turns a slow check
-# into a named refusal instead of a silent pass. The price is real and falls on
-# the slowest pushes - a check against a cold cache is refused rather than
-# allowed - and the remedy is the one crews already follow: run the check once
-# by hand, which warms the cache, then push.
+# THE GATE MUST REACH A VERDICT INSIDE ITS OWN BUDGET. A PreToolUse hook that
+# outruns the timeout in settings.json is cancelled, and a cancelled hook does
+# not block: the tool call carries on through the normal permission flow. The
+# harness does not read the cancellation as approval - it simply never hears a
+# verdict - but the push proceeds ungated either way, and that is what was
+# measured on one project: seven pushes completed after their gate was cancelled
+# without concluding. Raising the ceiling only moves it. So the emitted gate
+# watches its own clock: GATE_BUDGET below is the deadline it enforces on
+# itself, GATE_HOOK_TIMEOUT is what settings.json allows it, and the gap between
+# them is what turns a slow check into a named refusal instead of a silent pass.
+# The price is real and falls on the slowest pushes - a check against a cold
+# cache is refused rather than allowed - and the remedy is the one crews already
+# follow: run the check once by hand, which warms the cache, then push.
 # Usage: fm-hooks-install.sh [repo-or-worktree-dir]
 #        fm-hooks-install.sh --check [repo-or-worktree-dir]   report only, never write
 set -eu
@@ -167,8 +169,8 @@ fi
 EOF
   if [ -n "$TYPECHECK_CMD" ] || [ -n "$TEST_CMD" ]; then
     # The self-imposed deadline. A check that outruns it is refused BY NAME,
-    # because the alternative - being cancelled by the harness - lets the push
-    # through with no verdict at all. The watchdog is written in bash rather
+    # because the alternative - being cancelled by the harness - leaves the push
+    # unblocked with no verdict at all. The watchdog is written in bash rather
     # than delegated to timeout(1): where that binary is absent the hook would
     # exit 127, and only exit 2 blocks a tool call, so the missing binary would
     # itself be a silent fail-open.
@@ -192,8 +194,8 @@ gate_refuse() {
 # TERM then KILL, because the budget has to be a deadline and not a request. A
 # check that traps TERM and cleans up slowly, or ignores it, or is stopped
 # rather than killed, would otherwise keep this hook running past the harness
-# timeout - which cancels the hook and lets the push through, the exact failure
-# the budget exists to prevent. GATE_GRACE is the only slack it gets.
+# timeout - which cancels the hook and leaves the push unblocked, the exact
+# failure the budget exists to prevent. GATE_GRACE is the only slack it gets.
 gate_run() {
   local label=$1 left status check_pid watchdog_pid
   shift

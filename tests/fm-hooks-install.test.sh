@@ -19,10 +19,11 @@
 #   (i) a check that ignores TERM is ended anyway, inside the budget
 #   (j) a check that simply fails still blocks
 #
-# (g) through (j) exist because a cancelled hook is worse than an absent one:
-# Claude Code runs the tool anyway when a hook outruns its timeout, so an
-# overrun that is not refused first is read as consent. (h) and (i) drive the
-# emitted hook end to end, with the deadline shrunk to keep the test quick.
+# (g) through (j) exist because a cancelled hook is worse than an absent one: a
+# hook that outruns its timeout is cancelled, and a cancelled hook does not
+# block, so the push carries on ungated unless the gate refused first. (h) and
+# (i) drive the emitted hook end to end, with the deadline shrunk to keep the
+# test quick.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -205,7 +206,7 @@ test_overrunning_check_refuses_the_push() {
 
 # (i) The budget is a deadline, not a request. A check that declines to die on TERM
 # would otherwise carry the hook past the harness timeout, which cancels it and
-# lets the push through - the very failure the budget exists to prevent. --------
+# leaves the push unblocked - the very failure the budget exists to prevent. ----
 test_deadline_survives_a_check_that_ignores_term() {
   local dir out code=0 started elapsed
   dir=$(make_gate_project stubborn 'exit 0' 'trap "" TERM; sleep 60')
