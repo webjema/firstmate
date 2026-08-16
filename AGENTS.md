@@ -36,6 +36,7 @@ Never add an agent name as co-author.
 `FM_HOME` selects the operational home for a firstmate instance; unset means this repo root.
 Scripts always use their own `bin/`, but operational dirs come from `$FM_HOME`.
 Each secondmate gets its own persistent `FM_HOME`, isolating its state, backlog, projects, and session lock.
+When the user wants another instance on this host, several can share one checkout and one `projects/`, each with a bare `FM_HOME` from `bin/fm-home-init.sh`; `docs/configuration.md` owns that arrangement.
 
 - `data/` - personal fleet records, gitignored. `backlog.md`, `user.md`, `learnings.md`, `projects.md`, `secondmates.md`, `directions/<project>.md`, and per-task `<id>/brief.md` and `<id>/report.md`.
 - `state/` - volatile runtime signals, gitignored. Per-task `<id>.status` (an append-only wake-EVENT log, never current-state truth) and `<id>.meta`, plus watcher and lock internals you never touch by hand.

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Behavior tests for per-task GOTMPDIR support (fm-gotmp).
 #
-# fm-spawn gives each task a temp root /tmp/fm-<id>/ with Go's build temp nested at
+# fm-spawn gives each task a temp root under /tmp with Go's build temp nested at
 # gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
 # meta. fm-teardown reads tasktmp= and removes the whole root on cleanup.
+# bin/fm-peer-lib.sh owns the root's name; nothing here depends on its spelling.
 #
 # These tests exercise behavior directly: fm-teardown is run as a subprocess against a
 # fake FM_HOME/FM_ROOT (built so the real script resolves into it), with stub helper scripts.
@@ -58,6 +59,8 @@ make_fake_root() {
   # fm-taskstate-lib.sh: teardown sources it for the shared crew-liveness state
   # clearing used by the PR-open release path.
   ln -s "$ROOT/bin/fm-taskstate-lib.sh" "$fake/bin/fm-taskstate-lib.sh"
+  # fm-peer-lib.sh: teardown sources it to name this home's per-task temp root.
+  ln -s "$ROOT/bin/fm-peer-lib.sh" "$fake/bin/fm-peer-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash

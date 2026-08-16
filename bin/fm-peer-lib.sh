@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-peer-lib.sh - what one firstmate instance knows about the OTHER instances
-# sharing this host. Sourced by bin/fm-fleet-sync.sh, bin/fm-update.sh and
-# bin/fm-lock.sh.
+# sharing this host. Sourced by bin/fm-fleet-sync.sh, bin/fm-update.sh,
+# bin/fm-lock.sh, bin/fm-spawn.sh and bin/fm-teardown.sh.
 #
 # It exists for the supported arrangement in docs/configuration.md: one checkout,
 # one projects/ clone per repository and one worktree pool per host, with each
@@ -40,7 +40,13 @@
 #    bin/fm-lock.sh - which stays the one owner of "is this harness pid alive".
 #    A stale entry is therefore inert, and pruned the next time it is read.
 #
-# Knobs: FM_PEER_CACHE_DIR (both), FM_CLONE_LOCK_WAIT_SECS (the lock).
+# 3. THE PER-TASK TEMP ROOT'S NAME, which has to carry the home because /tmp does
+#    not. Task ids are short kebab slugs, so two instances both running a task
+#    called "fix-login" is ordinary, not a coincidence - and it made them share one
+#    0700 directory holding a forwarded-credential file, with either teardown
+#    deleting the other's.
+#
+# Knobs: FM_PEER_CACHE_DIR (1 and 2), FM_CLONE_LOCK_WAIT_SECS (the lock).
 # docs/configuration.md owns them.
 
 # fm_peer_cache_dir: the shared, per-user runtime root for both mechanisms.
@@ -138,4 +144,25 @@ fm_peer_live_homes() {  # <fm-root> <my-state-dir>
       *) rm -f "$entry" 2>/dev/null || true ;;
     esac
   done
+}
+
+# --- 3. the per-task temp root ----------------------------------------------
+
+# fm_task_tmp_root <home> <task-id>: the per-task temp root under /tmp, scoped to
+# the instance that owns the task. bin/fm-spawn.sh creates it and records it as
+# meta `tasktmp=`; bin/fm-teardown.sh removes it.
+#
+# The home is resolved physically, so an instance that spells its own FM_HOME two
+# ways across a spawn and a teardown still names one directory.
+#
+# It stays FLAT and keeps the `fm-` prefix on purpose: bin/fm-scratch-reap.sh
+# reclaims orphans with a host-wide `/tmp/fm-*` glob at depth 1, and a per-home
+# subdirectory would hide every orphan from it. That sweep stays host-wide and
+# un-scoped for the same reason it exists - the orphans it reclaims are the ones
+# whose owning home may be gone, so mtime, not ownership, is its safety property,
+# and narrowing it to this home would reclaim strictly less.
+fm_task_tmp_root() {  # <home> <task-id>
+  local home=$1 id=$2 real
+  real=$(cd "$home" 2>/dev/null && pwd -P) || real=$home
+  printf '/tmp/fm-%s-%s' "$(fm_peer_slug "$real")" "$id"
 }
