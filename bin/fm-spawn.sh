@@ -104,6 +104,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-provision-lib.sh"
 # shellcheck source=bin/fm-context-lib.sh
 . "$SCRIPT_DIR/fm-context-lib.sh"
+# shellcheck source=bin/fm-peer-lib.sh
+. "$SCRIPT_DIR/fm-peer-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -632,9 +634,9 @@ if [ "$KIND" != secondmate ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
+# Per-task temp root with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
+# Nested (not a bare <root>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 # The root is created 0700, because forward_crew_credentials puts a credential file
@@ -642,7 +644,8 @@ fi
 # component (SC2174) and would leave the root itself at the inherited mode. A
 # pre-existing root (a respawn's, or another user's) keeps whatever mode it has, so the
 # credential file's own O_EXCL create stays the guarantee rather than this.
-TASK_TMP="/tmp/fm-$ID"
+# bin/fm-peer-lib.sh owns the name and why it carries this home.
+TASK_TMP=$(fm_task_tmp_root "$FM_HOME" "$ID")
 (umask 077; mkdir -p "$TASK_TMP")
 mkdir -p "$TASK_TMP/gotmp"
 
@@ -891,7 +894,8 @@ CREW_ENV_VARS=(
 CREW_ENV_FILE="$TASK_TMP/crew-env.sh"
 forward_crew_credentials() {  # <target>
   local target=$1 var names=""
-  # The path is predictable (/tmp/fm-<id>/crew-env.sh from a short kebab id), and
+  # The path is predictable (crew-env.sh under a temp root named from this home and
+  # a short kebab task id - scoping it to the home is not a secret), and
   # `mkdir -p` succeeds silently on a directory somebody else already made, so on a
   # multi-user box another local user could plant a symlink there and a plain `>`
   # would follow it and write the credential wherever it points. So: `rm -f` first,

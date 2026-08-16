@@ -156,7 +156,32 @@ When it is unset, most scripts use the repo root as the home; when it is set, sc
 `FM_ROOT_OVERRIDE` overrides the firstmate repo root used by scripts, including the primary checkout watched by the worktree-tangle guard.
 When `FM_HOME` is unset, it also behaves as the old whole-root override.
 `bin/fm-send.sh` is intentionally stricter than that general fallback: it requires `FM_HOME` to be set before resolving a target, so operator steers cannot silently resolve against the wrong home.
-`FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_PROJECTS_OVERRIDE`, and `FM_CONFIG_OVERRIDE` override individual operational directories for tests and specialized harness setup.
+`FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_PROJECTS_OVERRIDE`, and `FM_CONFIG_OVERRIDE` override individual operational directories.
+`FM_PROJECTS_OVERRIDE` additionally carries the supported shared-instance arrangement below; the other three are for tests and specialized harness setup.
+
+## Shared instances (one checkout, one projects/, one pool per host)
+
+Several firstmate instances can run on one host sharing the expensive things and keeping private only what must be.
+They share one checkout, one clone per repository under a single `projects/`, and one treehouse worktree pool per repository.
+Each instance keeps its own bare `$FM_HOME`, which is `state/`, `data/`, `config/` and nothing else.
+
+Create one with `bin/fm-home-init.sh <home-dir> [--projects <dir>]`, and re-check an existing one with `--verify`.
+It writes `<home>/env.sh`, which the operator sources before starting that instance's session; that file is how `FM_PROJECTS_OVERRIDE` reaches an instance whose home holds no code to set it.
+The home stays bare on purpose, and the script's header owns why that is load-bearing rather than tidy.
+
+Sharing turns three previously private things into contended ones, all owned by [`bin/fm-peer-lib.sh`](../bin/fm-peer-lib.sh): a per-clone write lock so two instances syncing one clone take turns instead of one going stale, a live-peer session registry so `bin/fm-update.sh` refuses to swap `bin/` beneath a peer that is mid-turn, and a per-task temp root named from the home so two instances running a task with the same id do not share one directory or delete each other's.
+
+The worktree pool is shared already, and `bin/fm-pool-lib.sh` derives the warm lock from the same identity treehouse keys the pool by: the clone's basename plus a hash of its origin URL.
+That URL is matched literally, so `https://host/org/repo`, the same URL with `.git`, the same URL with a trailing slash, and the `git@` spelling are four different pools.
+Clone every instance's copy of a repository with the same URL spelling and into the same directory name, or they will not share a pool and will not contend for one warm lock.
+
+`FM_CLONE_LOCK_WAIT_SECS` bounds how long an instance waits for the per-clone write lock, defaulting to 60; on expiry the caller reports and skips rather than hanging.
+A full-fleet sync tries every clone without waiting first, so a clone a peer is holding never delays the rest of the sweep.
+`FM_PEER_CACHE_DIR` relocates the lock and registry directory, which defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/firstmate` and is per-user rather than per-home because its whole job is to be shared.
+Nothing is ever written inside a clone.
+
+The tmux window namespace is not scoped by home: every instance's task windows are named `fm-<id>` in the same namespace.
+Give tasks distinct ids across instances, or address a window through its session.
 
 ## Harness support
 
