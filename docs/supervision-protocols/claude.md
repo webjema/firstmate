@@ -10,12 +10,12 @@ When this session owns supervision and away mode is not active:
    The background task stays live across all of them; the arm exits only when it has something you must act on.
    `watcher: standby - supervision held by arm pid=<pid>` means another arm already owns supervision for this home: that task parks silently and takes over only if that arm ends, so leave it running and start no other.
 6. A background arm task that ENDS without a wake line is NOT a wake and NOT the end of supervision.
-   A bare "completed", a "was stopped", exit code 0 with no output, or any line that is not `signal:`, `stale:`, `check:`, `heartbeat`, `watcher: wakes queued (<n>) - drain them`, or `watcher: FAILED - ...`: verify with `bin/fm-supervision-live.sh` and do NOT arm again.
+   A bare "completed", a "was stopped", exit code 0 with no output, or any line that is not `signal:`, `stale:`, `check:`, `heartbeat`, `disk-guard`, `watcher: wakes queued (<n>) - drain them`, or `watcher: FAILED - ...`: verify with `bin/fm-supervision-live.sh` and do NOT arm again.
    Arm again only when it answers `watcher: DOWN`.
    When it answers `watcher: live ...`, another arm is supervising and a second one is the notification loop, not the repair.
 7. Treat `watcher: FAILED - ...` as an alarm and repair it before ending the turn.
    It is the only failure the arm reports, and it is bounded: `no live watcher with a fresh beacon` means none could be confirmed, and `watcher will not stay up` means one kept dying with nothing to report until the churn budget ran out (`state/.watch-arm.log` has the per-relaunch detail).
-8. When the background task completes with `signal:`, `stale:`, `check:`, `heartbeat`, or `watcher: wakes queued (<n>) - drain them`, drain queued wakes and handle them, then start exactly one fresh background task.
+8. When the background task completes with `signal:`, `stale:`, `check:`, `heartbeat`, `disk-guard`, or `watcher: wakes queued (<n>) - drain them`, drain queued wakes and handle them, then start exactly one fresh background task.
    When handling a wake ends the turn with a user-facing message or a decision prompt, re-arm BEFORE that message or prompt, not after, so a watcher stays live through the pause instead of leaving a blind gap; the guard only tolerates a re-arm already in flight, never one you still intend to start after the turn ends.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records or a real watcher reason line.
 9. If a forced restart is genuinely needed, run `bin/fm-watch-arm.sh --restart` through the same Claude background task mechanism.

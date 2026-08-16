@@ -2,7 +2,7 @@
 # tests/fm-wake-queue.test.sh - wake-queue losslessness (the queue safety matrix):
 # concurrent append/drain, signal catch-up while no watcher runs, stale/check
 # enqueue-before-suppressor ordering, atomic double-drain, duplicate collapse,
-# and the drain-time watcher-liveness assertion.
+# the drain-time watcher-liveness assertion, and the disk-guard kind's round trip.
 # Nothing is lost and nothing is double-consumed. General watcher/lock liveness
 # lives in fm-watcher-lock.test.sh; daemon classification/injection in
 # fm-daemon.test.sh.
@@ -16,6 +16,36 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
+
+# The wake vocabulary was four hand-written copies, and the fourth kind added
+# (disk-guard) reached exactly one of them. This is the check that keeps the fifth
+# from repeating it: every kind must be accepted by BOTH call shapes and by the
+# queue's own gate, and no consumer may re-spell the alternation.
+test_wake_vocabulary_has_exactly_one_owner() {
+  local kind copies
+  # shellcheck source=bin/fm-wake-kind-lib.sh
+  . "$ROOT/bin/fm-wake-kind-lib.sh"
+  for kind in $FM_WAKE_KINDS; do
+    # The bare shape (bin/fm-watch.sh's wake() echoes its reason verbatim, and the
+    # kinds with no target are emitted with no colon at all) and the payload shape.
+    fm_is_wake_reason "$kind" || fail "bare wake kind '$kind' is not recognised as a wake"
+    fm_is_wake_reason "$kind: some payload" || fail "wake kind '$kind:' is not recognised as a wake"
+    fm_wake_kind_valid "$kind" || fail "wake kind '$kind' is rejected by the durable queue's gate"
+    printf '%s\n' "$kind" | grep -Eq "$FM_WAKE_LINE_RE" \
+      || fail "wake kind '$kind' is missed by the file-scanning regex the arm and checkpoint use"
+  done
+  # A status line the watcher prints on a singleton collision must stay a non-wake:
+  # the daemon idles it, and misreading it floods the escalation buffer.
+  fm_is_wake_reason "watcher: already running" && fail "a watcher status line is classified as a wake"
+  # Every consumer of the vocabulary must ask the owner rather than keep a copy.
+  copies=$(grep -rlE '\(signal:|signal:\*\|' "$ROOT"/bin/*.sh || true)
+  [ -z "$copies" ] || fail "the wake alternation is re-spelled outside its owner: $copies"
+  for kind in fm-watch-arm.sh fm-watch-checkpoint.sh fm-supervise-daemon.sh; do
+    grep -qE 'FM_WAKE_LINE_RE|fm_is_wake_reason' "$ROOT/bin/$kind" \
+      || fail "bin/$kind does not use bin/fm-wake-kind-lib.sh's predicate"
+  done
+  pass "every wake kind is served by one owner, and no consumer keeps a second copy"
+}
 
 test_concurrent_append_and_drain() {
   local dir state out1 out2 all pids i pid count unique malformed
@@ -246,6 +276,66 @@ test_drain_asserts_watcher_liveness() {
   pass "drain asserts watcher liveness: warns on a lapse, down for a fresh-beacon orphan, silent for a live lock"
 }
 
+# A disk-guard wake is a real wake kind: AGENTS.md section 7 has firstmate relay it
+# to the captain verbatim, because only they may drop a crew's lease. Its evidence -
+# which worktrees are held and what they would reclaim - exists ONLY in the queued
+# payload; the watcher's stdout fast-path prints the bare word "disk-guard". So a
+# disk-guard record the queue rejects is the whole warning lost the moment the arm
+# is reaped, which is the exact failure the durable queue exists to prevent.
+test_disk_guard_wake_is_queued() {
+  local dir state fakebin fakeroot out drain_out
+  dir=$(make_case disk-guard)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  fakeroot="$dir/fakeroot"
+  out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  # The watcher runs $FM_ROOT/bin/fm-disk-guard.sh, so a fake root is the whole mock.
+  mkdir -p "$fakeroot/bin"
+  cat > "$fakeroot/bin/fm-disk-guard.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'tier: low - 12G reclaimable\n'
+printf '2 worktrees are LEASED and were not touched: alpha-a1, beta-b2\n'
+printf 'a lease is a crew claim; release them yourself with: treehouse destroy alpha-a1 --yes;\n'
+SH
+  chmod +x "$fakeroot/bin/fm-disk-guard.sh"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fakeroot" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_DISK_GUARD_INTERVAL=0 "$WATCH" > "$out" &
+  wait_for_exit "$!" 60 || fail "watcher did not exit for the disk-guard holdback"
+  ! grep -F 'wake-queue write FAILED' "$out" >/dev/null \
+    || fail "the disk-guard wake was REJECTED by the queue: $(cat "$out")"
+  grep -Fx 'disk-guard' "$out" >/dev/null || fail "watcher did not print the disk-guard wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after disk-guard wake failed"
+  grep "$(printf '\tdisk-guard\tdisk-guard\t')" "$drain_out" >/dev/null \
+    || fail "disk-guard wake was not queued; it survives only on stdout and dies with the arm"
+  grep -F 'LEASED and were not touched' "$drain_out" >/dev/null \
+    || fail "the drained disk-guard record lost the holdback payload the captain must be shown"
+  grep -F 'treehouse destroy alpha-a1' "$drain_out" >/dev/null \
+    || fail "the drained disk-guard record lost the release command AGENTS.md tells the captain to relay verbatim"
+  pass "a disk-guard wake reaches the durable queue and drains with its payload intact"
+}
+
+# Repeat disk-guard records collapse on kind+key like every other non-heartbeat
+# wake, so a queue left undrained across several holdback changes surfaces the
+# newest report once instead of a pile of superseded ones.
+test_disk_guard_records_dedupe_to_the_newest() {
+  local dir state out count
+  dir=$(make_case disk-guard-dedupe)
+  state="$dir/state"
+  out="$dir/drain.out"
+  append_wake "$state" disk-guard disk-guard 'disk-guard: 2 worktrees LEASED' \
+    || fail "disk-guard append was rejected by fm_wake_append"
+  append_wake "$state" disk-guard disk-guard 'disk-guard: 3 worktrees LEASED' \
+    || fail "second disk-guard append was rejected by fm_wake_append"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "disk-guard dedupe drain failed"
+  count=$(awk 'NF { count++ } END { print count + 0 }' "$out")
+  [ "$count" -eq 1 ] || fail "expected 1 deduped disk-guard record, got $count"
+  grep -F '3 worktrees LEASED' "$out" >/dev/null || fail "the newest disk-guard payload was not preserved"
+  pass "duplicate disk-guard records collapse to the newest"
+}
+
+test_wake_vocabulary_has_exactly_one_owner
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -254,3 +344,5 @@ test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
+test_disk_guard_wake_is_queued
+test_disk_guard_records_dedupe_to_the_newest

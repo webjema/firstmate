@@ -4,6 +4,12 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# What counts as an actionable wake on the watcher's stdout. The kind lib is a
+# side-effect-free leaf - it resolves no home and creates no state dir - which is
+# what makes it safe here, where this script deliberately owns no home of its own
+# and passes its whole environment straight through to the watcher it runs.
+# shellcheck source=bin/fm-wake-kind-lib.sh
+. "$SCRIPT_DIR/fm-wake-kind-lib.sh"
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
 
 usage() {
@@ -86,7 +92,7 @@ else
 fi
 set -e
 
-if grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; then
+if grep -E "$FM_WAKE_LINE_RE" "$OUT" >/dev/null 2>&1; then
   cat "$OUT"
   [ ! -s "$ERR" ] || cat "$ERR" >&2
   exit 0

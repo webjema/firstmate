@@ -42,6 +42,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-taskstate-lib.sh
 . "$SCRIPT_DIR/fm-taskstate-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -79,7 +81,15 @@ detach_one() {  # <id>
   } >> "$tmp"
   mv "$tmp" "$meta"
 
-  fm_clear_crew_liveness_state "$STATE" "$id"
+  # $window is still in hand and already gone from the meta, so this is the last
+  # moment the watcher's window-keyed markers and the task's queued stale wakes can
+  # be addressed at all - the same one-shot the release path has. Both go: firstmate
+  # has stopped supervising this crew, so a signal or stale wake for it can only
+  # cost a turn and invite an action AGENTS.md forbids (never respawn a detached
+  # task). Queued CHECK wakes deliberately stay, exactly as at release: detach never
+  # touches state/<id>.check.sh, so a PR armed before the hand-over keeps reporting.
+  fm_clear_crew_liveness_state "$STATE" "$id" "$window"
+  fm_wake_drop_task_records "$STATE" "$id" "$window"
 
   echo "detached $id: the crew window ($window) is now yours to drive; its worktree ($worktree) is untouched."
   echo "When you are done, close that window and I will return the slot to the pool (or run: fm-detach.sh --reclaim $id)."

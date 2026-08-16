@@ -5,6 +5,13 @@
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
 #
+# Clearing volatile state includes the watcher's own per-task markers and any wake
+# records still queued for the task, both of which outlive the task otherwise: the
+# markers because bin/fm-watch.sh keys them on the window target and on file
+# basenames rather than the bare id, and the queued wakes because nothing else drops
+# them. A wake for a task that no longer exists can only be drained and discarded,
+# so leaving it queued costs firstmate a turn for nothing.
+#
 # TWO PHASES, because a PR-mode task is torn down at PR-OPEN and the PR outlives the
 # crew. Run the SAME command both times; it picks the phase from the PR's state:
 #   PR still OPEN  -> WORKSPACE RELEASE. Frees the worktree, window, and task tmp (the
@@ -122,6 +129,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-taskstate-lib.sh
 . "$SCRIPT_DIR/fm-taskstate-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-peer-lib.sh
 . "$SCRIPT_DIR/fm-peer-lib.sh"
 FM_LOCK_LOG_PREFIX=teardown
@@ -370,10 +379,14 @@ release_supervision_state() {
   sed -e '/^window=/d' -e 's/^worktree=/released_worktree=/' "$META" > "$tmp"
   printf 'released=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$tmp"
   mv "$tmp" "$META"
-  # Everything the crew-liveness machinery keys on goes; the PR watch and the merge
-  # precondition stay. state/<id>.check.sh and state/<id>.ci-seen are deliberately kept
-  # (fm-taskstate-lib.sh owns the exact cleared set and why they are excluded).
-  fm_clear_crew_liveness_state "$STATE" "$ID"
+  # Everything the crew-liveness machinery keys on goes, including the watcher's
+  # window-keyed markers - $T is known here and already gone from the meta, so this
+  # is the last moment they can be addressed at all. The PR watch and the merge
+  # precondition stay: state/<id>.check.sh and state/<id>.ci-seen are deliberately
+  # kept (fm-taskstate-lib.sh owns the exact cleared set and why they are excluded),
+  # and so are their queued check wakes.
+  fm_clear_crew_liveness_state "$STATE" "$ID" "$T"
+  fm_wake_drop_task_records "$STATE" "$ID" "$T"
 }
 
 backlog_refresh_reminder() {
@@ -920,7 +933,9 @@ cleanup_firstmate_home_children() {
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.ci-seen" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token" "$sub_state/.turnend-seen-$child_id" "$sub_state/.decision-seen-$child_id" "$sub_state/.wt-size-$child_id" "$sub_state/.wt-snap-$child_id" "$sub_state/.wt-since-$child_id" "$sub_state/.wt-still-woke-$child_id"
+    fm_clear_crew_liveness_state "$sub_state" "$child_id" "$child_t"
+    rm -f "$sub_state/$child_id.check.sh" "$sub_state/$child_id.ci-seen" "$sub_state/$child_id.meta"
+    fm_wake_drop_task_records "$sub_state" "$child_id" "$child_t" with-check
   done
 }
 
@@ -1043,7 +1058,11 @@ if pr_is_still_open; then
   exit 0
 fi
 
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.ci-seen" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/.turnend-seen-$ID" "$STATE/.decision-seen-$ID" "$STATE/.wt-size-$ID" "$STATE/.wt-snap-$ID" "$STATE/.wt-since-$ID" "$STATE/.wt-still-woke-$ID"
+fm_clear_crew_liveness_state "$STATE" "$ID" "$T"
+# The PR watch and the meta are what full teardown adds to the liveness set: the
+# task is over, so the CI/merge poll and bin/fm-pr-merge.sh's precondition go too.
+rm -f "$STATE/$ID.check.sh" "$STATE/$ID.ci-seen" "$STATE/$ID.meta"
+fm_wake_drop_task_records "$STATE" "$ID" "$T" with-check
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

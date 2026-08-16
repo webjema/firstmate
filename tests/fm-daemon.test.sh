@@ -549,13 +549,37 @@ test_inject_skip_forces_self() {
 test_is_wake_reason_distinguishes_status_stdout() {
   # Real wake reasons are recognized; watcher status lines (singleton collision)
   # are not, so the main loop can idle them without flooding escalations.
-  is_wake_reason "signal: /x/y.status" || fail "signal: not recognized as wake"
-  is_wake_reason "stale: s:fm-x" || fail "stale: not recognized as wake"
-  is_wake_reason "check: /s/c.sh: merged" || fail "check: not recognized as wake"
-  is_wake_reason "heartbeat" || fail "heartbeat not recognized as wake"
-  is_wake_reason "watcher: already running" && fail "singleton status line misclassified as wake"
-  is_wake_reason "watcher: already running pid 123" && fail "singleton status (pid) misclassified as wake"
-  pass "is_wake_reason distinguishes watcher wake reasons from singleton-status stdout"
+  fm_is_wake_reason "signal: /x/y.status" || fail "signal: not recognized as wake"
+  fm_is_wake_reason "stale: s:fm-x" || fail "stale: not recognized as wake"
+  fm_is_wake_reason "check: /s/c.sh: merged" || fail "check: not recognized as wake"
+  fm_is_wake_reason "heartbeat" || fail "heartbeat not recognized as wake"
+  # bin/fm-watch.sh emits a BARE "disk-guard" (its wake() echoes the reason
+  # verbatim). A daemon that does not know the kind treats it as a status line and
+  # idles it - so the one wake AGENTS.md section 7 says only the captain can act on
+  # is the one wake the away-mode daemon silently swallows.
+  fm_is_wake_reason "disk-guard" || fail "bare disk-guard not recognized as wake"
+  fm_is_wake_reason "disk-guard: 2 worktrees LEASED" || fail "disk-guard: not recognized as wake"
+  fm_is_wake_reason "watcher: already running" && fail "singleton status line misclassified as wake"
+  fm_is_wake_reason "watcher: already running pid 123" && fail "singleton status (pid) misclassified as wake"
+  # A kind is a whole word, never a prefix: "disk-guardian: ..." is not a wake.
+  fm_is_wake_reason "disk-guardian: nope" && fail "kind prefix misclassified as wake"
+  pass "fm_is_wake_reason distinguishes watcher wake reasons from singleton-status stdout"
+}
+
+# The away-mode daemon must ESCALATE a disk-guard wake, not self-handle it: the
+# holdback payload names crew leases only the captain may drop. This asserts the
+# whole path from the watcher's stdout line through to the escalation buffer.
+test_disk_guard_wake_escalates_to_the_captain() {
+  local dir state
+  dir=$(make_supercase disk-guard-escalates)
+  state="$dir/state"
+  fm_is_wake_reason "disk-guard" || fail "disk-guard is not classified as a wake, so handle_wake is never reached"
+  FM_STATE_OVERRIDE="$state" handle_wake "disk-guard" "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "a disk-guard wake produced no escalation; the captain never hears about the holdback"
+  grep -F 'disk-guard' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the escalation lost the disk-guard reason"
+  pass "a disk-guard wake escalates to the captain instead of being idled as a status line"
 }
 
 test_terminal_stale_escalate_leaves_no_marker() {
@@ -1673,6 +1697,7 @@ test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
+test_disk_guard_wake_escalates_to_the_captain
 test_terminal_stale_escalate_leaves_no_marker
 test_signal_escalate_marks_seen_no_catchall_refire
 test_collapse_newlines_pure

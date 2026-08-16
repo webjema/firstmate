@@ -127,7 +127,7 @@ test_daemon_parses_fat_payload() {
   # defines only its classifiers and handle_wake.
   # shellcheck source=bin/fm-supervise-daemon.sh
   . "$ROOT/bin/fm-supervise-daemon.sh"
-  is_wake_reason "stale: $window | task=dmn-p3 class=none last=done: x" \
+  fm_is_wake_reason "stale: $window | task=dmn-p3 class=none last=done: x" \
     || fail "a fat stale payload was not recognized as a wake reason"
   FM_STATE_OVERRIDE="$state" handle_wake "stale: $window | task=dmn-p3 class=none last=done: PR https://example.invalid/pull/9" "$state"
   assert_grep "done: PR https://example.invalid/pull/9" "$state/.subsuper-escalations" \

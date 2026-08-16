@@ -59,6 +59,10 @@ make_fake_root() {
   # fm-taskstate-lib.sh: teardown sources it for the shared crew-liveness state
   # clearing used by the PR-open release path.
   ln -s "$ROOT/bin/fm-taskstate-lib.sh" "$fake/bin/fm-taskstate-lib.sh"
+  # fm-wake-lib.sh: teardown sources it to drop the task's queued wake records,
+  # and it in turn sources the wake-kind leaf.
+  ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  ln -s "$ROOT/bin/fm-wake-kind-lib.sh" "$fake/bin/fm-wake-kind-lib.sh"
   # fm-peer-lib.sh: teardown sources it to name this home's per-task temp root.
   ln -s "$ROOT/bin/fm-peer-lib.sh" "$fake/bin/fm-peer-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).

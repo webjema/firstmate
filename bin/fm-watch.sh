@@ -54,14 +54,17 @@ mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# Shared wake classifier (captain-relevant verbs + signal/stale/heartbeat
-# predicates), the SAME library the away-mode daemon uses, so the triage policy
-# has one definition.
+# Shared wake classifier (captain-relevant verbs, the payload grammar, and the
+# working/paused absorb verdict), the SAME library the away-mode daemon uses, so
+# the triage policy has one definition. Which KINDS of wake exist is a separate
+# owner, bin/fm-wake-kind-lib.sh, reached through fm-wake-lib.sh above.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # The EVENT SOURCE: this watcher's poll loop over the pull primitives (capture,
-# recorded windows, and the BUSY_REGEX pane-tail match) synthesizes the
-# signal/stale/check/heartbeat wake vocabulary. tmux has no native event push, so
+# recorded windows, and the BUSY_REGEX pane-tail match) synthesizes the backend
+# half of the wake vocabulary (bin/fm-wake-kind-lib.sh owns the whole of it; the
+# disk-guard kind comes from this script's own disk probe, not from a backend
+# event). tmux has no native event push, so
 # this poll loop is the whole supervision surface. See bin/fm-backend.sh.
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -1026,7 +1029,12 @@ EOF
       dg_out=$(timeout "$DISK_GUARD_TIMEOUT" "$FM_ROOT/bin/fm-disk-guard.sh" 2>/dev/null || true)
       if [ -n "$dg_out" ]; then
         triage_log "disk guard: $(echo "$dg_out" | tr '\n' ' ')"
-        dg_held=$(echo "$dg_out" | grep 'LEASED and were not touched' || true)
+        # Both lines of the guard's escalation, never just the first. bin/fm-disk-guard.sh
+        # emits the holdback as a PAIR - the size line, then the `treehouse destroy ...`
+        # line that releases it - and AGENTS.md tells the captain to relay the payload's
+        # commands verbatim, so a payload carrying only the size makes that impossible
+        # and leaves the captain retyping a command it was supposed to be handed.
+        dg_held=$(echo "$dg_out" | grep -E 'LEASED and were not touched|release them yourself with:' || true)
         if [ -n "$dg_held" ]; then
           dg_hash=$(printf '%s' "$dg_held" | cksum | awk '{print $1}')
           if [ "$dg_hash" != "$(cat "$STATE/.disk-guard-surfaced" 2>/dev/null || echo)" ]; then

@@ -55,10 +55,10 @@ BASE_REF=$(resolve_base_ref) \
 #
 # build_old_bin echoes a directory whose bin/ subdir holds the PRE-REFACTOR
 # fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh
-# (extracted from BASE_REF), plus symlinks to every OTHER sibling script those
-# five source - all unchanged by this task, so the real files are exactly
-# what BASE_REF would have used too. FM_ROOT_OVERRIDE pointed at this dir's
-# root makes "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
+# (extracted from BASE_REF), plus symlinks to every OTHER entry of the real
+# bin/ - all unchanged by this task, so the real files are exactly what
+# BASE_REF would have used too. FM_ROOT_OVERRIDE pointed at this dir's root
+# makes "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
 # fm-backend.sh (and its bin/backends/ adapters) is the dispatcher every one
 # of the five REFACTORED scripts sources; it must be a real, reachable file in
 # the old bin/ too or `. "$SCRIPT_DIR/fm-backend.sh"` aborts under set -eu -
@@ -66,18 +66,27 @@ BASE_REF=$(resolve_base_ref) \
 # tmux-only conformance run the tmux adapter's behavior is what is under test,
 # and that is unchanged by any later (e.g. non-tmux backend) addition to
 # fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-guard.sh fm-lock-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-tasks-axi-lib.sh fm-taskstate-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
+#
+# The sibling set is mirrored wholesale rather than enumerated. An enumerated
+# list is a second copy of "what the five scripts source", and it goes stale
+# silently: whichever branch adds a source line to one of them leaves the list
+# correct for its own BASE_REF and broken for the next branch's, which is a red
+# run nowhere near the change that caused it. Mirroring cannot drift, and a
+# symlink to a script no baseline sources costs nothing.
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
-  local name=$1 root bin f
+  local name=$1 root bin f base
   root="$TMP_ROOT/$name"
   bin="$root/bin"
   mkdir -p "$bin"
-  for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
-    ln -s "$ROOT/bin/$f" "$bin/$f"
+  for f in "$ROOT"/bin/*; do
+    base=${f##*/}
+    case " $OLD_BIN_REFACTORED " in
+      *" $base "*) continue ;;
+    esac
+    ln -s "$f" "$bin/$base"
   done
-  ln -s "$ROOT/bin/backends" "$bin/backends"
   for f in $OLD_BIN_REFACTORED; do
     # Strip the gate-refuse source+call from the extracted baseline. That guard
     # existed only to keep a no-mistakes GATE agent from driving the fleet; the
