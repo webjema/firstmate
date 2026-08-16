@@ -21,6 +21,7 @@ The command `Use the fm_watch_arm_pi custom tool now. Do not use bash.` rendered
 The extension tool returned Pi's required text `content` plus structured `details` and used `Type.Object({})` for its parameter schema.
 The human command `/fm-watch-arm-pi` notified through `ctx.ui.notify(...)` and returned no value.
 The clean-exit probe ran `/quit`, printed `PI_EXIT=0`, and confirmed that both the attached arm process and watcher child were gone.
+The watcher has since moved out of the arm's process tree into tmux ([../incidents/watcher-harness-reap.md](../incidents/watcher-harness-reap.md)), so a watcher now outlives `/quit` and ends on its own cycle; only the arm is cleaned up on exit.
 That cleanup is owned by a one-shot process `exit` listener because Pi 0.80.5 did not reliably emit `session_shutdown` for `/quit`; the listener is removed when `session_shutdown` does run.
 Command run for the complete interactive regression: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
 Observed output: `ok - Pi 0.80.5 live E2E rendered the tool, guarded once, woke, re-armed, and cleaned up on exit`.

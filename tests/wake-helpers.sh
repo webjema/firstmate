@@ -295,3 +295,29 @@ dead_pid() {
   done
   printf '%s\n' "$p"
 }
+
+# The one failure mode a suite cannot notice on its own: an arm left on `auto`
+# hosting its watcher on the HOST's tmux server. It happened - two watcher sessions
+# on a live box with three crews on it - because a case that hand-rolled its own arm
+# invocation did not pass FM_WATCH_HOST, and nothing failed. Call this from the EXIT
+# trap: it names the escape, removes it, and turns the run red.
+#
+# It targets the default socket EXPLICITLY through the real binary, so a suite that
+# shims tmux onto a private socket is still asked about the host's server - which is
+# also a live check that its own isolation held.
+assert_no_host_watcher_sessions() {  # -> non-zero if any were found
+  local tmux_bin sess panes found=
+  tmux_bin=${REAL_TMUX:-$(command -v tmux 2>/dev/null)}
+  [ -n "$tmux_bin" ] && [ -n "${TMP_ROOT:-}" ] || return 0
+  panes=$("$tmux_bin" -L default list-panes -a -F '#{session_name}	#{pane_start_command}' 2>/dev/null) || return 0
+  while IFS=$'\t' read -r sess cmd; do
+    case "$sess" in fm-watch-*) ;; *) continue ;; esac
+    case "$cmd" in *"$TMP_ROOT"*) ;; *) continue ;; esac
+    found="$found $sess"
+    "$tmux_bin" -L default kill-session -t "=$sess" 2>/dev/null || true
+  done <<< "$panes"
+  [ -n "$found" ] || return 0
+  printf 'not ok - this suite put a watcher on the HOST tmux server:%s (killed). An arm ran without FM_WATCH_HOST pinned.\n' \
+    "$found" >&2
+  return 1
+}

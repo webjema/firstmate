@@ -109,6 +109,9 @@ cd "$ROOT" || exit 1
 #   fm-watch-arm-supervision.test.sh - backgrounds real fm-watch-arm.sh cycles over a scripted
 #     watcher and bounded-waits on what the arm does NEXT (relaunch, stand down, exhaust its
 #     churn budget); every assertion is a race against the arm's confirm and backoff timers
+#   fm-watch-arm-hosting.test.sh - the same backgrounded arms, plus a real tmux server of its
+#     own and reaps aimed at whole process trees; it bounded-waits on a watcher surviving a
+#     kill, which a starved box turns into a false green
 #
 # The cost is real, and stating it honestly is the point (measured on this 8-core box):
 #   serial (the old CI loop)          421s
@@ -147,7 +150,8 @@ fm-backend-tmux-smoke.test.sh \
 fm-pi-watch-extension.test.sh \
 fm-pool-warm.test.sh \
 fm-turnend-guard.test.sh \
-fm-watch-arm-supervision.test.sh"}
+fm-watch-arm-supervision.test.sh \
+fm-watch-arm-hosting.test.sh"}
 
 JOBS=${FM_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}
 TIMEOUT=${FM_TEST_TIMEOUT:-300}
