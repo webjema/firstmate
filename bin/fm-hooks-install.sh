@@ -60,10 +60,13 @@ SETTINGS="$DIR/.claude/settings.json"
 HOOKDIR="$DIR/.claude/hooks"
 MARKER='fm-quality'
 
-# The two halves of the no-fail-open contract described in the header. They move
-# together: GATE_BUDGET must stay below GATE_HOOK_TIMEOUT, or the gate is back to
-# being cancelled mid-verdict. tests/fm-hooks-install.test.sh asserts the gap.
+# The no-fail-open contract described in the header, as numbers. They move
+# together: GATE_BUDGET plus GATE_GRACE must stay below GATE_HOOK_TIMEOUT, or the
+# gate is back to being cancelled mid-verdict. GATE_GRACE is what a check gets
+# between the TERM at the deadline and the KILL that ends the argument.
+# tests/fm-hooks-install.test.sh asserts the gap.
 GATE_BUDGET=280
+GATE_GRACE=5
 GATE_HOOK_TIMEOUT=300
 
 # Already has hooks of any kind? Report and stop. This is the common case for a
@@ -169,40 +172,53 @@ EOF
     # than delegated to timeout(1): where that binary is absent the hook would
     # exit 127, and only exit 2 blocks a tool call, so the missing binary would
     # itself be a silent fail-open.
-    printf '\nGATE_BUDGET=%s\n' "$GATE_BUDGET"
+    printf '\nGATE_BUDGET=%s\nGATE_GRACE=%s\n' "$GATE_BUDGET" "$GATE_GRACE"
     cat <<'EOF'
 
 gate_refuse() {
-  echo "BLOCKED: $1 did not reach a verdict within the gate's ${GATE_BUDGET}s budget, so this push is refused rather than allowed unchecked." >&2
-  echo "Run the checks by hand once - that also warms the build cache - then push." >&2
+  echo "BLOCKED: $1" >&2
+  echo "The push is refused rather than allowed unchecked. Run the checks by hand once - that also warms the build cache - then push." >&2
   exit 2
 }
 
 # Runs one check under the remaining budget. SECONDS is the whole hook's age, so
 # several checks share one deadline instead of each getting a fresh one.
 #
-# The check is started under `set -m` so it leads its own process group, and the
-# watchdog signals that whole group. Signalling the check alone is not enough:
-# `npm run test` is a shell that spawns the real runner, and a surviving
-# grandchild keeps holding this hook's stdout after the hook itself is done.
+# Both jobs are started under `set -m` so each leads its own process group, and
+# each is signalled by group. Signalling the check alone is not enough: `npm run
+# test` is a shell that spawns the real runner, and a surviving grandchild keeps
+# holding this hook's stdout after the hook itself is done.
+#
+# TERM then KILL, because the budget has to be a deadline and not a request. A
+# check that traps TERM and cleans up slowly, or ignores it, or is stopped
+# rather than killed, would otherwise keep this hook running past the harness
+# timeout - which cancels the hook and lets the push through, the exact failure
+# the budget exists to prevent. GATE_GRACE is the only slack it gets.
 gate_run() {
   local label=$1 left status check_pid watchdog_pid
   shift
   left=$(( GATE_BUDGET - SECONDS ))
-  [ "$left" -gt 0 ] || gate_refuse "$label"
+  [ "$left" -gt 0 ] \
+    || gate_refuse "the gate's ${GATE_BUDGET}s budget was spent before $label could start."
 
   set -m
   "$@" &
   check_pid=$!
-  set +m
-  ( sleep "$left"; kill -TERM -- -"$check_pid" ) >/dev/null 2>&1 &
+  ( sleep "$left"
+    kill -TERM -- -"$check_pid"
+    sleep "$GATE_GRACE"
+    kill -KILL -- -"$check_pid" ) >/dev/null 2>&1 &
   watchdog_pid=$!
+  set +m
 
   status=0
   wait "$check_pid" || status=$?
-  kill -TERM "$watchdog_pid" >/dev/null 2>&1 || true
+  kill -TERM -- -"$watchdog_pid" >/dev/null 2>&1 || true
 
-  [ "$SECONDS" -lt "$GATE_BUDGET" ] || gate_refuse "$label"
+  # Deadline before status: a check killed at the deadline may still have exited
+  # 0 on its way out, and that is not a verdict.
+  [ "$SECONDS" -lt "$GATE_BUDGET" ] \
+    || gate_refuse "$label did not finish within the gate's ${GATE_BUDGET}s budget."
   if [ "$status" -ne 0 ]; then
     echo "BLOCKED: $label failed." >&2
     exit 2
