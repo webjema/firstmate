@@ -400,6 +400,25 @@ test_a_finished_watcher_leaves_no_window_and_no_temp_files() {
   pass "a finished watcher leaves neither its window nor a temp file behind, with no arm left to reap either"
 }
 
+test_the_watcher_launcher_is_readable_only_by_its_owner() {
+  local dir armout f mode found=
+  dir=$(make_arm_case launcher-mode)
+  armout="$dir/arm.out"
+  set_mode "$dir" hold
+  run_arm_bg "$dir" "$armout"
+  wait_for_text "$armout" 'watcher: started pid=' \
+    || fail "arm never confirmed a hosted watcher: $(cat "$armout")"
+  for f in "$dir"/state/.watch-arm-output*.host.sh; do
+    [ -e "$f" ] || continue
+    found=$f
+    mode=$(stat -c '%a' "$f" 2>/dev/null || stat -f '%Lp' "$f" 2>/dev/null)
+    [ "$mode" = 700 ] \
+      || fail "the launcher is mode $mode - it carries every exported FM_* value, PATH, HOME and TMPDIR into a file other users on this box can read"
+  done
+  [ -n "$found" ] || fail "no launcher on disk, so hosting did not run and this asserts nothing"
+  kill -TERM "$(confirmed_watcher_pid "$armout")" 2>/dev/null || true
+  pass "the watcher launcher is readable only by its owner"
+}
 test_two_homes_get_their_own_watcher_sessions() {
   local a b aout bout awpid bwpid asess bsess
   # Same basename, different paths: the basename alone cannot tell these two apart,
@@ -447,4 +466,5 @@ test_supervision_live_is_truthful_while_the_arm_is_gone
 test_supervision_live_is_down_after_a_normal_wake
 test_a_wake_raised_after_the_arm_is_gone_still_drains
 test_a_finished_watcher_leaves_no_window_and_no_temp_files
+test_the_watcher_launcher_is_readable_only_by_its_owner
 test_two_homes_get_their_own_watcher_sessions

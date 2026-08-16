@@ -460,6 +460,12 @@ watcher_env_exports() {
 # exit status, both of which this arm reads - and removes itself last, so a watcher
 # that outlives its arm still cleans up after itself.
 write_watcher_launcher() {  # <path>
+  # 0700 before a single byte goes in, not after. This file is an environment dump -
+  # every exported FM_* value plus PATH, HOME and TMPDIR, verbatim - and state/ sits
+  # on a box other users share, so the default umask would publish whatever the next
+  # person exports. tmux runs it as this user, so owner-only is all it ever needs.
+  : > "$1" 2>/dev/null || return 1
+  chmod 700 "$1" 2>/dev/null || return 1
   {
     printf '#!/usr/bin/env bash\n'
     printf 'set -u\n'
@@ -483,7 +489,6 @@ write_watcher_launcher() {  # <path>
     # shellcheck disable=SC2016
     printf 'tmux kill-window -t "${TMUX_PANE:-}" 2>/dev/null || true\n'
   } > "$1" 2>/dev/null || return 1
-  chmod +x "$1" 2>/dev/null
 }
 
 # Start the watcher in this home's watcher session. Sets child/child_window on
