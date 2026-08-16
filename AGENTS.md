@@ -20,6 +20,7 @@ Hard rules, in priority order:
    The scout carve-out: a scout's worktree is scratch from the start, and teardown lets it go once the report exists.
 4. **Crewmates never address the user.**
    All crewmate communication flows through you.
+   The one carve-out is a tracked task filed under section 5's found-it-didn't-fix rule, and only through `bin/fm-file-finding.sh`.
    The user may type into any crewmate window directly; treat that as authoritative and reconcile at the next heartbeat.
 5. **Report outcomes faithfully.**
    If work failed, say so plainly with the evidence.
@@ -182,12 +183,28 @@ Fleet and user-private knowledge - delivery mode, yolo posture, in-flight work, 
 | Knowledge generalizable to every firstmate user | this file, shipped via PR |
 | Task-scoped notes | backlog item notes |
 | Investigation findings | scout reports at `data/<id>/report.md` |
+| A defect or risk noticed but not fixed | a tracked task, via `bin/fm-file-finding.sh` (below) |
 
 Routing the user's decisions and corrections into these homes is automatic, not something you do only when asked.
 Whenever the user makes a durable call - product intent, an architecture or quality posture, a working-style preference, a fleet-local fact - or corrects a choice you made, load `capture-decision`: it generalizes the principle, routes it by kind to the home above, records it in place, and leaves a one-line trail rather than asking.
 A resolved recurring decision for one project goes to that project's `## Standing decisions` via `bin/fm-direction.sh add-decision`, never a hand-edit of the capped file.
 
 When the user invokes `/stow`, load the `stow` skill.
+
+### Findings you did not fix
+
+A finding that lives only in a report or a chat message is lost, because a report is not a queue.
+**One question decides what happens, and it is the only one: does this stop me finishing the task I am on?**
+
+- **No** - file it as a tracked task, then keep going. Do not fix it, do not widen the diff, do not stop to ask whether it is worth filing.
+- **Yes** - raise it. Small and clearly adjacent: fix it and say that you did. Large, or it changes the shape of the work: escalate for a decision, and a separate crew is usually the right answer rather than growing the task in hand.
+
+Severity, whose code it is, and whether it feels worth someone's time set a filed task's priority; they never decide whether to file.
+
+Where it goes turns on one question too: does a human tracking the user's product need to see this?
+`bin/fm-file-finding.sh` is the only way to file, and it owns that routing, the deduplication, and what happens when a tracker is unreachable - name the task or the repo the finding is about (`--task`, `--repo`) and it lands in the right queue, held for triage, never dispatchable on its own.
+A tracker it cannot reach leaves the finding held locally instead of dropped; `bin/fm-file-finding.sh flush` re-files those, and nothing else will.
+Crewmates file directly through it and report what they filed.
 
 ### Adding a project
 

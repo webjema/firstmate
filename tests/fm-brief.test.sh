@@ -494,6 +494,47 @@ test_context_discipline_in_ship_and_scout() {
   pass "fm-brief.sh: ship and scout briefs carry the context-discipline block"
 }
 
+# The found-it-didn't-fix rule is the one block that must reach EVERY kind of report,
+# including the secondmate charter: a secondmate briefs its own crews, and a scout that
+# finds three defects while investigating a fourth is the case the rule exists for. Ship
+# and scout crews do not inherit FM_HOME, so their command must carry it; the charter
+# does inherit it and must not.
+test_findings_rule_reaches_every_mode() {
+  local home id brief kind
+  home="$TMP_ROOT/findings-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-findings-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    assert_grep "# Findings you did not fix" "$brief" "$kind brief lost the findings block"
+    assert_grep "does this stop you finishing THIS task?" "$brief" \
+      "$kind brief lost the one question the rule turns on"
+    assert_grep "bin/fm-file-finding.sh' --task $id --blocking no" "$brief" \
+      "$kind brief lost the runnable filing command for its own task"
+    assert_grep "FM_HOME=" "$brief" \
+      "$kind brief must carry FM_HOME, which crews do not inherit"
+    assert_grep "they never decide whether to file" "$brief" \
+      "$kind brief lost the severity-sets-priority-not-whether rule"
+  done
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='x' \
+    "$ROOT/bin/fm-brief.sh" findings-sm --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/findings-sm/brief.md"
+  assert_grep "# Findings you did not fix" "$brief" "the secondmate charter lost the findings block"
+  assert_grep "bin/fm-file-finding.sh --blocking no" "$brief" \
+    "the charter must carry the bare command it inherits FM_HOME for"
+  assert_grep "brief your own crewmates with this same rule" "$brief" \
+    "the charter must pass the rule on to the crews it briefs"
+  pass "fm-brief.sh: the found-it-didn't-fix rule reaches ship, scout, and charter"
+}
+
 # --- knowledge-graph guidance ------------------------------------------------
 
 GRAPH_STUB=$(fm_graph_stub "$TMP_ROOT/graph-bin")
@@ -577,6 +618,7 @@ test_graph_lookup_failures_never_break_a_scaffold() {
 test_script_parses
 test_help_includes_entire_header
 test_context_discipline_in_ship_and_scout
+test_findings_rule_reaches_every_mode
 test_ship_modes_generate_clean_briefs
 test_legacy_mode_token_maps_to_pr
 test_pr_dod_carries_the_review_contract
