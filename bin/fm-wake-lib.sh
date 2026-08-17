@@ -418,7 +418,13 @@ fm_wake_clean_field() {
 # are distinguishable by exit status and not just by a line on stderr. A caller
 # that cannot tell them apart reports the wrong one, which is how a refused
 # disk-guard kind was read for a day as an unwritable queue.
+#
+# BOTH statuses are named here, not one named and the other left as whatever the
+# failed redirection happened to return. A caller distinguishes them by comparing
+# against these two, so an unnamed write status that ever came back as 2 would be
+# announced as a refused kind - the same misdirection, inverted.
 FM_WAKE_RC_BAD_KIND=2
+FM_WAKE_RC_WRITE=1
 
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
@@ -439,9 +445,10 @@ fm_wake_append() {
     ''|*[!0-9]*) seq=0 ;;
   esac
   seq=$((seq + 1))
-  printf '%s\n' "$seq" > "$seq_file" || status=$?
+  printf '%s\n' "$seq" > "$seq_file" || status=$FM_WAKE_RC_WRITE
   if [ "$status" -eq 0 ]; then
-    printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
+    printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" \
+      || status=$FM_WAKE_RC_WRITE
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"

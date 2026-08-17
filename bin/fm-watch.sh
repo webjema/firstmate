@@ -1064,6 +1064,7 @@ EOF
     touch "$STATE/.last-disk-guard"
     if [ -x "$FM_ROOT/bin/fm-disk-guard.sh" ]; then
       dg_out=$(timeout "$DISK_GUARD_TIMEOUT" "$FM_ROOT/bin/fm-disk-guard.sh" 2>/dev/null || true)
+      dg_held=
       if [ -n "$dg_out" ]; then
         triage_log "disk guard: $(echo "$dg_out" | tr '\n' ' ')"
         # Both lines of the guard's escalation, never just the first. bin/fm-disk-guard.sh
@@ -1072,17 +1073,25 @@ EOF
         # commands verbatim, so a payload carrying only the size makes that impossible
         # and leaves the captain retyping a command it was supposed to be handed.
         dg_held=$(echo "$dg_out" | grep -E 'LEASED and were not touched|release them yourself with:' || true)
-        if [ -n "$dg_held" ]; then
-          dg_hash=$(disk_guard_holdback_identity "$dg_held" | cksum | awk '{print $1}')
-          if [ "$dg_hash" != "$(cat "$STATE/.disk-guard-surfaced" 2>/dev/null || echo)" ]; then
-            printf '%s\n' "$dg_hash" > "$STATE/.disk-guard-surfaced"
-            wake_enqueue disk-guard disk-guard "$dg_held"
-            wake "disk-guard"
-          fi
-        else
-          # The holdback cleared, so the next one is news again.
-          rm -f "$STATE/.disk-guard-surfaced"
+      fi
+      if [ -n "$dg_held" ]; then
+        dg_hash=$(disk_guard_holdback_identity "$dg_held" | cksum | awk '{print $1}')
+        if [ "$dg_hash" != "$(cat "$STATE/.disk-guard-surfaced" 2>/dev/null || echo)" ]; then
+          printf '%s\n' "$dg_hash" > "$STATE/.disk-guard-surfaced"
+          wake_enqueue disk-guard disk-guard "$dg_held"
+          wake "disk-guard"
         fi
+      else
+        # The holdback cleared, so the next one is news again - and SILENCE from the
+        # guard is one of the ways it clears. At tier ok the guard prints nothing at
+        # all, so a marker kept across a quiet spell would still name the last
+        # holdback when pressure returned, and the same worktrees held through a
+        # fresh critical episode would raise no wake at all. Hashing the report text
+        # hid that: the size always drifted, so the second episode always re-fired
+        # by accident. Keying on the paths removes the accident, so the clearing has
+        # to be deliberate. A timed-out or crashed guard lands here too, which costs
+        # one repeat wake next cadence - churn, never silence.
+        rm -f "$STATE/.disk-guard-surfaced"
       fi
     fi
   fi

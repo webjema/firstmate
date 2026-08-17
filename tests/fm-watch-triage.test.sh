@@ -83,25 +83,43 @@ reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # A guard stub whose entire report is a file the test rewrites between watcher
 # runs, so one case can present the SAME holdback with a different measured size.
-install_fake_disk_guard() {  # <fakeroot> <report-file>
+# It also stamps a run log, because the cases below assert that a second run
+# raised NO wake - an assertion a guard that never ran satisfies just as well.
+install_fake_disk_guard() {  # <fakeroot> <report-file> <run-log>
   mkdir -p "$1/bin"
   cat > "$1/bin/fm-disk-guard.sh" <<SH
 #!/usr/bin/env bash
+echo ran >> "$3"
 cat "$2"
 SH
   chmod +x "$1/bin/fm-disk-guard.sh"
 }
 
-# A holdback report in bin/fm-disk-guard.sh's real shape: the size line, then the
-# release line carrying one "treehouse destroy <path>" clause per held worktree.
+# Block until the fake guard has run <n> times, so a negative assertion is made
+# against a guard that actually ran and not against one still starting up.
+wait_for_guard_runs() {  # <run-log> <n> [<deciseconds>]
+  local log=$1 want=$2 i=0 limit=${3:-100}
+  while [ "$i" -lt "$limit" ]; do
+    [ "$(wc -l < "$log" 2>/dev/null || echo 0)" -ge "$want" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# A holdback report in bin/fm-disk-guard.sh's real shape, down to the "DISK_GUARD: "
+# prefix its say() puts on every line (bin/fm-disk-guard.sh:120, :453-455): the size
+# line, then the release line carrying one "treehouse destroy <path>" clause per held
+# worktree. The prefix is not decoration here - the identity parse has to read a path
+# out of a line that carries it.
 write_holdback_report() {  # <report-file> <size-in-M> <held-path>...
   local f=$1 size=$2 clauses='' p
   shift 2
   for p in "$@"; do clauses="$clauses treehouse destroy $p --yes --include-leased --include-unlanded;"; done
   {
-    printf 'critical - 4G free (96%% used) on /tmp\n'
-    printf '%s landed worktree(s) holding ~%sM are LEASED and were not touched.\n' "$#" "$size"
-    printf 'a lease is a crew claim; release them yourself with:%s\n' "$clauses"
+    printf 'DISK_GUARD: critical - 4G free (96%% used) on /tmp\n'
+    printf 'DISK_GUARD: %s landed worktree(s) holding ~%sM are LEASED and were not touched.\n' "$#" "$size"
+    printf "DISK_GUARD: a lease is a crew's claim; release them yourself with:%s\\n" "$clauses"
   } > "$f"
 }
 
@@ -1157,13 +1175,15 @@ test_disk_guard_holdback_identity_classifier() {
   # shellcheck source=bin/fm-watch.sh
   . "$WATCH"
   unset FM_STATE_OVERRIDE
-  a='2 landed worktree(s) holding ~2050M are LEASED and were not touched.
-a lease is a crew claim; release them yourself with: treehouse destroy /wt/alpha-a1 --yes; treehouse destroy /wt/beta-b2 --yes;'
+  # Every line carries the "DISK_GUARD: " prefix bin/fm-disk-guard.sh's say() adds,
+  # because that is what the watcher is actually handed.
+  a='DISK_GUARD: 2 landed worktree(s) holding ~2050M are LEASED and were not touched.
+DISK_GUARD: a lease is a crew'"'"'s claim; release them yourself with: treehouse destroy /wt/alpha-a1 --yes; treehouse destroy /wt/beta-b2 --yes;'
   # Same two worktrees, a size that moved and the clauses in the other order.
-  b='2 landed worktree(s) holding ~4917M are LEASED and were not touched.
-a lease is a crew claim; release them yourself with: treehouse destroy /wt/beta-b2 --yes; treehouse destroy /wt/alpha-a1 --yes;'
-  c='3 landed worktree(s) holding ~4917M are LEASED and were not touched.
-a lease is a crew claim; release them yourself with: treehouse destroy /wt/alpha-a1 --yes; treehouse destroy /wt/beta-b2 --yes; treehouse destroy /wt/gamma-c3 --yes;'
+  b='DISK_GUARD: 2 landed worktree(s) holding ~4917M are LEASED and were not touched.
+DISK_GUARD: a lease is a crew'"'"'s claim; release them yourself with: treehouse destroy /wt/beta-b2 --yes; treehouse destroy /wt/alpha-a1 --yes;'
+  c='DISK_GUARD: 3 landed worktree(s) holding ~4917M are LEASED and were not touched.
+DISK_GUARD: a lease is a crew'"'"'s claim; release them yourself with: treehouse destroy /wt/alpha-a1 --yes; treehouse destroy /wt/beta-b2 --yes; treehouse destroy /wt/gamma-c3 --yes;'
   [ "$(disk_guard_holdback_identity "$a")" = "$(disk_guard_holdback_identity "$b")" ] \
     || fail "the same held worktrees read as a different holdback once the megabytes moved"
   [ "$(disk_guard_holdback_identity "$a")" != "$(disk_guard_holdback_identity "$c")" ] \
@@ -1178,11 +1198,11 @@ a lease is a crew claim; release them yourself with: treehouse destroy /wt/alpha
 }
 
 test_disk_guard_unchanged_held_set_wakes_once() {
-  local dir state fakebin fakeroot report out1 out2 pid
+  local dir state fakebin fakeroot report runs out1 out2 pid
   dir=$(make_case disk-guard-identity)
   state="$dir/state"; fakebin="$dir/fakebin"; fakeroot="$dir/fakeroot"; report="$dir/report"
-  out1="$dir/watch1.out"; out2="$dir/watch2.out"
-  install_fake_disk_guard "$fakeroot" "$report"
+  runs="$dir/guard-runs"; out1="$dir/watch1.out"; out2="$dir/watch2.out"
+  install_fake_disk_guard "$fakeroot" "$report" "$runs"
   write_holdback_report "$report" 2050 /wt/alpha-a1 /wt/beta-b2
   watch_dg_bg "$state" "$fakebin" "$fakeroot" "$out1"
   pid=$!
@@ -1194,7 +1214,14 @@ test_disk_guard_unchanged_held_set_wakes_once() {
   write_holdback_report "$report" 4917 /wt/beta-b2 /wt/alpha-a1
   watch_dg_bg "$state" "$fakebin" "$fakeroot" "$out2"
   pid=$!
-  if ! wait_live "$pid" 40; then
+  # Wait on the GUARD having run again, never on a fixed nap: "no second wake" is a
+  # negative, and a watcher that had not reached the guard yet would satisfy it on a
+  # loaded box while proving nothing at all.
+  if ! wait_for_guard_runs "$runs" 2 200; then
+    reap "$pid"
+    fail "the second watcher never ran the disk guard, so the no-wake assertions prove nothing"
+  fi
+  if ! wait_live "$pid" 20; then
     reap "$pid"
     fail "the watcher re-woke for an unchanged holdback whose size figure moved: $(cat "$out2")"
   fi
@@ -1204,12 +1231,48 @@ test_disk_guard_unchanged_held_set_wakes_once() {
   pass "two guard runs holding the same worktrees at different sizes raise exactly one wake"
 }
 
+# The other half of the same rule: the marker that suppresses a repeat wake has to
+# be dropped when the guard goes QUIET, not only when it reports a report with no
+# holdback. At tier ok the guard prints nothing, so a marker that survived a quiet
+# spell would swallow the wake for the next pressure episode entirely.
+test_disk_guard_quiet_spell_makes_the_next_episode_news_again() {
+  local dir state fakebin fakeroot report runs out1 out2 out3 pid
+  dir=$(make_case disk-guard-quiet)
+  state="$dir/state"; fakebin="$dir/fakebin"; fakeroot="$dir/fakeroot"; report="$dir/report"
+  runs="$dir/guard-runs"; out1="$dir/watch1.out"; out2="$dir/watch2.out"; out3="$dir/watch3.out"
+  install_fake_disk_guard "$fakeroot" "$report" "$runs"
+  write_holdback_report "$report" 2050 /wt/alpha-a1 /wt/beta-b2
+  watch_dg_bg "$state" "$fakebin" "$fakeroot" "$out1"
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "watcher did not surface a first, unseen disk-guard holdback"
+
+  # Pressure drops: the guard exits at tier ok, printing nothing.
+  : > "$report"
+  watch_dg_bg "$state" "$fakebin" "$fakeroot" "$out2"
+  pid=$!
+  wait_for_guard_runs "$runs" 2 200 || { reap "$pid"; fail "the quiet-spell watcher never ran the disk guard"; }
+  if ! wait_live "$pid" 20; then
+    reap "$pid"
+    fail "a silent guard raised a wake: $(cat "$out2")"
+  fi
+  reap "$pid"
+
+  # Pressure returns, the SAME two worktrees still held. A fresh episode is news.
+  write_holdback_report "$report" 5200 /wt/alpha-a1 /wt/beta-b2
+  watch_dg_bg "$state" "$fakebin" "$fakeroot" "$out3"
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "a new pressure episode after a quiet spell raised no wake"
+  grep -Fx 'disk-guard' "$out3" >/dev/null || fail "the second episode printed no disk-guard wake: $(cat "$out3")"
+  [ "$(dg_records "$state")" -eq 2 ] || fail "the second episode did not queue a second disk-guard record"
+  pass "a quiet spell clears the holdback marker, so the next pressure episode wakes again"
+}
+
 test_disk_guard_new_path_in_held_set_wakes_again() {
-  local dir state fakebin fakeroot report out1 out2 drain_out pid
+  local dir state fakebin fakeroot report runs out1 out2 drain_out pid
   dir=$(make_case disk-guard-new-path)
   state="$dir/state"; fakebin="$dir/fakebin"; fakeroot="$dir/fakeroot"; report="$dir/report"
-  out1="$dir/watch1.out"; out2="$dir/watch2.out"; drain_out="$dir/drain.out"
-  install_fake_disk_guard "$fakeroot" "$report"
+  runs="$dir/guard-runs"; out1="$dir/watch1.out"; out2="$dir/watch2.out"; drain_out="$dir/drain.out"
+  install_fake_disk_guard "$fakeroot" "$report" "$runs"
   write_holdback_report "$report" 2050 /wt/alpha-a1 /wt/beta-b2
   watch_dg_bg "$state" "$fakebin" "$fakeroot" "$out1"
   pid=$!
@@ -1264,4 +1327,5 @@ test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
 test_disk_guard_unchanged_held_set_wakes_once
 test_disk_guard_new_path_in_held_set_wakes_again
+test_disk_guard_quiet_spell_makes_the_next_episode_news_again
 test_disk_guard_holdback_identity_classifier
