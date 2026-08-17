@@ -16,6 +16,9 @@
 #       a failed probe falls back to the reaper's own default
 #   (i) FM_DISK_CACHES gates each cache family, and an empty value disables all
 #   (j) bad arguments are refused with exit 2; everything else exits 0
+#   (k) cdk synth staging dirs past the age window are swept, and the window's near
+#       side is spared exactly - a 3-day-old dir survives a 3-day window, so the
+#       recently-finished work a user might still want to inspect is never taken
 #
 # (c), (g) and (h) are the fail-closed rails. Each drives the guard through a stub
 # that makes one signal unavailable and asserts the guard DECLINES to act, because
@@ -27,6 +30,19 @@ set -u
 
 GUARD="$ROOT/bin/fm-disk-guard.sh"
 TMP_ROOT=$(fm_test_tmproot fm-disk-guard-tests)
+
+# Point the cdk sweep at an empty sandbox for EVERY case in this file, not just the
+# cdk ones. Several cases below drive the guard at a real sweeping tier with no
+# --dry-run, and the sweep's root defaults to the actual /tmp - so without this line
+# running the suite deletes the developer's own cdk staging dirs. That is not
+# hypothetical: it happened on 2026-08-17, during a mutation check that widened the
+# age window, and it cost ~11.5k real directories.
+# It is exported once here rather than passed per case on purpose. A test that has
+# to REMEMBER to sandbox an `rm -rf` is one edit away from not doing it, and the
+# blast radius is outside the test tree where no fixture can undo it. Cases that
+# need staging dirs to act on override it with their own root.
+export FM_DISK_TMP_ROOT="$TMP_ROOT/tmp-sandbox"
+mkdir -p "$FM_DISK_TMP_ROOT"
 
 # Put a stub `df` first on PATH that reports fixed numbers, so a test can place the
 # box at any occupancy without a real filesystem of that size. The POSIX -Pk layout
@@ -230,6 +246,69 @@ test_cache_families_are_gated() {
   pass "FM_DISK_CACHES gates each cache family"
 }
 
+# Build a tmp root holding cdk.out staging dirs at chosen ages, plus two decoys that
+# the sweep must not touch: a directory whose name only starts the same way, and a
+# plain file. Each dir gets a payload file so a half-delete is visible.
+make_cdk_tmp() {  # <name> -> echoes the tmp root
+  local name=$1 root d age
+  root="$TMP_ROOT/$name"
+  mkdir -p "$root"
+  for age in 0 1 3 4 30; do
+    d="$root/cdk.out-age$age"
+    mkdir -p "$d"
+    echo '{}' > "$d/manifest.json"
+    touch -d "$age days ago" "$d/manifest.json" "$d"
+  done
+  mkdir -p "$root/cdk-not-out"
+  touch -d "30 days ago" "$root/cdk-not-out"
+  touch -d "30 days ago" "$root/cdk.out-a-file"
+  printf '%s\n' "$root"
+}
+
+test_cdk_staging_dirs_older_than_the_window_are_swept() {
+  local stub root out
+  stub=$(make_df_stub cdk 21000000 86)
+  root=$(make_cdk_tmp cdk-sweep)
+  out=$(PATH="$stub:$PATH" FM_DISK_TMP_ROOT="$root" FM_TREEHOUSE_ROOT="$TMP_ROOT/absent" \
+        "$GUARD" 2>&1)
+  assert_contains "$out" "cdk synth staging dir" "the sweep reports what it reclaimed"
+  [ -d "$root/cdk.out-age4" ] && fail "a 4-day-old staging dir survived the default 3-day window"
+  [ -d "$root/cdk.out-age30" ] && fail "a 30-day-old staging dir survived"
+  [ -d "$root/cdk.out-age0" ] || fail "today's staging dir was deleted"
+  [ -d "$root/cdk.out-age1" ] || fail "a 1-day-old staging dir was deleted"
+  [ -d "$root/cdk.out-age3" ] || fail "a 3-day-old staging dir was deleted; the window is >3d, not >=3d"
+  [ -d "$root/cdk-not-out" ] || fail "a directory that merely shares a prefix was deleted"
+  [ -f "$root/cdk.out-a-file" ] || fail "a plain file matching the name pattern was deleted"
+  pass "cdk staging dirs past the window are swept and the 0-3 day window is spared"
+}
+
+test_cdk_sweep_respects_dry_run_and_the_age_knob() {
+  local stub root out
+  stub=$(make_df_stub cdkdry 21000000 86)
+  root=$(make_cdk_tmp cdk-dry)
+  out=$(PATH="$stub:$PATH" FM_DISK_TMP_ROOT="$root" FM_TREEHOUSE_ROOT="$TMP_ROOT/absent" \
+        "$GUARD" --dry-run 2>&1)
+  assert_contains "$out" "would reclaim 2 cdk synth staging dir" "--dry-run counts without deleting"
+  [ -d "$root/cdk.out-age30" ] || fail "--dry-run deleted a staging dir"
+
+  root=$(make_cdk_tmp cdk-age)
+  out=$(PATH="$stub:$PATH" FM_DISK_TMP_ROOT="$root" FM_DISK_CDK_AGE_DAYS=10 \
+        FM_TREEHOUSE_ROOT="$TMP_ROOT/absent" "$GUARD" 2>&1)
+  [ -d "$root/cdk.out-age4" ] || fail "FM_DISK_CDK_AGE_DAYS=10 did not spare a 4-day-old dir"
+  [ -d "$root/cdk.out-age30" ] && fail "FM_DISK_CDK_AGE_DAYS=10 did not sweep a 30-day-old dir"
+  pass "the cdk sweep honours --dry-run and FM_DISK_CDK_AGE_DAYS"
+}
+
+test_cdk_sweep_is_silent_when_there_is_nothing_to_do() {
+  local stub out
+  stub=$(make_df_stub cdknone 21000000 86)
+  mkdir -p "$TMP_ROOT/cdk-empty"
+  out=$(PATH="$stub:$PATH" FM_DISK_TMP_ROOT="$TMP_ROOT/cdk-empty" \
+        FM_TREEHOUSE_ROOT="$TMP_ROOT/absent" "$GUARD" 2>&1)
+  assert_not_contains "$out" "cdk synth staging dir" "an empty tmp root produces no cdk line"
+  pass "the cdk sweep says nothing when there is nothing to sweep"
+}
+
 test_bad_arguments_are_refused() {
   local rc=0
   "$GUARD" --tier nonsense >/dev/null 2>&1 || rc=$?
@@ -252,4 +331,7 @@ test_unleased_landed_worktree_is_destroyed_at_critical
 test_unreadable_lease_state_reads_as_held
 test_scratch_window_not_tightened_without_a_liveness_probe
 test_cache_families_are_gated
+test_cdk_staging_dirs_older_than_the_window_are_swept
+test_cdk_sweep_respects_dry_run_and_the_age_knob
+test_cdk_sweep_is_silent_when_there_is_nothing_to_do
 test_bad_arguments_are_refused
