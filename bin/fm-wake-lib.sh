@@ -413,11 +413,18 @@ fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
 
+# A refused KIND and an unwritable QUEUE are different failures with different
+# fixes - one is a caller bug, the other is a full or read-only disk - so the two
+# are distinguishable by exit status and not just by a line on stderr. A caller
+# that cannot tell them apart reports the wrong one, which is how a refused
+# disk-guard kind was read for a day as an unwritable queue.
+FM_WAKE_RC_BAD_KIND=2
+
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
   fm_wake_kind_valid "$kind" || {
-    printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2
-    return 2
+    printf "fm_wake_append: refused wake kind '%s' - not in FM_WAKE_KINDS, which bin/fm-wake-kind-lib.sh owns\\n" "$kind" >&2
+    return "$FM_WAKE_RC_BAD_KIND"
   }
 
   clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
