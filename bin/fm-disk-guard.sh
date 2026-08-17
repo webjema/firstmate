@@ -69,6 +69,9 @@
 #   FM_DISK_CRITICAL_USED_PCT  default 92    ... and critical
 #   FM_DISK_CACHES             default "npm tmpbuild playwright"
 #                              which cache families critical may clear; empty disables all
+#   FM_DISK_CDK_AGE_DAYS       default 3     age past which a cdk synth staging dir under
+#                              the tmp root is dead; raise it to keep them longer
+#   FM_DISK_TMP_ROOT           default /tmp  where the cdk sweep looks
 #   FM_TREEHOUSE_ROOT          default ~/.treehouse
 #
 # Prints one "DISK_GUARD: ..." line per action plus a summary. Silent when the disk
@@ -87,6 +90,8 @@ CRIT_FREE_GB="${FM_DISK_CRITICAL_FREE_GB:-8}"
 WARN_USED_PCT="${FM_DISK_WARN_USED_PCT:-85}"
 CRIT_USED_PCT="${FM_DISK_CRITICAL_USED_PCT:-92}"
 CACHES="${FM_DISK_CACHES-npm tmpbuild playwright}"
+CDK_AGE_DAYS="${FM_DISK_CDK_AGE_DAYS:-3}"
+DISK_TMP="${FM_DISK_TMP_ROOT:-/tmp}"
 TREEHOUSE_ROOT="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
 DRY_RUN="${FM_DISK_DRY_RUN:-0}"
 VERBOSE=0
@@ -252,6 +257,58 @@ sweep_tmp_build() {  # <min-age-minutes>
     [ -n "$d" ] || continue
     reclaim "$d" "v8 compile cache, untouched >$(( mins / 60 ))h"
   done < <(find /tmp -maxdepth 1 -type d -name 'v8-compile-cache-*' -mmin "+$mins" 2>/dev/null)
+}
+
+# ---------------------------------------------------------------------------
+# Sweep 2b: AWS CDK cloud-assembly staging dirs (cdk.out<random> in the tmp root).
+#
+# `cdk synth` - and every `deploy`, `diff` and `list` that synthesizes on the way -
+# stages the cloud assembly in a fresh mkdtemp and never removes it. Neither did
+# anything else, so they accumulated one per invocation without bound: measured on
+# 2026-08-17, this box held 44,457 of them totalling 13G against 24G free, which is
+# the same shape as the incident that created this script - not a broken janitor,
+# but a large class of garbage with no owner at all.
+#
+# They are dead OUTPUT, not a cache. The next synth rebuilds the assembly and
+# nothing reads it in between, so there is no warm-cache case to trade off and no
+# reason to make this critical-only; it runs at every tier that runs at all.
+#
+# The age window is therefore the entire safety model, and 3 days sits far past any
+# live invocation - a synth finishes in seconds, and CDK writes into the directory
+# while it works, so an in-flight one keeps its own mtime fresh. FM_DISK_CDK_AGE_DAYS
+# raises it for anyone who inspects assemblies after the fact.
+#
+# NO PER-DIRECTORY du, DELIBERATELY, which is why this reports a COUNT where every
+# other sweep reports megabytes. bin/fm-watch.sh caps one guard run at
+# FM_DISK_GUARD_TIMEOUT (120s by default), and stat-ing tens of thousands of trees
+# to total their bytes does not fit inside it - the guard would be killed before it
+# deleted anything, trading the whole reclamation for a number in a log line. The
+# summary's df delta already carries the bytes. Deletion is idempotent and safe to
+# interrupt: a killed run simply leaves the remainder to the next one.
+# ---------------------------------------------------------------------------
+# The selection predicate has exactly one definition; the caller supplies only what
+# to DO with each hit. Two copies of "which directories are dead" - one to count and
+# one to delete - is the kind of drift that ends with the two disagreeing about an
+# `rm -rf` target.
+cdk_out_find() {  # <find-action...>
+  find "$DISK_TMP" -maxdepth 1 -type d -name 'cdk.out*' -mtime "+$CDK_AGE_DAYS" "$@" 2>/dev/null
+}
+
+sweep_cdk_out() {
+  local n
+  [ -d "$DISK_TMP" ] || return 0
+  n=$(cdk_out_find -print | grep -c .) || true
+  [ "${n:-0}" -gt 0 ] || return 0
+  if [ "$DRY_RUN" = 1 ] || [ "$REPORT_ONLY" = 1 ]; then
+    say "would reclaim $n cdk synth staging dir(s) in $DISK_TMP (untouched >${CDK_AGE_DAYS}d)"
+  else
+    # -exec ... + batches thousands of paths into each rm. The one-path-per-rm
+    # spellings (-exec \; or a read loop) fork once per directory, which at this
+    # sweep's scale does not finish inside the watcher's guard timeout.
+    cdk_out_find -exec rm -rf -- {} + || true
+    say "reclaimed $n cdk synth staging dir(s) in $DISK_TMP (untouched >${CDK_AGE_DAYS}d)"
+  fi
+  ACTIONS=$(( ACTIONS + 1 ))
 }
 
 # ---------------------------------------------------------------------------
@@ -435,11 +492,13 @@ case "$TIER" in
   warn)
     sweep_scratch 12
     sweep_tmp_build 1440
+    sweep_cdk_out
     sweep_treehouse 0
     ;;
   critical)
     sweep_scratch 6
     sweep_tmp_build 60
+    sweep_cdk_out
     sweep_npm_caches
     sweep_playwright
     sweep_treehouse 1
