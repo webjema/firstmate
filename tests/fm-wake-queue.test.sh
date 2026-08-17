@@ -2,7 +2,8 @@
 # tests/fm-wake-queue.test.sh - wake-queue losslessness (the queue safety matrix):
 # concurrent append/drain, signal catch-up while no watcher runs, stale/check
 # enqueue-before-suppressor ordering, atomic double-drain, duplicate collapse,
-# the drain-time watcher-liveness assertion, and the disk-guard kind's round trip.
+# the drain-time watcher-liveness assertion, the disk-guard kind's round trip, and
+# the diagnostic a wake that could not be recorded reports about itself.
 # Nothing is lost and nothing is double-consumed. General watcher/lock liveness
 # lives in fm-watcher-lock.test.sh; daemon classification/injection in
 # fm-daemon.test.sh.
@@ -335,7 +336,58 @@ test_disk_guard_records_dedupe_to_the_newest() {
   pass "duplicate disk-guard records collapse to the newest"
 }
 
+# A REFUSED KIND and an UNWRITABLE QUEUE are different failures with different
+# fixes - add the kind to bin/fm-wake-kind-lib.sh's vocabulary, versus free the
+# disk - so the watcher's one user-visible line about a wake it could not record
+# has to name the one that happened. It did not: every refused kind was announced
+# as "the queue ... is unwritable", which sent whoever read it to inspect a queue
+# that was working perfectly, and was observed doing exactly that when disk-guard
+# was refused. This pins both branches.
+test_refused_wake_kind_reports_a_refused_kind() {
+  local dir state out err dir2 state2 out2
+  dir=$(make_case refused-kind)
+  state="$dir/state"; out="$dir/enqueue.out"; err="$dir/enqueue.err"
+  # wake_enqueue exits the watcher, so drive it with bin/fm-watch.sh SOURCED: its
+  # source guard returns before the singleton lock and the poll loop.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    wake_enqueue "$2" "$3" "$4"
+  ' _ "$WATCH" not-a-wake-kind disk-guard 'DISK_GUARD: 3 worktrees are LEASED' > "$out" 2> "$err"
+  grep -F 'REFUSED' "$out" >/dev/null \
+    || fail "a refused wake kind was not reported as a refused kind: $(cat "$out")"
+  grep -F 'not-a-wake-kind' "$out" >/dev/null \
+    || fail "the diagnostic does not name the kind that was refused: $(cat "$out")"
+  grep -F 'unwritable' "$out" >/dev/null \
+    && fail "a refused kind is reported as an unwritable queue, misdirecting the reader: $(cat "$out")"
+  grep -F 'DISK_GUARD: 3 worktrees are LEASED' "$out" >/dev/null \
+    || fail "the unrecordable wake's payload was dropped from the line that replaces it"
+  ! grep -F 'not-a-wake-kind' "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "a refused kind entered the durable queue"
+  # And the queue really was writable, which is what makes the old wording a lie.
+  append_wake "$state" disk-guard disk-guard 'disk-guard: still held' \
+    || fail "the queue rejected a VALID kind, so this case proves nothing about the refusal"
+
+  # The other branch, unchanged: a valid kind whose write fails is still reported
+  # as a write failure. A directory where the sequence file belongs fails the write
+  # without touching the queue lock.
+  dir2=$(make_case refused-kind-write-failure)
+  state2="$dir2/state"; out2="$dir2/enqueue.out"
+  mkdir "$state2/.wake-queue.seq"
+  FM_STATE_OVERRIDE="$state2" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    wake_enqueue "$2" "$3" "$4"
+  ' _ "$WATCH" disk-guard disk-guard 'DISK_GUARD: 3 worktrees are LEASED' > "$out2" 2>/dev/null
+  grep -F 'write FAILED' "$out2" >/dev/null \
+    || fail "a genuine queue-write failure is no longer reported as one: $(cat "$out2")"
+  grep -F 'unwritable' "$out2" >/dev/null \
+    || fail "a genuine queue-write failure no longer names the queue as the problem: $(cat "$out2")"
+  pass "a refused kind reports as a refused kind, and a failed write still reports as an unwritable queue"
+}
+
 test_wake_vocabulary_has_exactly_one_owner
+test_refused_wake_kind_reports_a_refused_kind
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor

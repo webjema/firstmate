@@ -9,8 +9,9 @@
 # advanced, beacon fresh), stopped-crew no-verb wakes surfaced (queue + exit),
 # provably-working stale panes absorbed-then-escalated past the threshold,
 # terminal-looking stale status lines overridden by an active run, the heartbeat
-# backstop fail-safe, and afk coherence (no double-triage while the away-mode
-# daemon owns supervision).
+# backstop fail-safe, afk coherence (no double-triage while the away-mode
+# daemon owns supervision), and the disk-guard holdback's change detection (one
+# wake per change in the SET of held worktrees, none for a drifting size).
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
@@ -77,6 +78,64 @@ seen_sig() {
 }
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+
+# --- disk-guard holdback fixtures -------------------------------------------
+
+# A guard stub whose entire report is a file the test rewrites between watcher
+# runs, so one case can present the SAME holdback with a different measured size.
+# It also stamps a run log, because the cases below assert that a second run
+# raised NO wake - an assertion a guard that never ran satisfies just as well.
+install_fake_disk_guard() {  # <fakeroot> <report-file> <run-log>
+  mkdir -p "$1/bin"
+  cat > "$1/bin/fm-disk-guard.sh" <<SH
+#!/usr/bin/env bash
+echo ran >> "$3"
+cat "$2"
+SH
+  chmod +x "$1/bin/fm-disk-guard.sh"
+}
+
+# Block until the fake guard has run <n> times, so a negative assertion is made
+# against a guard that actually ran and not against one still starting up.
+wait_for_guard_runs() {  # <run-log> <n> [<deciseconds>]
+  local log=$1 want=$2 i=0 limit=${3:-100}
+  while [ "$i" -lt "$limit" ]; do
+    [ "$(wc -l < "$log" 2>/dev/null || echo 0)" -ge "$want" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# A holdback report in bin/fm-disk-guard.sh's real shape, down to the "DISK_GUARD: "
+# prefix its say() puts on every line (bin/fm-disk-guard.sh:120, :453-455): the size
+# line, then the release line carrying one "treehouse destroy <path>" clause per held
+# worktree. The prefix is not decoration here - the identity parse has to read a path
+# out of a line that carries it.
+write_holdback_report() {  # <report-file> <size-in-M> <held-path>...
+  local f=$1 size=$2 clauses='' p
+  shift 2
+  for p in "$@"; do clauses="$clauses treehouse destroy $p --yes --include-leased --include-unlanded;"; done
+  {
+    printf 'DISK_GUARD: critical - 4G free (96%% used) on /tmp\n'
+    printf 'DISK_GUARD: %s landed worktree(s) holding ~%sM are LEASED and were not touched.\n' "$#" "$size"
+    printf "DISK_GUARD: a lease is a crew's claim; release them yourself with:%s\\n" "$clauses"
+  } > "$f"
+}
+
+# Launch the watcher against a disk-guard case: the fake root supplies the guard,
+# and a zero interval makes every poll a guard run.
+watch_dg_bg() {  # <state> <fakebin> <fakeroot> <out>
+  PATH="$2:$PATH" FM_STATE_OVERRIDE="$1" FM_ROOT_OVERRIDE="$3" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_DISK_GUARD_INTERVAL=0 "$WATCH" > "$4" &
+}
+
+# How many disk-guard records the durable queue holds (records collapse at DRAIN
+# time, not at append, so this counts wakes actually raised).
+dg_records() {  # <state>
+  grep -c "$(printf '\tdisk-guard\t')" "$1/.wake-queue" 2>/dev/null || true
+}
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
@@ -1097,6 +1156,142 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+# --- disk-guard: the wake fires on the HELD SET, never on the reported size ---
+# A leased-and-landed worktree may be held for days, so the holdback is a standing
+# condition and must not be a standing wake. Keying the change-detection on the
+# guard's report TEXT made every run news: on 2026-08-17 the same three worktrees
+# were reported as 2050M, 2866M, 4917M and 2873M inside one day (crews on other
+# homes take and release worktrees on the same box, and the sizes grow on their
+# own), so supervision re-fired for as long as any lease was held. The identity of
+# a holdback is the set of paths held; everything else about it drifts.
+
+test_disk_guard_holdback_identity_classifier() {
+  local dir a b c
+  dir=$(make_case disk-guard-classifier)
+  # bin/fm-watch.sh's source guard returns before the singleton lock and the poll
+  # loop, so sourcing it here only loads the function under test. The state
+  # override keeps the mkdir it does on the way in inside this case's own dir.
+  export FM_STATE_OVERRIDE="$dir/state"
+  # shellcheck source=bin/fm-watch.sh
+  . "$WATCH"
+  unset FM_STATE_OVERRIDE
+  # Every line carries the "DISK_GUARD: " prefix bin/fm-disk-guard.sh's say() adds,
+  # because that is what the watcher is actually handed.
+  a='DISK_GUARD: 2 landed worktree(s) holding ~2050M are LEASED and were not touched.
+DISK_GUARD: a lease is a crew'"'"'s claim; release them yourself with: treehouse destroy /wt/alpha-a1 --yes; treehouse destroy /wt/beta-b2 --yes;'
+  # Same two worktrees, a size that moved and the clauses in the other order.
+  b='DISK_GUARD: 2 landed worktree(s) holding ~4917M are LEASED and were not touched.
+DISK_GUARD: a lease is a crew'"'"'s claim; release them yourself with: treehouse destroy /wt/beta-b2 --yes; treehouse destroy /wt/alpha-a1 --yes;'
+  c='DISK_GUARD: 3 landed worktree(s) holding ~4917M are LEASED and were not touched.
+DISK_GUARD: a lease is a crew'"'"'s claim; release them yourself with: treehouse destroy /wt/alpha-a1 --yes; treehouse destroy /wt/beta-b2 --yes; treehouse destroy /wt/gamma-c3 --yes;'
+  [ "$(disk_guard_holdback_identity "$a")" = "$(disk_guard_holdback_identity "$b")" ] \
+    || fail "the same held worktrees read as a different holdback once the megabytes moved"
+  [ "$(disk_guard_holdback_identity "$a")" != "$(disk_guard_holdback_identity "$c")" ] \
+    || fail "a worktree joining the held set did not change the holdback's identity"
+  # No readable path (a reshaped release line) falls back to the whole text: dedup
+  # degrades to churn, which is noisy, rather than to silence, which would hide a
+  # NEW holdback from the captain entirely.
+  [ "$(disk_guard_holdback_identity 'holding ~5G are LEASED and were not touched.')" \
+    = 'holding ~5G are LEASED and were not touched.' ] \
+    || fail "a report with no readable path did not fall back to its own text"
+  pass "disk_guard_holdback_identity keys on the held path set, order-insensitively, and falls back to the text"
+}
+
+test_disk_guard_unchanged_held_set_wakes_once() {
+  local dir state fakebin fakeroot report runs out1 out2 pid
+  dir=$(make_case disk-guard-identity)
+  state="$dir/state"; fakebin="$dir/fakebin"; fakeroot="$dir/fakeroot"; report="$dir/report"
+  runs="$dir/guard-runs"; out1="$dir/watch1.out"; out2="$dir/watch2.out"
+  install_fake_disk_guard "$fakeroot" "$report" "$runs"
+  write_holdback_report "$report" 2050 /wt/alpha-a1 /wt/beta-b2
+  watch_dg_bg "$state" "$fakebin" "$fakeroot" "$out1"
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "watcher did not surface a first, unseen disk-guard holdback"
+  grep -Fx 'disk-guard' "$out1" >/dev/null || fail "first holdback printed no disk-guard wake: $(cat "$out1")"
+  [ "$(dg_records "$state")" -eq 1 ] || fail "first holdback did not queue exactly one disk-guard record"
+
+  # The same two worktrees, still held, reported bigger. Nothing changed.
+  write_holdback_report "$report" 4917 /wt/beta-b2 /wt/alpha-a1
+  watch_dg_bg "$state" "$fakebin" "$fakeroot" "$out2"
+  pid=$!
+  # Wait on the GUARD having run again, never on a fixed nap: "no second wake" is a
+  # negative, and a watcher that had not reached the guard yet would satisfy it on a
+  # loaded box while proving nothing at all.
+  if ! wait_for_guard_runs "$runs" 2 200; then
+    reap "$pid"
+    fail "the second watcher never ran the disk guard, so the no-wake assertions prove nothing"
+  fi
+  if ! wait_live "$pid" 20; then
+    reap "$pid"
+    fail "the watcher re-woke for an unchanged holdback whose size figure moved: $(cat "$out2")"
+  fi
+  [ ! -s "$out2" ] || fail "unchanged holdback printed a wake reason: $(cat "$out2")"
+  [ "$(dg_records "$state")" -eq 1 ] || fail "unchanged holdback queued a second disk-guard record"
+  reap "$pid"
+  pass "two guard runs holding the same worktrees at different sizes raise exactly one wake"
+}
+
+# The other half of the same rule: the marker that suppresses a repeat wake has to
+# be dropped when the guard goes QUIET, not only when it reports a report with no
+# holdback. At tier ok the guard prints nothing, so a marker that survived a quiet
+# spell would swallow the wake for the next pressure episode entirely.
+test_disk_guard_quiet_spell_makes_the_next_episode_news_again() {
+  local dir state fakebin fakeroot report runs out1 out2 out3 pid
+  dir=$(make_case disk-guard-quiet)
+  state="$dir/state"; fakebin="$dir/fakebin"; fakeroot="$dir/fakeroot"; report="$dir/report"
+  runs="$dir/guard-runs"; out1="$dir/watch1.out"; out2="$dir/watch2.out"; out3="$dir/watch3.out"
+  install_fake_disk_guard "$fakeroot" "$report" "$runs"
+  write_holdback_report "$report" 2050 /wt/alpha-a1 /wt/beta-b2
+  watch_dg_bg "$state" "$fakebin" "$fakeroot" "$out1"
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "watcher did not surface a first, unseen disk-guard holdback"
+
+  # Pressure drops: the guard exits at tier ok, printing nothing.
+  : > "$report"
+  watch_dg_bg "$state" "$fakebin" "$fakeroot" "$out2"
+  pid=$!
+  wait_for_guard_runs "$runs" 2 200 || { reap "$pid"; fail "the quiet-spell watcher never ran the disk guard"; }
+  if ! wait_live "$pid" 20; then
+    reap "$pid"
+    fail "a silent guard raised a wake: $(cat "$out2")"
+  fi
+  reap "$pid"
+
+  # Pressure returns, the SAME two worktrees still held. A fresh episode is news.
+  write_holdback_report "$report" 5200 /wt/alpha-a1 /wt/beta-b2
+  watch_dg_bg "$state" "$fakebin" "$fakeroot" "$out3"
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "a new pressure episode after a quiet spell raised no wake"
+  grep -Fx 'disk-guard' "$out3" >/dev/null || fail "the second episode printed no disk-guard wake: $(cat "$out3")"
+  [ "$(dg_records "$state")" -eq 2 ] || fail "the second episode did not queue a second disk-guard record"
+  pass "a quiet spell clears the holdback marker, so the next pressure episode wakes again"
+}
+
+test_disk_guard_new_path_in_held_set_wakes_again() {
+  local dir state fakebin fakeroot report runs out1 out2 drain_out pid
+  dir=$(make_case disk-guard-new-path)
+  state="$dir/state"; fakebin="$dir/fakebin"; fakeroot="$dir/fakeroot"; report="$dir/report"
+  runs="$dir/guard-runs"; out1="$dir/watch1.out"; out2="$dir/watch2.out"; drain_out="$dir/drain.out"
+  install_fake_disk_guard "$fakeroot" "$report" "$runs"
+  write_holdback_report "$report" 2050 /wt/alpha-a1 /wt/beta-b2
+  watch_dg_bg "$state" "$fakebin" "$fakeroot" "$out1"
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "watcher did not surface a first, unseen disk-guard holdback"
+
+  # A third worktree joins the held set - a genuinely new holdback, and the whole
+  # reason the change-detection exists rather than a blanket suppression.
+  write_holdback_report "$report" 2873 /wt/alpha-a1 /wt/beta-b2 /wt/gamma-c3
+  watch_dg_bg "$state" "$fakebin" "$fakeroot" "$out2"
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "watcher did not wake for a worktree that JOINED the held set"
+  grep -Fx 'disk-guard' "$out2" >/dev/null || fail "a new held worktree printed no disk-guard wake: $(cat "$out2")"
+  [ "$(dg_records "$state")" -eq 2 ] || fail "a new held worktree did not queue a second disk-guard record"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the second holdback failed"
+  grep -F 'treehouse destroy /wt/gamma-c3' "$drain_out" >/dev/null \
+    || fail "the drained record does not carry the newly held worktree the captain must be shown"
+  pass "a worktree joining the held set raises a second wake carrying its release command"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1130,3 +1325,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_disk_guard_unchanged_held_set_wakes_once
+test_disk_guard_new_path_in_held_set_wakes_again
+test_disk_guard_quiet_spell_makes_the_next_episode_news_again
+test_disk_guard_holdback_identity_classifier

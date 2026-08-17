@@ -331,10 +331,22 @@ recorded_windows() {
 # information-free hot loop that reached firstmate only as harness churn. Saying
 # so once, in a reason line the arm propagates verbatim, turns it into the single
 # actionable wake it always was.
+#
+# Name the failure that actually happened. fm_wake_append refuses an unknown KIND
+# with FM_WAKE_RC_BAD_KIND and fails a WRITE with any other non-zero status, and the
+# two have nothing in common: a refused kind is a caller bug fixed by adding the kind
+# to bin/fm-wake-kind-lib.sh's vocabulary, while an unwritable queue is a full or
+# read-only disk. Reporting one as the other sends whoever reads the line to inspect a
+# queue that was fine all along.
 wake_enqueue() {  # <kind> <key> <reason>
-  local kind=$1 key=$2 reason=$3
-  fm_wake_append "$kind" "$key" "$reason" && return 0
-  echo "heartbeat: wake-queue write FAILED (kind=$kind key=$key); the queue at $FM_WAKE_QUEUE is unwritable - the wake below could not be recorded: $reason"
+  local kind=$1 key=$2 reason=$3 rc=0
+  fm_wake_append "$kind" "$key" "$reason" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  if [ "$rc" -eq "$FM_WAKE_RC_BAD_KIND" ]; then
+    echo "heartbeat: wake-queue REFUSED the kind (kind=$kind key=$key); '$kind' is not in the wake vocabulary bin/fm-wake-kind-lib.sh owns, so the queue never saw it - the queue itself is fine, and the wake below could not be recorded: $reason"
+  else
+    echo "heartbeat: wake-queue write FAILED (kind=$kind key=$key); the queue at $FM_WAKE_QUEUE is unwritable - the wake below could not be recorded: $reason"
+  fi
   exit 0
 }
 
@@ -579,6 +591,29 @@ heartbeat_scan_finds_actionable() {
     return 0
   done < <(scan_captain_relevant_statuses "$STATE")
   return 1
+}
+
+# The IDENTITY of a disk-guard holdback: the SET of held worktree paths, one per
+# line, sorted, so the same worktrees held again read as the same holdback.
+#
+# It is deliberately not the guard's report text. The report carries a measured
+# size and a count, and both move while nothing about the holdback changes: on
+# 2026-08-17 the same three leased worktrees were reported as 2050M, 2866M, 4917M
+# and 2873M within one day (crews on other homes take and release worktrees on the
+# same box, and the sizes themselves grow). Keying the change-detection on that text
+# made every run "news" and turned a standing condition into a wake every cadence -
+# the churn the comment at the call site exists to prevent.
+#
+# The paths come out of the guard's release line ("... release them yourself with:
+# treehouse destroy <path> --yes ...", one clause per held worktree), which is the
+# only place the identities appear. If that line is ever reshaped so no path can be
+# read, fall back to the whole text: dedup then degrades to the old churn, which is
+# noisy but never silent, and silence here means a NEW holdback the captain is
+# never told about.
+disk_guard_holdback_identity() {  # <held-lines>
+  local paths
+  paths=$(printf '%s\n' "$1" | grep -oE 'treehouse destroy [^[:space:]]+' | awk '{print $3}' | LC_ALL=C sort -u)
+  printf '%s\n' "${paths:-$1}"
 }
 
 # --- Main entry: the runtime below runs only when this file is executed as a
@@ -1015,9 +1050,11 @@ EOF
   # may be days. Waking on the condition itself would re-fire every cadence forever
   # and reach the captain as pure churn - the exact shape of the storm in
   # docs/incidents/watch-arm-notification-storm.md. So the wake fires on a CHANGE in
-  # the holdback, not on its presence: the report is hashed, and a wake is raised
-  # only when that hash differs from the last one surfaced. Same worktrees still
-  # stuck tomorrow, no wake; a new one joins the set, one wake.
+  # the holdback, not on its presence: the holdback's IDENTITY (the set of held
+  # worktree paths - disk_guard_holdback_identity owns why it is the paths and not
+  # the report) is hashed, and a wake is raised only when that hash differs from the
+  # last one surfaced. Same worktrees still stuck tomorrow, no wake however far the
+  # megabytes drift; a path joins or leaves the set, one wake.
   #
   # The run is also bounded. At tier ok the guard is one `df` and exits, but under
   # real pressure it queries gh per candidate worktree, and this loop is the fleet's
@@ -1027,6 +1064,7 @@ EOF
     touch "$STATE/.last-disk-guard"
     if [ -x "$FM_ROOT/bin/fm-disk-guard.sh" ]; then
       dg_out=$(timeout "$DISK_GUARD_TIMEOUT" "$FM_ROOT/bin/fm-disk-guard.sh" 2>/dev/null || true)
+      dg_held=
       if [ -n "$dg_out" ]; then
         triage_log "disk guard: $(echo "$dg_out" | tr '\n' ' ')"
         # Both lines of the guard's escalation, never just the first. bin/fm-disk-guard.sh
@@ -1035,17 +1073,25 @@ EOF
         # commands verbatim, so a payload carrying only the size makes that impossible
         # and leaves the captain retyping a command it was supposed to be handed.
         dg_held=$(echo "$dg_out" | grep -E 'LEASED and were not touched|release them yourself with:' || true)
-        if [ -n "$dg_held" ]; then
-          dg_hash=$(printf '%s' "$dg_held" | cksum | awk '{print $1}')
-          if [ "$dg_hash" != "$(cat "$STATE/.disk-guard-surfaced" 2>/dev/null || echo)" ]; then
-            printf '%s\n' "$dg_hash" > "$STATE/.disk-guard-surfaced"
-            wake_enqueue disk-guard disk-guard "$dg_held"
-            wake "disk-guard"
-          fi
-        else
-          # The holdback cleared, so the next one is news again.
-          rm -f "$STATE/.disk-guard-surfaced"
+      fi
+      if [ -n "$dg_held" ]; then
+        dg_hash=$(disk_guard_holdback_identity "$dg_held" | cksum | awk '{print $1}')
+        if [ "$dg_hash" != "$(cat "$STATE/.disk-guard-surfaced" 2>/dev/null || echo)" ]; then
+          printf '%s\n' "$dg_hash" > "$STATE/.disk-guard-surfaced"
+          wake_enqueue disk-guard disk-guard "$dg_held"
+          wake "disk-guard"
         fi
+      else
+        # The holdback cleared, so the next one is news again - and SILENCE from the
+        # guard is one of the ways it clears. At tier ok the guard prints nothing at
+        # all, so a marker kept across a quiet spell would still name the last
+        # holdback when pressure returned, and the same worktrees held through a
+        # fresh critical episode would raise no wake at all. Hashing the report text
+        # hid that: the size always drifted, so the second episode always re-fired
+        # by accident. Keying on the paths removes the accident, so the clearing has
+        # to be deliberate. A timed-out or crashed guard lands here too, which costs
+        # one repeat wake next cadence - churn, never silence.
+        rm -f "$STATE/.disk-guard-surfaced"
       fi
     fi
   fi
