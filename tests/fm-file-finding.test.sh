@@ -623,8 +623,11 @@ test_a_card_on_the_default_board_is_not_copied_onto_the_repo_board() {
 # flush files a whole batch of held findings in ONE process, and they are about different
 # repositories, so the target is chosen per finding rather than once per run. A target that
 # leaked from the previous finding would put the product card on the workstation board.
+# The leak is only visible when a mapped repo is flushed BEFORE an unmapped one, and flush
+# walks the records in key order, so these two titles are chosen for the order their keys
+# give and the test refuses to run if a later edit reverses it.
 test_flush_of_two_repos_routes_each_to_its_own_board() {
-  local out
+  local out first
   new_case flush_two_boards
   TRACKER_PROJECT='' TRACKER_SECTION=''
   write_tracker "project=$PROJECT_GID" "section=$SECTION_GID" \
@@ -632,10 +635,13 @@ test_flush_of_two_repos_routes_each_to_its_own_board() {
   export FAKE_ASANA_FAIL=1
   run_file "$PROJ_DIR" --repo acme-workstation --blocking no --title "the box reboots nightly" \
     --where "boot.sh:9" --why w --expected e >/dev/null || fail "holding the first finding failed"
-  run_file "$PROJ_DIR" --repo acme --blocking no --title "pool key is never refreshed" \
+  run_file "$PROJ_DIR" --repo acme --blocking no --title "the lease is never renewed" \
     --where "src/pool.ts:42" --why w --expected e >/dev/null ||
     fail "holding the second finding failed"
   unset FAKE_ASANA_FAIL
+  first=$(find "$HOME_DIR/state/findings" -name '*.json' | sort | head -1)
+  [ "$(jq -r .repo "$first")" = acme-workstation ] ||
+    fail "these titles must hold in an order that flushes the mapped repo first, or a leaked target cannot show"
   out=$(run_file "$PROJ_DIR" flush) || fail "flush failed: $out"
   expect_cards "$WS_PROJECT_GID" 1 "the workstation finding must land on the workstation board"
   expect_cards "$PROJECT_GID" 1 "the product finding must land on the default board"
