@@ -44,14 +44,32 @@
 # ASANA TARGET. A local knob, never a built-in default: which tracker a fleet files into is
 # a decision only its user can make, and a shipped default would point every other install
 # at a board it does not own. $FM_HOME/config/product-tracker (local, gitignored) carries
-# `project=<gid>` and `section=<gid>`, one per line; FM_ASANA_PROJECT / FM_ASANA_SECTION
-# override per key. With no project configured, a product finding takes the OUTAGE path
-# below - held locally with the reason "no product tracker configured", which reads
-# differently from an unreachable tracker on purpose, because only one of the two is fixed
-# by waiting. With a project but no section the card is still filed, into wherever the board
-# puts a sectionless task, and the script warns. A section is wanted because it should be a
-# triage one rather than the pipeline's own queue: a filed finding must be read by a human
-# before it becomes authorized work, so filing never auto-starts work. Auth is
+# one `key=value` per line, whitespace insignificant:
+#   project=<gid>            the default board, used by every repository without its own
+#   section=<gid>            the default board's triage section
+#   project.<repo>=<gid>     the board for findings ABOUT <repo> (--repo / the repo probe)
+#   section.<repo>=<gid>     that board's triage section
+# A home with one board writes the two bare lines and never needs to know the qualified
+# form exists. A repository with no `project.<repo>=` of its own files to the default board
+# silently, because one board is a legitimate setup, not a misconfiguration. A repository
+# WITH its own board takes its section only from `section.<repo>=`: the default `section=`
+# is a gid on a different board and moving a card into it would fail. Duplicate keys are
+# first-wins. FM_ASANA_PROJECT / FM_ASANA_SECTION override per key, for every repository -
+# an explicit override is the last word, so a repo-qualified line never beats one.
+# A mapping that is PRESENT BUT UNUSABLE - `project.<repo>=` with no gid, or a
+# `section.<repo>=` with no `project.<repo>=` beside it - takes the OUTAGE path below
+# instead of falling back to the default board, naming the offending line. Defaulting there
+# would file, say, a workstation defect onto the product board, and a misrouted finding is
+# worse than a held one: a held one is re-filed by `flush` the moment the line is fixed,
+# while a misrouted one is claimed by whatever reads the board it landed on.
+# With no project configured at all, a product finding takes the same OUTAGE path - held
+# locally with the reason "no product tracker configured", which reads differently from an
+# unreachable tracker on purpose, because only one of the two is fixed by waiting. With a
+# project but no section the card is still filed, into wherever the board puts a sectionless
+# task, and the script warns - the qualified form behaves the same way. A section is wanted
+# because it should be a triage one rather than the pipeline's own queue: a filed finding
+# must be read by a human before it becomes authorized work, so filing never auto-starts
+# work. Auth is
 # ASANA_ACCESS_TOKEN, which bin/fm-spawn.sh forwards to every crew through a 0600 file,
 # so a crewmate can file the moment it finds something - the finding survives a firstmate
 # restart or a context compaction, which a finding that only exists in a status line does
@@ -76,6 +94,11 @@
 #      completed_since=now (open tasks only) paginated to FM_FINDING_SCAN_PAGES pages
 #      (default 20 x 100). Exhausting the cap without a match means "cannot verify", which
 #      defers rather than risking a duplicate. Backlog: grep the trailer in backlog.md.
+#      The key does not mention the board, so a finding is filed once whatever board it is
+#      on: when a repository has a board of its own, the DEFAULT board is scanned too,
+#      because that is where its findings landed before it had one, and an already-filed
+#      card there is reported as filed rather than copied across. Same rule as within one
+#      board - a scan that could not answer defers instead of creating.
 #   3. only then create.
 # This is idempotence across time, not across concurrent callers: two crews filing the same
 # finding in the same second both scan, both miss, and both create. Not worth a lock - the
@@ -121,20 +144,32 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 FINDINGS="$STATE/findings"
 
 ASANA_API="${FM_ASANA_API:-https://app.asana.com/api/1.0}"
-ASANA_PROJECT="${FM_ASANA_PROJECT:-}"
-ASANA_SECTION="${FM_ASANA_SECTION:-}"
-# The env vars are set above, so "keep what is already set" is what makes them win over the
+ENV_PROJECT="${FM_ASANA_PROJECT:-}"
+ENV_SECTION="${FM_ASANA_SECTION:-}"
+DEFAULT_PROJECT="$ENV_PROJECT"
+DEFAULT_SECTION="$ENV_SECTION"
+# The repo-qualified lines, one `project.<repo>=<gid>` or `section.<repo>=<gid>` per line,
+# in file order so a duplicate key is first-wins like the bare ones. Held as text rather
+# than an associative array because that is bash 4 and this fleet still runs stock macOS
+# bash, and because the repository the target is chosen for is not known until a finding is
+# read: `flush` files a batch of held findings, each about its own repository.
+TRACKER_MAP=""
+# The env vars are read above, so "keep what is already set" is what makes them win over the
 # file. A file with no trailing newline still yields its last line.
 if [ -f "$CONFIG/product-tracker" ]; then
   while IFS='=' read -r k v || [ -n "$k" ]; do
     k=$(printf '%s' "$k" | tr -d '[:space:]')
     v=$(printf '%s' "${v:-}" | tr -d '[:space:]')
     case "$k" in
-      project) [ -n "$ASANA_PROJECT" ] || ASANA_PROJECT=$v ;;
-      section) [ -n "$ASANA_SECTION" ] || ASANA_SECTION=$v ;;
+      project) [ -n "$DEFAULT_PROJECT" ] || DEFAULT_PROJECT=$v ;;
+      section) [ -n "$DEFAULT_SECTION" ] || DEFAULT_SECTION=$v ;;
+      project.?*|section.?*) TRACKER_MAP="$TRACKER_MAP$k=$v"$'\n' ;;
     esac
   done < "$CONFIG/product-tracker"
 fi
+# The live target, re-chosen per finding by asana_target_for below.
+ASANA_PROJECT="$DEFAULT_PROJECT"
+ASANA_SECTION="$DEFAULT_SECTION"
 SCAN_PAGES="${FM_FINDING_SCAN_PAGES:-20}"
 HTTP_TIMEOUT="${FM_FINDING_HTTP_TIMEOUT:-20}"
 
@@ -215,6 +250,52 @@ update_record() {  # <key> <jq-filter> [--arg pairs...]
 API_BODY=""
 API_ERR=""
 
+# The value of a repo-qualified config line, on stdout. Returns non-zero when the line is
+# absent, which is a different thing from a line whose value is empty: one is "this repo has
+# no board of its own" and the other is a broken mapping that must never default.
+tracker_lookup() {  # <project|section> <repo>
+  local want="$1.$2=" line
+  while IFS= read -r line; do
+    # The repo is interpolated into a case pattern, so it is quoted: a glob character in a
+    # repository name must match itself, not whatever else the map happens to hold.
+    case "$line" in
+      "$want"*) printf '%s' "${line#"$want"}"; return 0 ;;
+    esac
+  done <<EOF
+$TRACKER_MAP
+EOF
+  return 1
+}
+
+# Chooses the board for the repository a finding is ABOUT, into ASANA_PROJECT/ASANA_SECTION.
+# Returns non-zero with API_ERR set when the repo names a mapping that cannot be used, so
+# the caller holds the finding; falling back to the default board there is the misroute this
+# whole per-repo target exists to end.
+asana_target_for() {  # <repo>
+  local repo=$1 project section has_project=0 has_section=0
+  ASANA_PROJECT="$DEFAULT_PROJECT"
+  ASANA_SECTION="$DEFAULT_SECTION"
+  [ -n "$repo" ] || return 0
+  # An explicit env override is the last word and points the whole run at one board, so the
+  # map is not consulted at all - not even to reject a line that run will never read.
+  [ -z "$ENV_PROJECT" ] || return 0
+  project=$(tracker_lookup project "$repo") && has_project=1
+  section=$(tracker_lookup section "$repo") && has_section=1
+  if [ "$has_project" -eq 1 ] && [ -z "$project" ]; then
+    API_ERR="config/product-tracker: 'project.$repo=' names no board - fix the line and re-file with 'fm-file-finding.sh flush'"
+    return 1
+  fi
+  if [ "$has_project" -eq 0 ] && [ "$has_section" -eq 1 ]; then
+    API_ERR="config/product-tracker: 'section.$repo=$section' has no 'project.$repo=' beside it, and a section gid does not name a board - fix the line and re-file with 'fm-file-finding.sh flush'"
+    return 1
+  fi
+  [ "$has_project" -eq 1 ] || return 0
+  ASANA_PROJECT="$project"
+  # Never the default section: it is a gid on the board this repo just moved off.
+  ASANA_SECTION="${ENV_SECTION:-$section}"
+  return 0
+}
+
 # The token is written once to a 0600 file curl reads with --config, never passed as an
 # argument: /proc/<pid>/cmdline is world-readable to every process on the box.
 asana_auth_file() {
@@ -253,11 +334,11 @@ asana_api() {  # <method> <path> [json-body]
 # "could not look", because only the first is safe to create on. Not a $(...) helper:
 # a command substitution runs in a subshell, and API_ERR set there never comes back.
 FOUND_GID=""
-asana_find() {  # <trailer>
-  local trailer=$1 offset="" page=0 query
+asana_find() {  # <project> <trailer>
+  local project=$1 trailer=$2 offset="" page=0 query
   FOUND_GID=""
   while [ "$page" -lt "$SCAN_PAGES" ]; do
-    query="/projects/$ASANA_PROJECT/tasks?opt_fields=notes&limit=100&completed_since=now"
+    query="/projects/$project/tasks?opt_fields=notes&limit=100&completed_since=now"
     [ -n "$offset" ] && query="$query&offset=$offset"
     asana_api GET "$query" || return 1
     # A 2xx whose body is not the task list - a proxy interstitial, a truncated read - must
@@ -279,14 +360,17 @@ asana_find() {  # <trailer>
   return 1
 }
 
-asana_url_for() { printf 'https://app.asana.com/0/%s/%s' "$ASANA_PROJECT" "$1"; }
+asana_url_for() { printf 'https://app.asana.com/0/%s/%s' "$1" "$2"; }
 
 # Fills FILED_URL, and ALREADY=1 when the card was already there; sets API_ERR and
 # returns non-zero otherwise.
 FILED_URL=""
 ALREADY=0
-asana_file() {  # <title> <notes> <trailer>
-  local title=$1 notes=$2 trailer=$3 gid payload
+asana_file() {  # <title> <notes> <trailer> <repo>
+  local title=$1 notes=$2 trailer=$3 repo=$4 gid payload board
+  # A mapping that is present but unusable holds the finding rather than defaulting: filing
+  # it onto the default board is the misroute this per-repo target exists to end.
+  asana_target_for "$repo" || return 1
   # No configured board is a different thing from an unreachable one, and only one of them
   # is fixed by waiting, so it says so. Never a built-in default: which tracker a fleet
   # files into is the user's decision, and a stranger's board would swallow the finding.
@@ -297,12 +381,21 @@ asana_file() {  # <title> <notes> <trailer>
   [ -n "${ASANA_ACCESS_TOKEN:-}" ] || { API_ERR="ASANA_ACCESS_TOKEN is not set"; return 1; }
   command -v curl >/dev/null 2>&1 || { API_ERR="curl is not installed"; return 1; }
 
-  asana_find "$trailer" || return 1
-  if [ -n "$FOUND_GID" ]; then
-    FILED_URL=$(asana_url_for "$FOUND_GID")
-    ALREADY=1
-    return 0
+  # The target board, then the default one when this repo has its own - that is where this
+  # repo's findings landed before it had a board, and the key does not mention the board, so
+  # a card found there is this finding already filed and must not be copied across.
+  local -a boards=("$ASANA_PROJECT")
+  if [ -n "$DEFAULT_PROJECT" ] && [ "$DEFAULT_PROJECT" != "$ASANA_PROJECT" ]; then
+    boards+=("$DEFAULT_PROJECT")
   fi
+  for board in "${boards[@]}"; do
+    asana_find "$board" "$trailer" || return 1
+    if [ -n "$FOUND_GID" ]; then
+      FILED_URL=$(asana_url_for "$board" "$FOUND_GID")
+      ALREADY=1
+      return 0
+    fi
+  done
 
   payload=$(jq -n --arg n "$title" --arg b "$notes" --arg p "$ASANA_PROJECT" \
     '{data:{name:$n,notes:$b,projects:[$p]}}')
@@ -310,7 +403,7 @@ asana_file() {  # <title> <notes> <trailer>
   gid=$(printf '%s' "$API_BODY" | jq -r '.data.gid // empty' 2>/dev/null || printf '')
   [ -n "$gid" ] || { API_ERR="create returned no task gid"; return 1; }
   FILED_URL=$(printf '%s' "$API_BODY" | jq -r '.data.permalink_url // empty' 2>/dev/null || printf '')
-  [ -n "$FILED_URL" ] || FILED_URL=$(asana_url_for "$gid")
+  [ -n "$FILED_URL" ] || FILED_URL=$(asana_url_for "$ASANA_PROJECT" "$gid")
 
   # A configured project with no section still files - the card exists and is deduplicated,
   # it just lands wherever the board puts a sectionless task. Worth a warning, not a refusal.
@@ -433,7 +526,9 @@ file_recorded() {  # <key>
     backlog_file_finding "$title" "$body" "$trailer" \
       "$(record_field "$key" repo)" "$(record_field "$key" priority)" || ok=1
   else
-    asana_file "$title" "$body" "$trailer" || ok=1
+    # The record's own repo, not the caller's: `flush` files a batch of held findings, and
+    # each one chooses the board of the repository IT is about.
+    asana_file "$title" "$body" "$trailer" "$(record_field "$key" repo)" || ok=1
   fi
   if [ "$ok" -eq 0 ]; then
     # shellcheck disable=SC2016  # $u is a jq variable bound by --arg, not a shell one.

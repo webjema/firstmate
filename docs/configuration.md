@@ -121,11 +121,15 @@ Seeding at spawn makes every slot correct the next time it is used, instead of a
 ## Product tracker for filed findings (config/product-tracker)
 
 `config/product-tracker` (local, gitignored) names the board `bin/fm-file-finding.sh` files product-scoped findings into, one `key=value` per line: `project=<gid>` and `section=<gid>`.
+A repository that needs a board of its own adds `project.<repo>=<gid>` and `section.<repo>=<gid>` beside them; everything else keeps using the bare pair, so a home with one board writes only those two lines.
+`bin/fm-file-finding.sh --help` owns the format, including what a mapping that is present but unusable does.
 `FM_ASANA_PROJECT` and `FM_ASANA_SECTION` override the file per key, and `FM_ASANA_API` overrides the API base for tests.
 
 ```
 project=1200000000000001
 section=1200000000000002
+project.acme-workstation=1200000000000003
+section.acme-workstation=1200000000000004
 ```
 
 There is deliberately no built-in default.
