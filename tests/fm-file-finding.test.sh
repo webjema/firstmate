@@ -23,13 +23,20 @@ TMP_ROOT=$(fm_test_tmproot fm-file-finding)
 # either - a fixture is exactly how a private gid gets back into tracked code.
 PROJECT_GID=9990001
 SECTION_GID=9990002
+# A second board, for the per-repository target: the fleet that prompted it keeps its
+# product repo and its workstation repo on boards a pipeline reads differently.
+WS_PROJECT_GID=9990003
+WS_SECTION_GID=9990004
 
 # --- fixtures ---------------------------------------------------------------
 
 # A fake Asana over the same wire shape bin/fm-file-finding.sh speaks: body, newline,
 # HTTP status (matching curl's -w '\n%{http_code}'). $FAKE_ASANA_STORE holds a JSON array
-# of {gid,notes}; the scan reads it and the create appends to it, so two runs against one
-# store exercise the real deduplication. $FAKE_ASANA_LOG records one line per request.
+# of {gid,notes,project}; the scan reads it and the create appends to it, so two runs against
+# one store exercise the real deduplication. The store spans every board and the scan serves
+# only the cards of the project gid in the URL, which is what makes a card filed onto one
+# board invisible to a scan of the other unless the script goes looking for it there.
+# $FAKE_ASANA_LOG records one line per request.
 # $FAKE_ASANA_FAIL makes every request fail like an outage; $FAKE_ASANA_ENDLESS makes the
 # scan always claim another page, so the page cap can be driven.
 install_fake_curl() {
@@ -60,7 +67,10 @@ case "$method $url" in
     if [ -n "${FAKE_ASANA_ENDLESS:-}" ]; then
       jq -n '{data:[],next_page:{offset:"more"}}'
     else
-      jq '{data:., next_page:null}' "$FAKE_ASANA_STORE"
+      scanned=${url#*/projects/}
+      scanned=${scanned%%/*}
+      jq --arg p "$scanned" \
+        '{data: [.[] | select((.project // $p) == $p)], next_page: null}' "$FAKE_ASANA_STORE"
     fi
     printf '\n200\n'
     ;;
@@ -71,7 +81,9 @@ case "$method $url" in
     ;;
   "POST "*"/tasks"*)
     gid=$(( $(jq 'length' "$FAKE_ASANA_STORE") + 700001 ))
-    printf '%s' "$body" | jq --arg g "$gid" '{gid:$g, notes:.data.notes}' > "$FAKE_ASANA_STORE.new"
+    printf '%s' "$body" |
+      jq --arg g "$gid" '{gid:$g, notes:.data.notes, project:.data.projects[0]}' \
+      > "$FAKE_ASANA_STORE.new"
     jq -s '.[0] + [.[1]]' "$FAKE_ASANA_STORE" "$FAKE_ASANA_STORE.new" > "$FAKE_ASANA_STORE.tmp"
     mv "$FAKE_ASANA_STORE.tmp" "$FAKE_ASANA_STORE"
     jq -n --arg g "$gid" '{data:{gid:$g, permalink_url:("https://app.asana.com/0/1/" + $g)}}'
@@ -175,6 +187,17 @@ STD_ARGS=(--blocking no "${FINDING[@]}")
 
 record_file() { printf '%s/state/findings/%s.json' "$HOME_DIR" "$1"; }
 only_record() { find "$HOME_DIR/state/findings" -name '*.json' 2>/dev/null | head -1; }
+
+write_tracker() {  # <line>...
+  mkdir -p "$HOME_DIR/config"
+  printf '%s\n' "$@" > "$HOME_DIR/config/product-tracker"
+}
+cards_on() { jq --arg p "$1" '[.[] | select(.project == $p)] | length' "$FAKE_ASANA_STORE"; }
+expect_cards() {  # <project-gid> <count> <message>
+  local got
+  got=$(cards_on "$1")
+  [ "$got" -eq "$2" ] || fail "$3 (expected $2 cards on board $1, got $got)"
+}
 
 # --- tests ------------------------------------------------------------------
 
@@ -461,6 +484,142 @@ test_key_ignores_reworded_why() {
   pass "fm-file-finding.sh: the dedupe key survives a reworded explanation"
 }
 
+# Two repositories, two boards. The pipeline that reads the product board claims cards
+# against the product repo, so a workstation finding on it is claimed and blocked - which is
+# what a board per repository exists to stop. The card must be created on the repo's own
+# board AND moved into that board's section, never the default board's.
+test_repo_mapping_files_onto_that_repos_board() {
+  local out
+  new_case repo_board
+  TRACKER_PROJECT='' TRACKER_SECTION=''
+  write_tracker "project=$PROJECT_GID" "section=$SECTION_GID" \
+    "project.acme-workstation=$WS_PROJECT_GID" "section.acme-workstation=$WS_SECTION_GID"
+  out=$(run_file "$PROJ_DIR" --repo acme-workstation "${STD_ARGS[@]}") ||
+    fail "filing onto a repo-specific board failed: $out"
+  assert_contains "$out" "filed: " "the verdict line must report the filed card"
+  expect_cards "$WS_PROJECT_GID" 1 "the finding must land on its repository's own board"
+  expect_cards "$PROJECT_GID" 0 "it must not also land on the default board"
+  assert_grep "\"section\": \"$WS_SECTION_GID\"" "$FAKE_ASANA_ADDPROJECT" \
+    "the card must be moved into that board's own triage section"
+  assert_no_grep "\"section\": \"$SECTION_GID\"" "$FAKE_ASANA_ADDPROJECT" \
+    "the default board's section gid names a section on a board this card is not on"
+  pass "fm-file-finding.sh: a repo with its own board gets its findings, section and all"
+}
+
+# One board is a legitimate setup, not a misconfiguration, so a repository with no mapping
+# of its own falls back to the default board WITHOUT a warning: a warning on every ordinary
+# filing is noise a crew learns to ignore, and this is the ordinary case.
+test_unmapped_repo_falls_back_to_the_default_board_silently() {
+  local out err
+  new_case fallback
+  TRACKER_PROJECT='' TRACKER_SECTION=''
+  write_tracker "project=$PROJECT_GID" "section=$SECTION_GID" \
+    "project.acme-workstation=$WS_PROJECT_GID" "section.acme-workstation=$WS_SECTION_GID"
+  err="$CASE_DIR/fallback.err"
+  out=$(run_file "$PROJ_DIR" --repo acme "${STD_ARGS[@]}" 2>"$err") ||
+    fail "filing for an unmapped repo failed: $out"
+  assert_contains "$out" "filed: " "an unmapped repo must still file"
+  expect_cards "$PROJECT_GID" 1 "an unmapped repo must fall back to the default board"
+  expect_cards "$WS_PROJECT_GID" 0 "it must not reach another repository's board"
+  assert_grep "\"section\": \"$SECTION_GID\"" "$FAKE_ASANA_ADDPROJECT" \
+    "the fallback must use the default board's own section"
+  [ ! -s "$err" ] || fail "the fallback must be silent, got: $(cat "$err")"
+  pass "fm-file-finding.sh: a repo with no mapping falls back to the default board, silently"
+}
+
+# THE COMPATIBILITY TEST. Someone else's install has one board and must never need to know
+# the per-repository form exists: a bare project=/section= pair behaves for every repository
+# exactly as it did before there was a second board to get wrong.
+test_single_target_config_is_unchanged_for_every_repo() {
+  local err gets scans
+  new_case compat
+  TRACKER_PROJECT='' TRACKER_SECTION=''
+  write_tracker "project=$PROJECT_GID" "section=$SECTION_GID"
+  err="$CASE_DIR/compat.err"
+  run_file "$PROJ_DIR" --repo acme --blocking no --title "one" --where "a.ts:1" \
+    --why w --expected e >/dev/null 2>>"$err" || fail "filing for a named repo failed"
+  run_file "$PROJ_DIR" --repo acme-workstation --blocking no --title "two" --where "b.ts:2" \
+    --why w --expected e >/dev/null 2>>"$err" || fail "filing for another named repo failed"
+  run_file "$PROJ_DIR" --blocking no --title "three" --where "c.ts:3" \
+    --why w --expected e >/dev/null 2>>"$err" || fail "filing with no --repo failed"
+  expect_cards "$PROJECT_GID" 3 "every repo must file to the single configured board"
+  [ "$(jq 'length' "$FAKE_ASANA_STORE")" -eq 3 ] || fail "cards landed somewhere else too"
+  [ "$(grep -c "\"section\": \"$SECTION_GID\"" "$FAKE_ASANA_ADDPROJECT")" -eq 3 ] ||
+    fail "every card must be moved into the single configured section"
+  gets=$(grep -c '^GET ' "$FAKE_ASANA_LOG")
+  scans=$(grep -c "/projects/$PROJECT_GID/tasks" "$FAKE_ASANA_LOG")
+  [ "$gets" -eq "$scans" ] ||
+    fail "a single-target config must scan only its own board ($scans of $gets reads)"
+  [ ! -s "$err" ] || fail "a single-target config must file without warnings, got: $(cat "$err")"
+  pass "fm-file-finding.sh: a single-target config behaves exactly as before, for every repo"
+}
+
+# A mapping that is present but unusable must NOT quietly default: that files a workstation
+# defect onto the product board, where the pipeline claims it against a repo that does not
+# contain the files it names. Held instead, naming the line, and flush re-files it once the
+# line is fixed - the finding is never filed wrong and never lost.
+test_malformed_mapping_holds_the_finding_and_flush_recovers_it() {
+  local out flushed
+  new_case malformed
+  TRACKER_PROJECT='' TRACKER_SECTION=''
+  write_tracker "project=$PROJECT_GID" "section=$SECTION_GID" "project.acme-workstation="
+  out=$(run_file "$PROJ_DIR" --repo acme-workstation "${STD_ARGS[@]}") ||
+    fail "a malformed mapping must not fail the crew's task: $out"
+  assert_contains "$out" "deferred: " "a malformed mapping must hold the finding"
+  assert_contains "$out" "project.acme-workstation=" "the reason must name the offending line"
+  assert_absent "$FAKE_ASANA_LOG" "a malformed mapping must post to no board at all"
+  assert_grep '"state": "pending"' "$(only_record)" "the finding must be held, not dropped"
+  assert_grep "the cached key outlives its lease" "$(only_record)" \
+    "the held record must carry the finding itself"
+
+  write_tracker "project=$PROJECT_GID" "section=$SECTION_GID" \
+    "project.acme-workstation=$WS_PROJECT_GID" "section.acme-workstation=$WS_SECTION_GID"
+  flushed=$(run_file "$PROJ_DIR" flush) || fail "flush failed: $flushed"
+  assert_contains "$flushed" "filed: " "flush must re-file the held finding once the line is fixed"
+  expect_cards "$WS_PROJECT_GID" 1 "flush must file it onto the corrected board"
+  expect_cards "$PROJECT_GID" 0 "flush must never file it onto the default board"
+  pass "fm-file-finding.sh: a malformed mapping holds the finding until the line is fixed"
+}
+
+# The other half of "present but unusable": a section gid does not name a board, so pairing
+# it with the default project would move the card into a section of a board it is not on.
+test_section_without_a_project_holds_the_finding() {
+  local out
+  new_case section_only
+  TRACKER_PROJECT='' TRACKER_SECTION=''
+  write_tracker "project=$PROJECT_GID" "section=$SECTION_GID" \
+    "section.acme-workstation=$WS_SECTION_GID"
+  out=$(run_file "$PROJ_DIR" --repo acme-workstation "${STD_ARGS[@]}") ||
+    fail "a half-written mapping must not fail the crew's task: $out"
+  assert_contains "$out" "deferred: " "a section with no project must hold the finding"
+  assert_contains "$out" "section.acme-workstation=" "the reason must name the offending line"
+  assert_absent "$FAKE_ASANA_LOG" "it must post to no board at all"
+  assert_grep '"state": "pending"' "$(only_record)" "the finding must be held, not dropped"
+  pass "fm-file-finding.sh: a section with no project beside it holds the finding"
+}
+
+# The dedupe key is built from title + where + repo and never mentions the board, so a
+# finding is filed once wherever it already is. The migration case: the card was filed
+# before the repo had a board of its own, and the local record is long gone.
+test_a_card_on_the_default_board_is_not_copied_onto_the_repo_board() {
+  local out
+  new_case crossboard
+  TRACKER_PROJECT='' TRACKER_SECTION=''
+  write_tracker "project=$PROJECT_GID" "section=$SECTION_GID"
+  run_file "$PROJ_DIR" --repo acme-workstation "${STD_ARGS[@]}" >/dev/null ||
+    fail "the first filing failed"
+  expect_cards "$PROJECT_GID" 1 "the first filing must land on the only board there was"
+  rm -rf "$HOME_DIR/state/findings"
+  write_tracker "project=$PROJECT_GID" "section=$SECTION_GID" \
+    "project.acme-workstation=$WS_PROJECT_GID" "section.acme-workstation=$WS_SECTION_GID"
+  out=$(run_file "$PROJ_DIR" --repo acme-workstation "${STD_ARGS[@]}") ||
+    fail "re-filing after the board changed failed: $out"
+  assert_contains "$out" "already-filed: " "the card on the old board is this finding, filed"
+  expect_cards "$WS_PROJECT_GID" 0 "an already-filed finding must not be copied onto the new board"
+  [ "$(jq 'length' "$FAKE_ASANA_STORE")" -eq 1 ] || fail "the two boards hold more than one card"
+  pass "fm-file-finding.sh: a finding already on one board is not filed again onto the other"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_blocker_is_refused_not_filed
@@ -480,3 +639,9 @@ test_a_later_filing_drains_what_the_outage_held
 test_no_configured_tracker_holds_instead_of_guessing
 test_config_file_supplies_the_board
 test_key_ignores_reworded_why
+test_repo_mapping_files_onto_that_repos_board
+test_unmapped_repo_falls_back_to_the_default_board_silently
+test_single_target_config_is_unchanged_for_every_repo
+test_malformed_mapping_holds_the_finding_and_flush_recovers_it
+test_section_without_a_project_holds_the_finding
+test_a_card_on_the_default_board_is_not_copied_onto_the_repo_board
