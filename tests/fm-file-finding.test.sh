@@ -620,6 +620,69 @@ test_a_card_on_the_default_board_is_not_copied_onto_the_repo_board() {
   pass "fm-file-finding.sh: a finding already on one board is not filed again onto the other"
 }
 
+# flush files a whole batch of held findings in ONE process, and they are about different
+# repositories, so the target is chosen per finding rather than once per run. A target that
+# leaked from the previous finding would put the product card on the workstation board.
+test_flush_of_two_repos_routes_each_to_its_own_board() {
+  local out
+  new_case flush_two_boards
+  TRACKER_PROJECT='' TRACKER_SECTION=''
+  write_tracker "project=$PROJECT_GID" "section=$SECTION_GID" \
+    "project.acme-workstation=$WS_PROJECT_GID" "section.acme-workstation=$WS_SECTION_GID"
+  export FAKE_ASANA_FAIL=1
+  run_file "$PROJ_DIR" --repo acme-workstation --blocking no --title "the box reboots nightly" \
+    --where "boot.sh:9" --why w --expected e >/dev/null || fail "holding the first finding failed"
+  run_file "$PROJ_DIR" --repo acme --blocking no --title "pool key is never refreshed" \
+    --where "src/pool.ts:42" --why w --expected e >/dev/null ||
+    fail "holding the second finding failed"
+  unset FAKE_ASANA_FAIL
+  out=$(run_file "$PROJ_DIR" flush) || fail "flush failed: $out"
+  expect_cards "$WS_PROJECT_GID" 1 "the workstation finding must land on the workstation board"
+  expect_cards "$PROJECT_GID" 1 "the product finding must land on the default board"
+  pass "fm-file-finding.sh: one flush routes each held finding to its own repository's board"
+}
+
+# A project with no section beside it files anyway and warns, exactly as the bare form does:
+# a card in the board's default place is still a filed finding, and refusing would lose one
+# over a missing convenience. The qualified form must not invent a stricter rule.
+test_repo_board_with_no_section_files_and_warns() {
+  local out err
+  new_case repo_board_no_section
+  TRACKER_PROJECT='' TRACKER_SECTION=''
+  write_tracker "project=$PROJECT_GID" "section=$SECTION_GID" \
+    "project.acme-workstation=$WS_PROJECT_GID"
+  err="$CASE_DIR/nosection.err"
+  out=$(run_file "$PROJ_DIR" --repo acme-workstation "${STD_ARGS[@]}" 2>"$err") ||
+    fail "a repo board with no section must still file: $out"
+  assert_contains "$out" "filed: " "the finding must be filed, not held"
+  expect_cards "$WS_PROJECT_GID" 1 "it must land on the repository's own board"
+  assert_grep "no triage section configured" "$err" "the missing section must be warned about"
+  assert_absent "$FAKE_ASANA_ADDPROJECT" \
+    "with no section of its own the card must not be moved into the default board's"
+  pass "fm-file-finding.sh: a repo board with no section files the card and warns"
+}
+
+# FM_ASANA_SECTION names a section on the DEFAULT board, so it must not follow a repository
+# onto a board of its own, where that gid names nothing. It still overrides the file's own
+# section= for every repository that files to the default board.
+test_env_section_never_follows_a_repo_to_its_own_board() {
+  new_case env_section
+  TRACKER_PROJECT='' TRACKER_SECTION="$SECTION_GID"
+  write_tracker "project=$PROJECT_GID" "section=9990009" \
+    "project.acme-workstation=$WS_PROJECT_GID" "section.acme-workstation=$WS_SECTION_GID"
+  run_file "$PROJ_DIR" --repo acme-workstation --blocking no --title "the box reboots nightly" \
+    --where "boot.sh:9" --why w --expected e >/dev/null || fail "the workstation filing failed"
+  run_file "$PROJ_DIR" --repo acme --blocking no --title "pool key is never refreshed" \
+    --where "src/pool.ts:42" --why w --expected e >/dev/null || fail "the product filing failed"
+  assert_grep "\"section\": \"$WS_SECTION_GID\"" "$FAKE_ASANA_ADDPROJECT" \
+    "the repo board's card must be moved into that board's own section"
+  assert_grep "\"section\": \"$SECTION_GID\"" "$FAKE_ASANA_ADDPROJECT" \
+    "the default board's card must still honour the environment override"
+  assert_no_grep '"section": "9990009"' "$FAKE_ASANA_ADDPROJECT" \
+    "the environment override must still beat the file's own section="
+  pass "fm-file-finding.sh: an environment section override stays on the board it names"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_blocker_is_refused_not_filed
@@ -645,3 +708,6 @@ test_single_target_config_is_unchanged_for_every_repo
 test_malformed_mapping_holds_the_finding_and_flush_recovers_it
 test_section_without_a_project_holds_the_finding
 test_a_card_on_the_default_board_is_not_copied_onto_the_repo_board
+test_flush_of_two_repos_routes_each_to_its_own_board
+test_repo_board_with_no_section_files_and_warns
+test_env_section_never_follows_a_repo_to_its_own_board

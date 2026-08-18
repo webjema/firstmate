@@ -54,8 +54,11 @@
 # silently, because one board is a legitimate setup, not a misconfiguration. A repository
 # WITH its own board takes its section only from `section.<repo>=`: the default `section=`
 # is a gid on a different board and moving a card into it would fail. Duplicate keys are
-# first-wins. FM_ASANA_PROJECT / FM_ASANA_SECTION override per key, for every repository -
-# an explicit override is the last word, so a repo-qualified line never beats one.
+# first-wins. FM_ASANA_PROJECT pins the whole run to one board for every repository and the
+# map is not consulted at all, not even to reject a line that run will never read.
+# FM_ASANA_SECTION overrides the DEFAULT board's section only: a section gid means nothing
+# on a board it does not belong to, so a repo with its own board still takes its own
+# `section.<repo>=` line.
 # A mapping that is PRESENT BUT UNUSABLE - `project.<repo>=` with no gid, or a
 # `section.<repo>=` with no `project.<repo>=` beside it - takes the OUTAGE path below
 # instead of falling back to the default board, naming the offending line. Defaulting there
@@ -94,11 +97,13 @@
 #      completed_since=now (open tasks only) paginated to FM_FINDING_SCAN_PAGES pages
 #      (default 20 x 100). Exhausting the cap without a match means "cannot verify", which
 #      defers rather than risking a duplicate. Backlog: grep the trailer in backlog.md.
-#      The key does not mention the board, so a finding is filed once whatever board it is
-#      on: when a repository has a board of its own, the DEFAULT board is scanned too,
-#      because that is where its findings landed before it had one, and an already-filed
-#      card there is reported as filed rather than copied across. Same rule as within one
-#      board - a scan that could not answer defers instead of creating.
+#      The key does not mention the board, so when a repository has a board of its own the
+#      DEFAULT board is scanned too, because that is where its findings landed before it had
+#      one, and an already-filed card there is reported as filed rather than copied across.
+#      That covers gaining a board, which is the migration that happens; it does not cover
+#      losing one, so deleting a `project.<repo>=` line can re-create on the default board a
+#      card that still sits on the old one. Same rule as within one board - a scan that could
+#      not answer defers instead of creating.
 #   3. only then create.
 # This is idempotence across time, not across concurrent callers: two crews filing the same
 # finding in the same second both scan, both miss, and both create. Not worth a lock - the
@@ -276,8 +281,8 @@ asana_target_for() {  # <repo>
   ASANA_PROJECT="$DEFAULT_PROJECT"
   ASANA_SECTION="$DEFAULT_SECTION"
   [ -n "$repo" ] || return 0
-  # An explicit env override is the last word and points the whole run at one board, so the
-  # map is not consulted at all - not even to reject a line that run will never read.
+  # FM_ASANA_PROJECT points the whole run at one board, so the map is not consulted at all -
+  # not even to reject a line that run will never read.
   [ -z "$ENV_PROJECT" ] || return 0
   project=$(tracker_lookup project "$repo") && has_project=1
   section=$(tracker_lookup section "$repo") && has_section=1
@@ -291,8 +296,9 @@ asana_target_for() {  # <repo>
   fi
   [ "$has_project" -eq 1 ] || return 0
   ASANA_PROJECT="$project"
-  # Never the default section: it is a gid on the board this repo just moved off.
-  ASANA_SECTION="${ENV_SECTION:-$section}"
+  # Never the default section, and never FM_ASANA_SECTION either: both are gids on the board
+  # this repo just moved off, and a section gid means nothing on any other board.
+  ASANA_SECTION="$section"
   return 0
 }
 
