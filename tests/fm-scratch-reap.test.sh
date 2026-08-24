@@ -32,6 +32,13 @@ set -u
 REAP="$ROOT/bin/fm-scratch-reap.sh"
 TMP_ROOT=$(fm_test_tmproot fm-scratch-reap-tests)
 
+# The reaper's second pass sweeps FM_SCRATCH_TMP_ROOT/fm-* and DELETES what it finds.
+# Left at its default it would rm -rf the developer's own live task temp roots - the
+# very defect this suite guards - so every test is pointed at an empty scratch root,
+# and the one test that exercises that pass overrides it with its own fixture.
+export FM_SCRATCH_TMP_ROOT="$TMP_ROOT/no-sweep"
+mkdir -p "$FM_SCRATCH_TMP_ROOT"
+
 # Build a fake harness scratch root with a dead session, a fresh session, and a
 # non-session sibling. Echoes the root path.
 make_scratch() {
@@ -290,7 +297,7 @@ test_rejects_zero_max_age() {
 # live crew's workspace was deleted out from under it. The dead root in the same
 # sweep keeps this honest: sparing everything would pass otherwise.
 test_fm_tmp_root_in_use_survives_stale_dir_mtime() {
-  local root sweep live dead
+  local root sweep live dead out
   root=$(make_scratch fmtmp)
   sweep="$TMP_ROOT/fmtmp-sweep"
   live="$sweep/fm-home-live-task"
@@ -302,12 +309,22 @@ test_fm_tmp_root_in_use_survives_stale_dir_mtime() {
   age_days "$live" 3   # last: creating the entries above bumped the dirs' own mtime
   age_days "$dead" 3
 
-  FM_SCRATCH_ROOT="$root" FM_SCRATCH_TMP_ROOT="$sweep" "$REAP" >/dev/null 2>&1 ||
+  out=$(FM_SCRATCH_ROOT="$root" FM_SCRATCH_TMP_ROOT="$sweep" "$REAP" 2>/dev/null) ||
     fail "reaper exited non-zero"
   [ -e "$live" ] ||
     fail "a task temp root written into seconds ago was reaped on its stale directory mtime"
-  [ ! -e "$dead" ] || fail "a genuinely orphaned task temp root was not reclaimed"
-  pass "an in-use task temp root survives a stale directory mtime; a dead one is still reclaimed"
+  # The process rail cannot answer without a readable /proc (macOS has none), and the
+  # documented outcome there is to reap NOTHING rather than fall back to the mtime
+  # that caused this defect. Assert whichever contract this platform is under; both
+  # keep the live root, which is what the test is for.
+  if [ -d /proc ] && readlink "/proc/$$/cwd" >/dev/null 2>&1; then
+    [ ! -e "$dead" ] || fail "a genuinely orphaned task temp root was not reclaimed"
+    pass "an in-use task temp root survives a stale directory mtime; a dead one is still reclaimed"
+  else
+    [ -e "$dead" ] || fail "reaped without a process rail to answer with - must fail closed"
+    assert_contains "$out" 'unanswerable here' "the fail-closed refusal says why"
+    pass "with no readable /proc the task-temp pass reaps nothing and says so"
+  fi
 }
 
 test_reaps_dead_spares_fresh

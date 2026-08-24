@@ -26,13 +26,13 @@
 #      dead, and unanswered, and only a demonstrable death clears a deletion. See
 #      probe_capability and has_recent_file below, and the next paragraph but one
 #      for why "unanswered" is two different things.
-#   5. A rail mtime cannot provide: nothing is reaped while a running process has
-#      its cwd inside it or holds a file in it open. See the process rail below.
 #
-# A SECOND PASS, same rails, reclaims orphaned firstmate task temp roots
-# (<FM_SCRATCH_TMP_ROOT>/fm-*, created by fm_task_tmp_root in bin/fm-peer-lib.sh)
-# left by tasks that died before teardown. --protect and --self bind it too, so a
-# session cannot reap its own workspace. Its own rationale is at the pass itself.
+# A SECOND PASS reclaims orphaned firstmate task temp roots (<FM_SCRATCH_TMP_ROOT>/fm-*,
+# created by fm_task_tmp_root in bin/fm-peer-lib.sh) left by tasks that died before
+# teardown. It runs rails 2-4 above - --protect and --self bind it, so a session
+# cannot reap its own workspace - plus a fifth that is its alone: nothing is reaped
+# while a running process has its cwd inside it, holds a file in it open, or is
+# executing a binary from it. Its rationale is at the pass itself.
 # The current session's own scratch is naturally spared: it is being written to
 # now, so its newest mtime is inside the window. Pass --self <id> to spare it by
 # name as well.
@@ -227,34 +227,43 @@ is_protected() {  # <path>
 # creates or renames an entry.
 PROC_ROOT="${FM_SCRATCH_PROC_ROOT:-/proc}"
 
+# resolve_links <path...>: the one owner of turning /proc link names into targets.
+# It goes through xargs rather than one readlink call because a box with tens of
+# thousands of open fds would exceed the argument list; xargs chunks it instead.
+# Entries belonging to other users' processes do not resolve and are simply absent -
+# they cannot hold a task root, which fm_task_tmp_root creates under this user.
+resolve_links() {  # <path...>
+  printf '%s\n' "$@" | xargs -r -d '\n' readlink -- 2>/dev/null
+}
+
 # proc_probe_capability: can this box be asked what a process is holding at all?
 # Established ONCE, against our own pid's cwd - a link guaranteed to exist and to be
-# readable by us - so it fails for exactly one reason: no readable /proc, as on
-# macOS. Same tool-property split as probe_capability, and the same consequence: a
-# rail that cannot answer stops its pass rather than waving it through.
+# readable by us - and through resolve_links, the SAME pipeline the sweep uses, so
+# the find-shaped hole cannot reopen here: `xargs -d` is GNU-only, and a busybox
+# xargs that rejected it would otherwise hand back an empty held-path list that reads
+# as "nothing is alive". Same tool-property split as probe_capability, and the same
+# consequence: a rail that cannot answer stops its pass rather than waving it through.
 proc_probe_capability() {
   local own
   [ -d "$PROC_ROOT" ] || return 1
-  own=$(readlink -- "$PROC_ROOT/$$/cwd" 2>/dev/null) || return 1
+  own=$(resolve_links "$PROC_ROOT/$$/cwd") || return 1
   [ -n "$own" ]
 }
 
-# proc_held_paths: every path a running process is sitting in or holding open, one
-# per line. Resolved for the whole run at once, not once per candidate: the answer
-# does not vary by directory, and a fork per open fd on a busy box would cost more
-# than the sweep reclaims. It goes through xargs rather than one readlink call
-# because a box with tens of thousands of open fds would otherwise exceed the
-# argument list, and this rail returning nothing must never be the cheap outcome.
-# Entries belonging to other users' processes do not resolve and are simply absent -
-# they cannot hold a task root, which fm_task_tmp_root creates under this user.
+# proc_held_paths: every path a running process is sitting in, holding open, or
+# executing, one per line. Resolved for the whole run at once, not once per
+# candidate: the answer does not vary by directory, and a fork per open fd on a busy
+# box would cost more than the sweep reclaims. `exe` is in the glob because a process
+# running a binary from inside a directory holds it without holding any fd there.
 proc_held_paths() {
-  printf '%s\n' "$PROC_ROOT"/[0-9]*/cwd "$PROC_ROOT"/[0-9]*/fd/* |
-    xargs -r -d '\n' readlink -- 2>/dev/null
+  resolve_links "$PROC_ROOT"/[0-9]*/cwd "$PROC_ROOT"/[0-9]*/exe "$PROC_ROOT"/[0-9]*/fd/*
 }
 
 # holds_live_process <dir> <held-paths>: does any held path resolve inside <dir>?
-# A path readlink reported as "<target> (deleted)" still matches the prefix test,
-# which is the safe direction.
+# <dir> must be canonical, because readlink returns the kernel's resolved target and
+# a prefix test between two spellings of one path answers "no".
+# A path readlink reported as "<target> (deleted)" still matches, which is the safe
+# direction.
 holds_live_process() {  # <dir> <held-paths>
   local d=$1 held=$2 p
   [ -n "$held" ] || return 1
@@ -279,7 +288,11 @@ partial=0
 partial_dirs=""
 # Session dirs are named as UUIDs (8-4-4-4-12) at depth 1 or 2 under the root, so
 # the glob naturally skips non-session siblings like bundled-skills/<version>.
-while IFS= read -r d; do
+# NUL-delimited, not line-delimited: a directory name may legally contain a newline,
+# and the second line of one would be read as a separate, RELATIVE path - resolved
+# against the caller's cwd, where every rail would then evaluate the wrong directory
+# and clear it for deletion.
+while IFS= read -r -d '' d; do
   [ -n "$d" ] || continue
   is_protected "$d" && continue
   # A single file modified inside the window means the session is still active.
@@ -309,7 +322,7 @@ while IFS= read -r d; do
   reaped=$((reaped + 1))
   reaped_kb=$((reaped_kb + kb))
 done < <(find "$ROOT" -mindepth 1 -maxdepth 2 -type d \
-           -name '????????-????-????-????-????????????' 2>/dev/null)
+           -name '????????-????-????-????-????????????' -print0 2>/dev/null)
 
 # Best-effort: drop now-empty project-encoded parent dirs left behind.
 [ "$DRY_RUN" = 1 ] || find "$ROOT" -mindepth 1 -maxdepth 1 -type d -empty -exec rmdir {} + 2>/dev/null || true
@@ -334,14 +347,22 @@ done < <(find "$ROOT" -mindepth 1 -maxdepth 2 -type d \
 # can. So the dir's own mtime is kept as a NECESSARY condition and is no longer a
 # sufficient one: a live process holding the root, or any file inside it written
 # within the window, spares it.
+# Canonical, because the process rail prefix-matches candidates against the kernel's
+# own resolved paths, and /tmp is a symlink on more than one platform. A root that
+# cannot be resolved is used as given rather than dropped.
 TMP_SWEEP_ROOT="${FM_SCRATCH_TMP_ROOT:-/tmp}"
+TMP_SWEEP_ROOT=$(readlink -f -- "$TMP_SWEEP_ROOT" 2>/dev/null) ||
+  TMP_SWEEP_ROOT="${FM_SCRATCH_TMP_ROOT:-/tmp}"
 TMP_WINDOW_MINUTES=1440
 TMP_CEILING_MINUTES=$(( TMP_WINDOW_MINUTES * HARD_CEILING_MULTIPLE ))
 
+# NUL-delimited for the reason spelled out at the session-dir loop above, and it is
+# not theoretical here: this sweep is host-wide by design and /tmp is world-writable,
+# so any local process can create a `fm-x<newline>relative/path` entry in it.
 TMP_CANDIDATES=()
-while IFS= read -r d; do
+while IFS= read -r -d '' d; do
   [ -n "$d" ] && TMP_CANDIDATES+=("$d")
-done < <(find "$TMP_SWEEP_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'fm-*' 2>/dev/null)
+done < <(find "$TMP_SWEEP_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'fm-*' -print0 2>/dev/null)
 
 tmp_reaped=0
 tmp_reaped_kb=0
