@@ -334,7 +334,11 @@ done < <(find "$ROOT" -mindepth 1 -maxdepth 2 -type d \
 # whose home may no longer exist, so age and not ownership is the safety property.
 # Scoping the glob to this home would reclaim strictly less and reclaim nothing sooner.
 #
-# It runs the SAME rails as the session-dir pass, because it is the same question.
+# It asks the same question as the session-dir pass, so it runs that pass's rails -
+# --protect/--self, the content-mtime probe, the hard ceiling - plus the process rail
+# below. What it does not have is rail 1: this root is reached only through
+# FM_SCRATCH_TMP_ROOT, not a --root argument, so there is no misaimed-by-default case
+# for a name shape to close.
 # It used to run none of them - `find /tmp -type d -name 'fm-*' -mmin +1440 -exec
 # rm -rf {} +` and nothing else - on the premise that "24h untouched is far longer
 # than any live task goes without writing its temp root". That premise is false, and
