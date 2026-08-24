@@ -16,6 +16,8 @@
 #   (j) ... but that sparing is not forever: past the hard ceiling it is reaped
 #   (k) --max-age-hours 0 is refused, because -mmin -0 matches nothing and would
 #       make every session dir, live ones included, read as dead
+#   (l) a firstmate task temp root whose own mtime is stale but whose content was
+#       just written survives the fm-* pass, while a truly dead one is reclaimed
 #
 # (g) and (h) are regression tests for a defect that deleted live sessions' scratch on
 # every macOS run, so neither may be satisfied by a GNU-only path: both drive the
@@ -281,6 +283,33 @@ test_rejects_zero_max_age() {
   pass "--max-age-hours 0 is refused rather than silently reaping everything"
 }
 
+# A directory's mtime moves only when an entry inside it is created, renamed or
+# unlinked - never when a file already inside it is appended to. A task temp root is
+# created once at spawn and written INTO for the rest of the task, so under the old
+# bare `-mmin +1440` rule it read as abandoned while it was in constant use, and a
+# live crew's workspace was deleted out from under it. The dead root in the same
+# sweep keeps this honest: sparing everything would pass otherwise.
+test_fm_tmp_root_in_use_survives_stale_dir_mtime() {
+  local root sweep live dead
+  root=$(make_scratch fmtmp)
+  sweep="$TMP_ROOT/fmtmp-sweep"
+  live="$sweep/fm-home-live-task"
+  dead="$sweep/fm-home-dead-task"
+  mkdir -p "$live" "$dead"
+  echo working > "$live/worker.log"
+  echo orphan > "$dead/worker.log"
+  age_days "$dead/worker.log" 3
+  age_days "$live" 3   # last: creating the entries above bumped the dirs' own mtime
+  age_days "$dead" 3
+
+  FM_SCRATCH_ROOT="$root" FM_SCRATCH_TMP_ROOT="$sweep" "$REAP" >/dev/null 2>&1 ||
+    fail "reaper exited non-zero"
+  [ -e "$live" ] ||
+    fail "a task temp root written into seconds ago was reaped on its stale directory mtime"
+  [ ! -e "$dead" ] || fail "a genuinely orphaned task temp root was not reclaimed"
+  pass "an in-use task temp root survives a stale directory mtime; a dead one is still reclaimed"
+}
+
 test_reaps_dead_spares_fresh
 test_cleans_emptied_parent
 test_protect_spares_regardless_of_age
@@ -292,3 +321,4 @@ test_fails_closed_when_probe_cannot_run
 test_traversal_error_spares_that_dir_only
 test_hard_ceiling_reaps_an_unwalkable_dir
 test_rejects_zero_max_age
+test_fm_tmp_root_in_use_survives_stale_dir_mtime
