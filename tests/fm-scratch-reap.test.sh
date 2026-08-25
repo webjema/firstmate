@@ -316,21 +316,35 @@ test_fm_tmp_root_in_use_survives_stale_dir_mtime() {
     fail "reaper exited non-zero"
   [ -e "$live" ] ||
     fail "a task temp root written into seconds ago was reaped on its stale directory mtime"
-  # The rails cannot answer without a readable /proc (macOS has none), and the
-  # documented outcome there is to reap NOTHING rather than fall back to the mtime that
-  # caused this defect. Assert whichever contract this platform is under - taking the
-  # answer from the reaper's own output, never re-deriving it here, because a gate
-  # written from /proc's shape has to be edited every time a rail is added, and the one
-  # that was not edited is how this test went red on a box it was meant to pass on.
-  # Both branches keep the live root, which is what the test is for.
-  case "$out" in
-    *'unanswerable here'*)
-      [ -e "$dead" ] || fail "reaped after refusing the rails - the refusal must delete nothing"
-      pass "with no way to ask /proc what is alive the task-temp pass reaps nothing and says so" ;;
-    *)
-      [ ! -e "$dead" ] || fail "a genuinely orphaned task temp root was not reclaimed"
-      pass "an in-use task temp root survives a stale directory mtime; a dead one is still reclaimed" ;;
-  esac
+  assert_tmp_pass_worked "$out" "$dead" \
+    "an in-use task temp root survives a stale directory mtime; a dead one is still reclaimed" \
+    "with no way to ask /proc what is alive the task-temp pass reaps nothing and says so"
+}
+
+# assert_tmp_pass_worked <reaper-output> <dead-dir> <pass-msg> <refused-msg>: the shared
+# verdict for the fm-* pass, which has two legitimate outcomes and one that is a defect.
+#
+# The pass needs /proc to answer at all, and macOS has none, so on a platform without one
+# it must reap NOTHING and say so - never fall back to the directory mtime that caused
+# this defect. WHERE /proc IS READABLE, THOUGH, A REFUSAL IS THE DEFECT, and asserting
+# only "it deleted nothing" would accept it silently: that is exactly how the fm-* pass
+# spent a release as a permanent no-op on musl (busybox find rejects `-readable`, which
+# closed the environment rail's capability gate on every run). So a refusal on a box with
+# a working /proc is failed here, with the reaper's own line as the evidence.
+assert_tmp_pass_worked() {  # <output> <dead-dir> <pass-msg> <refused-msg>
+  local out=$1 dead=$2 msg=$3 refused_msg=$4
+  if [ -d /proc ] && readlink "/proc/$$/cwd" >/dev/null 2>&1; then
+    case "$out" in
+      *'unanswerable here'*)
+        fail "the rails refused on a box with a readable /proc, so this pass reclaims nothing here, ever: $(printf '%s\n' "$out" | grep 'unanswerable here')" ;;
+    esac
+    [ ! -e "$dead" ] || fail "a genuinely orphaned task temp root was not reclaimed"
+    pass "$msg"
+  else
+    [ -e "$dead" ] || fail "reaped after refusing the rails - the refusal must delete nothing"
+    assert_contains "$out" 'unanswerable here' "the fail-closed refusal says why"
+    pass "$refused_msg"
+  fi
 }
 
 # The incident of 2026-08-24, reproduced. A crewmate's task temp root is exported into
@@ -366,18 +380,9 @@ test_fm_tmp_root_named_in_live_environ_survives() {
 
   [ -e "$held" ] ||
     fail "a task temp root named in a live process's environment was reaped - this is the 2026-08-24 incident"
-  # Which contract this platform is under is the reaper's own answer, not something to
-  # re-derive here: a gate written from /proc's shape would have to model -readable,
-  # grep -z and the rest, and a test that models the implementation stops testing it.
-  case "$out" in
-    *'unanswerable here'*)
-      [ -e "$dead" ] || fail "reaped after refusing the rails - the refusal must delete nothing"
-      pass "with no way to read a process environment the task-temp pass reaps nothing and says so" ;;
-    *)
-      [ ! -e "$dead" ] ||
-        fail "nothing was reclaimed, so sparing the held root proves nothing about the environment rail"
-      pass "a task temp root named only in a live process's environment survives; its unnamed twin is reclaimed" ;;
-  esac
+  assert_tmp_pass_worked "$out" "$dead" \
+    "a task temp root named only in a live process's environment survives; its unnamed twin is reclaimed" \
+    "with no way to read a process environment the task-temp pass reaps nothing and says so"
 }
 
 test_reaps_dead_spares_fresh
