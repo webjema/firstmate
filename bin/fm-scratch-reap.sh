@@ -332,10 +332,10 @@ named_in_live_env() {  # <dir> <records>
 
 # held_under <root> <held-paths>: the held paths that lie under <root>, one per line.
 # Narrowed ONCE here rather than per candidate, because the list is every open path on
-# the box while the match is a per-directory question: this box carries ~2400 held paths
-# thousands of held paths against hundreds of task roots, and walking the whole list for
-# each of them cost 25-60s of CPU in every caller - fm-bootstrap.sh and fm-disk-guard.sh
-# both run this - against 4s for the rest of the sweep on the same backlog.
+# the box while the match is a per-directory question: this box carried 2400 held paths
+# against 374 task roots, and walking the whole list for each of them cost 25-60s of CPU
+# in every caller - fm-bootstrap.sh and fm-disk-guard.sh both run this - against 4s for
+# the rest of the sweep on the same backlog.
 # Narrowing loses nothing because the candidates below were built by concatenating this
 # same root, so a held path inside one of them begins with it verbatim. That, and not the
 # root's canonicality, is what makes a prefix test right here where the environ rail
