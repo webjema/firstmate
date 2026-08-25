@@ -31,8 +31,10 @@
 # created by fm_task_tmp_root in bin/fm-peer-lib.sh) left by tasks that died before
 # teardown. It runs rails 2-4 above - --protect and --self bind it, so a session
 # cannot reap its own workspace - plus a fifth that is its alone: nothing is reaped
-# while a running process has its cwd inside it, holds a file in it open, or is
-# executing a binary from it. Its rationale is at the pass itself.
+# while a running process has its cwd inside it, holds a file in it open, is
+# executing a binary from it, or merely NAMES it in its environment. The last of
+# those is the one that matters most and the one an ordinary probe leaves out; the
+# pass itself owns why.
 # The current session's own scratch is naturally spared: it is being written to
 # now, so its newest mtime is inside the window. Pass --self <id> to spare it by
 # name as well.
@@ -84,7 +86,7 @@
 #   -h|--help              this header
 # Env for the second pass: FM_SCRATCH_TMP_ROOT (default /tmp) is the root it sweeps
 # for fm-* task temp roots; FM_SCRATCH_PROC_ROOT (default /proc) is where the
-# process rail looks.
+# process and environment rails look.
 # Prints one "SCRATCH_REAP: ..." line per reaped (or would-reap) dir plus a
 # summary line; stays silent on a clean sweep unless --verbose. Always exits 0
 # unless given bad arguments: it is a best-effort janitor, never a gate.
@@ -259,6 +261,55 @@ proc_held_paths() {
   resolve_links "$PROC_ROOT"/[0-9]*/cwd "$PROC_ROOT"/[0-9]*/exe "$PROC_ROOT"/[0-9]*/fd/*
 }
 
+# proc_env_records <needle>: every environment record, of every process whose environ
+# this user can read, that mentions <needle> - one per line, NULs turned into newlines
+# so the result can live in a shell variable at all (command substitution drops a NUL).
+#
+# THIS IS THE RAIL THAT ANSWERS THE CASE THE OTHERS MISS, not a belt-and-braces
+# addition. Measured 2026-08-24 on the two real fm-* task roots on this box: ZERO cwd
+# and ZERO fd references between them, and 9 and 13 processes respectively carrying
+# the path in their environment block. That is the ordinary shape, not an edge case -
+# bin/fm-spawn.sh exports GOTMPDIR into a crewmate's pane at spawn, so every process in
+# that tree names the root while nothing chdirs into it and nothing holds a file open
+# there outside a build. A probe reading only cwd, exe and fd therefore answers
+# "nothing is using this" for precisely the directories this defect destroyed, and the
+# 2026-08-24 incident would have happened again with the other three rails in place.
+# The box-side twin (box/bin/optiroq-tmp-clean.sh, Gate C) reads the same signal the
+# same way, from the same measurement.
+#
+# -readable is what makes the scan silent about the processes it cannot see, instead of
+# a run drowned in per-file errors that no exit status could tell apart from a real
+# failure. Records are pre-filtered to the sweep root here rather than per candidate,
+# because the scan is the expensive part and its answer does not vary by directory.
+proc_env_records() {  # <needle>
+  find "$PROC_ROOT" -mindepth 2 -maxdepth 2 -name environ -readable -print0 2>/dev/null |
+    xargs -0 -r grep -zhaF -e "$1" -- 2>/dev/null | tr '\0' '\n'
+}
+
+# proc_env_capability: can this box be asked what a live process has in its environment?
+# Proved by running the SWEEP'S OWN pipeline and requiring it to hand back a record we
+# know exists: the first record of this shell's own environ. That single answer covers
+# every stage at once - find accepting -readable (BSD find does not), xargs -0, grep -z
+# and -a, and the permission to read some live process's environ - and it is the same
+# tool-property split as proc_probe_capability, for the same reason: a rail whose empty
+# output means "I could not look" is indistinguishable from one meaning "nothing is
+# alive", and this pass ends in rm -rf.
+proc_env_capability() {
+  local needle
+  needle=$(tr '\0' '\n' < "$PROC_ROOT/$$/environ" 2>/dev/null | head -1) || return 1
+  [ -n "$needle" ] || return 1
+  named_in_live_env "$needle" "$(proc_env_records "$needle")"
+}
+
+# named_in_live_env <needle> <records>: does any record mention <needle>?
+# SUBSTRING, deliberately: a record is an assignment like GOTMPDIR=/tmp/fm-... and the
+# path sits in the middle of it. Over-matching keeps a directory that could have been
+# removed; under-matching deletes one that is in use.
+named_in_live_env() {  # <needle> <records>
+  case "$2" in *"$1"*) return 0 ;; esac
+  return 1
+}
+
 # holds_live_process <dir> <held-paths>: does any held path resolve inside <dir>?
 # <dir> must be canonical, because readlink returns the kernel's resolved target and
 # a prefix test between two spellings of one path answers "no".
@@ -349,8 +400,8 @@ done < <(find "$ROOT" -mindepth 1 -maxdepth 2 -type d \
 # this box's system-wide cleaner, deleted a live agent's GOTMPDIR mid-task and
 # reported success; a longer window changes how often that happens, not whether it
 # can. So the dir's own mtime is kept as a NECESSARY condition and is no longer a
-# sufficient one: a live process holding the root, or any file inside it written
-# within the window, spares it.
+# sufficient one: a live process holding the root, a live process naming it in its
+# environment, or any file inside it written within the window, spares it.
 # Canonical, because the process rail prefix-matches candidates against the kernel's
 # own resolved paths, and /tmp is a symlink on more than one platform. A root that
 # cannot be resolved is used as given rather than dropped.
@@ -372,19 +423,29 @@ tmp_reaped=0
 tmp_reaped_kb=0
 tmp_partial=0
 tmp_partial_dirs=""
+links_ok=no
+env_ok=no
+if [ "${#TMP_CANDIDATES[@]}" -gt 0 ]; then
+  proc_probe_capability && links_ok=yes
+  proc_env_capability && env_ok=yes
+fi
 if [ "${#TMP_CANDIDATES[@]}" -eq 0 ]; then
   :
-elif ! proc_probe_capability; then
-  # Fail closed, and only where it costs something: a box with no readable /proc
-  # cannot be asked whether a task is still using its temp root, and a directory
-  # mtime alone is the defect above. Said once, and only when there was something to
-  # decide, so a clean box stays silent.
-  echo "SCRATCH_REAP: cannot read $PROC_ROOT, so 'is a live task using this' is unanswerable here; leaving ${#TMP_CANDIDATES[@]} $TMP_SWEEP_ROOT/fm-* dir(s) alone (nothing deleted)"
+elif [ "$links_ok" != yes ] || [ "$env_ok" != yes ]; then
+  # Fail closed, and only where it costs something: a box that cannot be asked what a
+  # process is holding or what it carries in its environment cannot be asked whether a
+  # task is still using its temp root, and a directory mtime alone is the defect above.
+  # EITHER rail missing stops the pass, because they answer for different live tasks -
+  # see proc_env_records for the measurement. Said once, and only when there was
+  # something to decide, so a clean box stays silent.
+  echo "SCRATCH_REAP: cannot ask $PROC_ROOT what is alive (links=$links_ok environ=$env_ok), so 'is a live task using this' is unanswerable here; leaving ${#TMP_CANDIDATES[@]} $TMP_SWEEP_ROOT/fm-* dir(s) alone (nothing deleted)"
 else
   held=$(proc_held_paths)
+  env_records=$(proc_env_records "$TMP_SWEEP_ROOT")
   for d in ${TMP_CANDIDATES[@]+"${TMP_CANDIDATES[@]}"}; do
     is_protected "$d" && continue
     holds_live_process "$d" "$held" && continue
+    named_in_live_env "$d" "$env_records" && continue
     own_mtime_older_than "$d" "$TMP_WINDOW_MINUTES" || continue
     probe=0; has_recent_file "$d" "$TMP_WINDOW_MINUTES" || probe=$?
     case "$probe" in

@@ -18,6 +18,9 @@
 #       make every session dir, live ones included, read as dead
 #   (l) a firstmate task temp root whose own mtime is stale but whose content was
 #       just written survives the fm-* pass, while a truly dead one is reclaimed
+#   (m) ... and so does one that nothing has written for days and no process has open,
+#       but which a live process NAMES in its environment - the 2026-08-24 incident,
+#       and the only rail that answers for it
 #
 # (g) and (h) are regression tests for a defect that deleted live sessions' scratch on
 # every macOS run, so neither may be satisfied by a GNU-only path: both drive the
@@ -327,6 +330,53 @@ test_fm_tmp_root_in_use_survives_stale_dir_mtime() {
   fi
 }
 
+# The incident of 2026-08-24, reproduced. A crewmate's task temp root is exported into
+# its pane as GOTMPDIR at spawn and then named by every process in that tree, while
+# NOTHING chdirs into it and nothing holds a file open there outside a build - measured
+# on this box, zero cwd and zero fd references against 9 and 13 environment ones. So the
+# directory here is given the exact shape that lost work: stale own mtime, no content
+# written for days, no cwd and no open fd inside it, and one live process carrying its
+# path in its environment. Every rail but the environment one says "dead".
+test_fm_tmp_root_named_in_live_environ_survives() {
+  local root sweep held dead out pid
+  root=$(make_scratch fmenv)
+  sweep="$TMP_ROOT/fmenv-sweep"
+  held="$sweep/fm-home-env-task"
+  dead="$sweep/fm-home-dead-task"
+  mkdir -p "$held" "$dead"
+  echo built > "$held/artifact"
+  echo orphan > "$dead/artifact"
+  age_days "$held/artifact" 3
+  age_days "$dead/artifact" 3
+  age_days "$held" 3   # last: creating the entries above bumped the dirs' own mtime
+  age_days "$dead" 3
+
+  # env, not an exported shell variable: /proc/<pid>/environ is the environment the
+  # process was EXEC'd with, so a variable set after the fork would never appear there.
+  # The child's cwd is the caller's, not $held, and it opens nothing inside it.
+  env FM_SCRATCH_TEST_HOLD="$held" sleep 30 &
+  pid=$!
+  out=$(FM_SCRATCH_ROOT="$root" FM_SCRATCH_TMP_ROOT="$sweep" "$REAP" 2>/dev/null) ||
+    fail "reaper exited non-zero"
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+
+  [ -e "$held" ] ||
+    fail "a task temp root named in a live process's environment was reaped - this is the 2026-08-24 incident"
+  # Which contract this platform is under is the reaper's own answer, not something to
+  # re-derive here: a gate written from /proc's shape would have to model -readable,
+  # grep -z and the rest, and a test that models the implementation stops testing it.
+  case "$out" in
+    *'unanswerable here'*)
+      [ -e "$dead" ] || fail "reaped after refusing the rails - the refusal must delete nothing"
+      pass "with no way to read a process environment the task-temp pass reaps nothing and says so" ;;
+    *)
+      [ ! -e "$dead" ] ||
+        fail "nothing was reclaimed, so sparing the held root proves nothing about the environment rail"
+      pass "a task temp root named only in a live process's environment survives; its unnamed twin is reclaimed" ;;
+  esac
+}
+
 test_reaps_dead_spares_fresh
 test_cleans_emptied_parent
 test_protect_spares_regardless_of_age
@@ -339,3 +389,4 @@ test_traversal_error_spares_that_dir_only
 test_hard_ceiling_reaps_an_unwalkable_dir
 test_rejects_zero_max_age
 test_fm_tmp_root_in_use_survives_stale_dir_mtime
+test_fm_tmp_root_named_in_live_environ_survives
