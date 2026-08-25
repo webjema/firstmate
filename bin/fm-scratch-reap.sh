@@ -277,36 +277,56 @@ proc_held_paths() {
 # The box-side twin (box/bin/optiroq-tmp-clean.sh, Gate C) reads the same signal the
 # same way, from the same measurement.
 #
-# -readable is what makes the scan silent about the processes it cannot see, instead of
-# a run drowned in per-file errors that no exit status could tell apart from a real
-# failure. Records are pre-filtered to the sweep root here rather than per candidate,
-# because the scan is the expensive part and its answer does not vary by directory.
+# The environ files this cannot read yield nothing and print to a discarded stderr, so
+# the scan needs no -readable to stay quiet - and must not have one: busybox find
+# rejects `-readable` outright ("find: unrecognized: -readable") while its xargs and
+# grep handle this pipeline correctly, so the flag alone would close the gate below on
+# every musl box and leave the pass reclaiming nothing, forever.
+# Records are pre-filtered here rather than per candidate, because the scan is the
+# expensive part and its answer does not vary by directory.
 proc_env_records() {  # <needle>
-  find "$PROC_ROOT" -mindepth 2 -maxdepth 2 -name environ -readable -print0 2>/dev/null |
+  find "$PROC_ROOT" -mindepth 2 -maxdepth 2 -name environ -print0 2>/dev/null |
     xargs -0 -r grep -zhaF -e "$1" -- 2>/dev/null | tr '\0' '\n'
 }
 
 # proc_env_capability: can this box be asked what a live process has in its environment?
 # Proved by running the SWEEP'S OWN pipeline and requiring it to hand back a record we
 # know exists: the first record of this shell's own environ. That single answer covers
-# every stage at once - find accepting -readable (BSD find does not), xargs -0, grep -z
-# and -a, and the permission to read some live process's environ - and it is the same
-# tool-property split as proc_probe_capability, for the same reason: a rail whose empty
-# output means "I could not look" is indistinguishable from one meaning "nothing is
-# alive", and this pass ends in rm -rf.
+# every stage at once - find, xargs -0, grep -z and -a, tr, and the permission to read
+# some live process's environ - and it is the same tool-property split as
+# proc_probe_capability, for the same reason: a rail whose empty output means "I could
+# not look" is indistinguishable from one meaning "nothing is alive", and this pass
+# ends in rm -rf. The match here is a plain substring because the needle is a whole
+# record; the sweep's own match, below, is not.
 proc_env_capability() {
-  local needle
-  needle=$(tr '\0' '\n' < "$PROC_ROOT/$$/environ" 2>/dev/null | head -1) || return 1
+  local needle records
+  needle=$(tr '\0' '\n' < "$PROC_ROOT/$$/environ" 2>/dev/null | head -1)
   [ -n "$needle" ] || return 1
-  named_in_live_env "$needle" "$(proc_env_records "$needle")"
+  records=$(proc_env_records "$needle")
+  case "$records" in *"$needle"*) return 0 ;; esac
+  return 1
 }
 
-# named_in_live_env <needle> <records>: does any record mention <needle>?
-# SUBSTRING, deliberately: a record is an assignment like GOTMPDIR=/tmp/fm-... and the
-# path sits in the middle of it. Over-matching keeps a directory that could have been
-# removed; under-matching deletes one that is in use.
-named_in_live_env() {  # <needle> <records>
-  case "$2" in *"$1"*) return 0 ;; esac
+# named_in_live_env <dir> <records>: does any record name <dir>?
+#
+# BY NAME, NOT BY PATH, and that is the whole point. A record holds whatever string the
+# process was exec'd with, while a candidate here has been canonicalized for the process
+# rail - and fm_task_tmp_root (bin/fm-peer-lib.sh) hardcodes the literal /tmp, which
+# bin/fm-spawn.sh exports verbatim as GOTMPDIR. So on any host where the sweep root has
+# a symlink component the two spellings can never be equal, and a path match would leave
+# this rail silently blind for exactly the directories it exists to save. A task root's
+# name carries a checksum of its home path and its task id, so the name is specific
+# enough on its own; where it is not, the error it makes is to KEEP a directory.
+#
+# The name must end at a record boundary or a character that cannot continue it, or a
+# process naming fm-ab would spare fm-a. `[!...]` covers the trailing-newline case too,
+# so only a record at the very end of the blob needs the bare-suffix pattern.
+named_in_live_env() {  # <dir> <records>
+  local n="/${1##*/}"
+  case "$2" in
+    *"$n") return 0 ;;
+    *"$n"[!A-Za-z0-9._-]*) return 0 ;;
+  esac
   return 1
 }
 
@@ -441,7 +461,11 @@ elif [ "$links_ok" != yes ] || [ "$env_ok" != yes ]; then
   echo "SCRATCH_REAP: cannot ask $PROC_ROOT what is alive (links=$links_ok environ=$env_ok), so 'is a live task using this' is unanswerable here; leaving ${#TMP_CANDIDATES[@]} $TMP_SWEEP_ROOT/fm-* dir(s) alone (nothing deleted)"
 else
   held=$(proc_held_paths)
-  env_records=$(proc_env_records "$TMP_SWEEP_ROOT")
+  # The pre-filter is the name shape, not the sweep root, for the reason
+  # named_in_live_env owns: the root's spelling in a record is not this pass's to
+  # predict, and a pre-filter that guessed it wrong would drop the record before the
+  # match ever ran.
+  env_records=$(proc_env_records "/fm-")
   for d in ${TMP_CANDIDATES[@]+"${TMP_CANDIDATES[@]}"}; do
     is_protected "$d" && continue
     holds_live_process "$d" "$held" && continue

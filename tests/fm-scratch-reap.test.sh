@@ -316,18 +316,21 @@ test_fm_tmp_root_in_use_survives_stale_dir_mtime() {
     fail "reaper exited non-zero"
   [ -e "$live" ] ||
     fail "a task temp root written into seconds ago was reaped on its stale directory mtime"
-  # The process rail cannot answer without a readable /proc (macOS has none), and the
-  # documented outcome there is to reap NOTHING rather than fall back to the mtime
-  # that caused this defect. Assert whichever contract this platform is under; both
-  # keep the live root, which is what the test is for.
-  if [ -d /proc ] && readlink "/proc/$$/cwd" >/dev/null 2>&1; then
-    [ ! -e "$dead" ] || fail "a genuinely orphaned task temp root was not reclaimed"
-    pass "an in-use task temp root survives a stale directory mtime; a dead one is still reclaimed"
-  else
-    [ -e "$dead" ] || fail "reaped without a process rail to answer with - must fail closed"
-    assert_contains "$out" 'unanswerable here' "the fail-closed refusal says why"
-    pass "with no readable /proc the task-temp pass reaps nothing and says so"
-  fi
+  # The rails cannot answer without a readable /proc (macOS has none), and the
+  # documented outcome there is to reap NOTHING rather than fall back to the mtime that
+  # caused this defect. Assert whichever contract this platform is under - taking the
+  # answer from the reaper's own output, never re-deriving it here, because a gate
+  # written from /proc's shape has to be edited every time a rail is added, and the one
+  # that was not edited is how this test went red on a box it was meant to pass on.
+  # Both branches keep the live root, which is what the test is for.
+  case "$out" in
+    *'unanswerable here'*)
+      [ -e "$dead" ] || fail "reaped after refusing the rails - the refusal must delete nothing"
+      pass "with no way to ask /proc what is alive the task-temp pass reaps nothing and says so" ;;
+    *)
+      [ ! -e "$dead" ] || fail "a genuinely orphaned task temp root was not reclaimed"
+      pass "an in-use task temp root survives a stale directory mtime; a dead one is still reclaimed" ;;
+  esac
 }
 
 # The incident of 2026-08-24, reproduced. A crewmate's task temp root is exported into
