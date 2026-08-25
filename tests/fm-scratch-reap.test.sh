@@ -16,6 +16,13 @@
 #   (j) ... but that sparing is not forever: past the hard ceiling it is reaped
 #   (k) --max-age-hours 0 is refused, because -mmin -0 matches nothing and would
 #       make every session dir, live ones included, read as dead
+#   (l) a firstmate task temp root whose own mtime is stale but whose content was
+#       just written survives the fm-* pass, while a truly dead one is reclaimed
+#   (m) ... and so does one that nothing has written for days and no process has open,
+#       but which a live process NAMES in its environment - the 2026-08-24 incident,
+#       and the only rail that answers for it
+#   (n) a task temp root whose NAME contains a newline does not end the sweep: the roots
+#       after it are still considered, and the summary still prints
 #
 # (g) and (h) are regression tests for a defect that deleted live sessions' scratch on
 # every macOS run, so neither may be satisfied by a GNU-only path: both drive the
@@ -29,6 +36,13 @@ set -u
 
 REAP="$ROOT/bin/fm-scratch-reap.sh"
 TMP_ROOT=$(fm_test_tmproot fm-scratch-reap-tests)
+
+# The reaper's second pass sweeps FM_SCRATCH_TMP_ROOT/fm-* and DELETES what it finds.
+# Left at its default it would rm -rf the developer's own live task temp roots - the
+# very defect this suite guards - so every test is pointed at an empty scratch root,
+# and the one test that exercises that pass overrides it with its own fixture.
+export FM_SCRATCH_TMP_ROOT="$TMP_ROOT/no-sweep"
+mkdir -p "$FM_SCRATCH_TMP_ROOT"
 
 # Build a fake harness scratch root with a dead session, a fresh session, and a
 # non-session sibling. Echoes the root path.
@@ -281,6 +295,126 @@ test_rejects_zero_max_age() {
   pass "--max-age-hours 0 is refused rather than silently reaping everything"
 }
 
+# A directory's mtime moves only when an entry inside it is created, renamed or
+# unlinked - never when a file already inside it is appended to. A task temp root is
+# created once at spawn and written INTO for the rest of the task, so under the old
+# bare `-mmin +1440` rule it read as abandoned while it was in constant use, and a
+# live crew's workspace was deleted out from under it. The dead root in the same
+# sweep keeps this honest: sparing everything would pass otherwise.
+test_fm_tmp_root_in_use_survives_stale_dir_mtime() {
+  local root sweep live dead out
+  root=$(make_scratch fmtmp)
+  sweep="$TMP_ROOT/fmtmp-sweep"
+  live="$sweep/fm-home-live-task"
+  dead="$sweep/fm-home-dead-task"
+  mkdir -p "$live" "$dead"
+  echo working > "$live/worker.log"
+  echo orphan > "$dead/worker.log"
+  age_days "$dead/worker.log" 3
+  age_days "$live" 3   # last: creating the entries above bumped the dirs' own mtime
+  age_days "$dead" 3
+
+  out=$(FM_SCRATCH_ROOT="$root" FM_SCRATCH_TMP_ROOT="$sweep" "$REAP" 2>/dev/null) ||
+    fail "reaper exited non-zero"
+  [ -e "$live" ] ||
+    fail "a task temp root written into seconds ago was reaped on its stale directory mtime"
+  assert_tmp_pass_worked "$out" "$dead" \
+    "an in-use task temp root survives a stale directory mtime; a dead one is still reclaimed" \
+    "with no way to ask /proc what is alive the task-temp pass reaps nothing and says so"
+}
+
+# assert_tmp_pass_worked <reaper-output> <dead-dir> <pass-msg> <refused-msg>: the shared
+# verdict for the fm-* pass, which has two legitimate outcomes and one that is a defect.
+#
+# The pass needs /proc to answer at all, and macOS has none, so on a platform without one
+# it must reap NOTHING and say so - never fall back to the directory mtime that caused
+# this defect. WHERE /proc IS READABLE, THOUGH, A REFUSAL IS THE DEFECT, and asserting
+# only "it deleted nothing" would accept it silently: that is exactly how the fm-* pass
+# spent a release as a permanent no-op on musl (busybox find rejects `-readable`, which
+# closed the environment rail's capability gate on every run). So a refusal on a box with
+# a working /proc is failed here, with the reaper's own line as the evidence.
+assert_tmp_pass_worked() {  # <output> <dead-dir> <pass-msg> <refused-msg>
+  local out=$1 dead=$2 msg=$3 refused_msg=$4
+  if [ -d /proc ] && readlink "/proc/$$/cwd" >/dev/null 2>&1; then
+    case "$out" in
+      *'unanswerable here'*)
+        fail "the rails refused on a box with a readable /proc, so this pass reclaims nothing here, ever: $(printf '%s\n' "$out" | grep 'unanswerable here')" ;;
+    esac
+    [ ! -e "$dead" ] || fail "a genuinely orphaned task temp root was not reclaimed"
+    pass "$msg"
+  else
+    [ -e "$dead" ] || fail "reaped after refusing the rails - the refusal must delete nothing"
+    assert_contains "$out" 'unanswerable here' "the fail-closed refusal says why"
+    pass "$refused_msg"
+  fi
+}
+
+# The incident of 2026-08-24, reproduced. A crewmate's task temp root is exported into
+# its pane as GOTMPDIR at spawn and then named by every process in that tree, while
+# NOTHING chdirs into it and nothing holds a file open there outside a build - measured
+# on this box, zero cwd and zero fd references against 9 and 13 environment ones. So the
+# directory here is given the exact shape that lost work: stale own mtime, no content
+# written for days, no cwd and no open fd inside it, and one live process carrying its
+# path in its environment. Every rail but the environment one says "dead".
+test_fm_tmp_root_named_in_live_environ_survives() {
+  local root sweep held dead out pid
+  root=$(make_scratch fmenv)
+  sweep="$TMP_ROOT/fmenv-sweep"
+  held="$sweep/fm-home-env-task"
+  dead="$sweep/fm-home-dead-task"
+  mkdir -p "$held" "$dead"
+  echo built > "$held/artifact"
+  echo orphan > "$dead/artifact"
+  age_days "$held/artifact" 3
+  age_days "$dead/artifact" 3
+  age_days "$held" 3   # last: creating the entries above bumped the dirs' own mtime
+  age_days "$dead" 3
+
+  # env, not an exported shell variable: /proc/<pid>/environ is the environment the
+  # process was EXEC'd with, so a variable set after the fork would never appear there.
+  # The child's cwd is the caller's, not $held, and it opens nothing inside it.
+  env FM_SCRATCH_TEST_HOLD="$held" sleep 30 &
+  pid=$!
+  out=$(FM_SCRATCH_ROOT="$root" FM_SCRATCH_TMP_ROOT="$sweep" "$REAP" 2>/dev/null) ||
+    fail "reaper exited non-zero"
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+
+  [ -e "$held" ] ||
+    fail "a task temp root named in a live process's environment was reaped - this is the 2026-08-24 incident"
+  assert_tmp_pass_worked "$out" "$dead" \
+    "a task temp root named only in a live process's environment survives; its unnamed twin is reclaimed" \
+    "with no way to read a process environment the task-temp pass reaps nothing and says so"
+}
+
+# The sweep root is world-writable, so a task temp root's NAME is any local process's to
+# choose - and a newline in one used to end the run. `du` echoes the name it was given, so
+# the size came back as two lines and the second was fed to the arithmetic that totals the
+# reclaim, which under `set -u` aborts bash outright. Every root after it in the same sweep
+# went unconsidered, and the summary never printed. The later root here is the assertion:
+# a test that only checked the newline root itself would have passed throughout.
+test_newline_named_root_does_not_end_the_sweep() {
+  local root sweep nl later out
+  root=$(make_scratch fmnl)
+  sweep="$TMP_ROOT/fmnl-sweep"
+  nl="$sweep/$(printf 'fm-home-nl\nfragment')"
+  later="$sweep/fm-home-zz-later"
+  mkdir -p "$nl" "$later"
+  echo orphan > "$nl/artifact"
+  echo orphan > "$later/artifact"
+  age_days "$nl/artifact" 3
+  age_days "$later/artifact" 3
+  age_days "$nl" 3   # last: creating the entries above bumped the dirs' own mtime
+  age_days "$later" 3
+
+  out=$(FM_SCRATCH_ROOT="$root" FM_SCRATCH_TMP_ROOT="$sweep" "$REAP" 2>/dev/null) ||
+    fail "reaper exited non-zero"
+  assert_not_contains "$out" 'unbound variable' "a crafted directory name never aborts the sweep"
+  assert_tmp_pass_worked "$out" "$later" \
+    "a newline in one task temp root's name does not stop the sweep reaching the next" \
+    "with no way to ask /proc what is alive the task-temp pass reaps nothing and says so"
+}
+
 test_reaps_dead_spares_fresh
 test_cleans_emptied_parent
 test_protect_spares_regardless_of_age
@@ -292,3 +426,6 @@ test_fails_closed_when_probe_cannot_run
 test_traversal_error_spares_that_dir_only
 test_hard_ceiling_reaps_an_unwalkable_dir
 test_rejects_zero_max_age
+test_fm_tmp_root_in_use_survives_stale_dir_mtime
+test_fm_tmp_root_named_in_live_environ_survives
+test_newline_named_root_does_not_end_the_sweep
