@@ -330,6 +330,22 @@ named_in_live_env() {  # <dir> <records>
   return 1
 }
 
+# held_under <root> <held-paths>: the held paths that lie under <root>, one per line.
+# Narrowed ONCE here rather than per candidate, because the list is every open path on
+# the box while the match is a per-directory question: this box carries ~2400 held paths
+# against ~370 task roots, and walking the whole list for each of them cost 25-60s of CPU
+# inside every bootstrap, against 4s for the rest of the sweep on the same backlog.
+# A prefix test is right here where the environ rail needed a name match, because both
+# sides are canonical: readlink returns the kernel's resolved target, and the sweep root
+# was resolved before its candidates were collected.
+held_under() {  # <root> <held-paths>
+  local root=$1 p
+  [ -n "$2" ] || return 0
+  while IFS= read -r p; do
+    case "$p" in "$root"/*) printf '%s\n' "$p" ;; esac
+  done <<< "$2"
+}
+
 # holds_live_process <dir> <held-paths>: does any held path resolve inside <dir>?
 # <dir> must be canonical, because readlink returns the kernel's resolved target and
 # a prefix test between two spellings of one path answers "no".
@@ -460,7 +476,7 @@ elif [ "$links_ok" != yes ] || [ "$env_ok" != yes ]; then
   # something to decide, so a clean box stays silent.
   echo "SCRATCH_REAP: cannot ask $PROC_ROOT what is alive (links=$links_ok environ=$env_ok), so 'is a live task using this' is unanswerable here; leaving ${#TMP_CANDIDATES[@]} $TMP_SWEEP_ROOT/fm-* dir(s) alone (nothing deleted)"
 else
-  held=$(proc_held_paths)
+  held=$(held_under "$TMP_SWEEP_ROOT" "$(proc_held_paths)")
   # The pre-filter is the name shape, not the sweep root, for the reason
   # named_in_live_env owns: the root's spelling in a record is not this pass's to
   # predict, and a pre-filter that guessed it wrong would drop the record before the
