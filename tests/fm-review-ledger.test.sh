@@ -49,6 +49,13 @@ run() {
 
 head_of() { git -C "$1/projects/acme" rev-parse HEAD; }
 
+# A recorded review date N days before today. A fixture that needs "reviewed
+# recently enough to still count as clean" must say so relative to today, or it
+# rots past FM_LEDGER_TTL_DAYS (default 30) and comes back expired. The absolute
+# dates further down are deliberate: those assertions turn on churn or on row
+# replacement, never on nearness to today.
+days_ago() { date -d "$1 days ago" +%F; }
+
 # (a) ------------------------------------------------------------------------
 test_auto_units_and_override() {
   local home out
@@ -84,8 +91,8 @@ test_clean_is_skipped_and_changed_jumps_ahead() {
   local home head out
   home=$(make_home lifecycle)
   head=$(head_of "$home")
-  FM_LEDGER_DATE=2026-07-19 run "$home" record acme codebase src --sha "$head" --verdict clean >/dev/null
-  FM_LEDGER_DATE=2026-07-19 run "$home" record acme codebase api --sha "$head" --verdict clean >/dev/null
+  FM_LEDGER_DATE=$(days_ago 1) run "$home" record acme codebase src --sha "$head" --verdict clean >/dev/null
+  FM_LEDGER_DATE=$(days_ago 1) run "$home" record acme codebase api --sha "$head" --verdict clean >/dev/null
 
   # Both recorded-clean units are unchanged, so select must skip them.
   out=$(run "$home" select acme codebase)
@@ -124,7 +131,7 @@ test_paths_expands_root_unit() {
   # --paths output must be the actual top-level file, not the literal "<root>".
   head=$(head_of "$home")
   for u in src api docs; do
-    FM_LEDGER_DATE=2026-07-19 run "$home" record acme codebase "$u" --sha "$head" --verdict clean >/dev/null
+    FM_LEDGER_DATE=$(days_ago 1) run "$home" record acme codebase "$u" --sha "$head" --verdict clean >/dev/null
   done
   out=$(run "$home" select acme codebase --paths)
   assert_contains "$out" 'README.md' "paths: <root> expands to its top-level file"
@@ -154,7 +161,7 @@ test_nothing_to_review_when_all_clean() {
   home=$(make_home allclean)
   head=$(head_of "$home")
   for u in src api docs '<root>'; do
-    FM_LEDGER_DATE=2026-07-19 run "$home" record acme codebase "$u" --sha "$head" --verdict clean >/dev/null
+    FM_LEDGER_DATE=$(days_ago 1) run "$home" record acme codebase "$u" --sha "$head" --verdict clean >/dev/null
   done
   out=$(run "$home" select acme codebase)
   assert_contains "$out" 'NOTHING_TO_REVIEW' "all-clean: reports nothing to review"
