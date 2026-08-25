@@ -79,7 +79,8 @@ cd "$ROOT" || exit 1
 #
 #   fm-watcher-lock.test.sh - waits for a live watcher to self-evict after a lock takeover
 #   fm-supervision-liveness.test.sh - backgrounds a real watcher+daemon and asserts a foreign-home run does not evict the primary
-#   fm-watch-checkpoint.test.sh - waits for the watcher child to release .watch.lock
+#   fm-watch-checkpoint.test.sh - runs a real watcher under a bounded checkpoint and waits for
+#     the wake it wrote to be passed through
 #   fm-watch-triage.test.sh - asserts wake classification within bounded poll windows
 #   fm-silent-holes.test.sh - waits on a live watcher for wakes that must NOT be absorbed
 #   fm-wake-queue.test.sh - waits for a live watcher to enqueue durable wake records
