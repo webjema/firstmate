@@ -333,13 +333,18 @@ named_in_live_env() {  # <dir> <records>
 # held_under <root> <held-paths>: the held paths that lie under <root>, one per line.
 # Narrowed ONCE here rather than per candidate, because the list is every open path on
 # the box while the match is a per-directory question: this box carries ~2400 held paths
-# against ~370 task roots, and walking the whole list for each of them cost 25-60s of CPU
-# inside every bootstrap, against 4s for the rest of the sweep on the same backlog.
-# A prefix test is right here where the environ rail needed a name match, because both
-# sides are canonical: readlink returns the kernel's resolved target, and the sweep root
-# was resolved before its candidates were collected.
+# thousands of held paths against hundreds of task roots, and walking the whole list for
+# each of them cost 25-60s of CPU in every caller - fm-bootstrap.sh and fm-disk-guard.sh
+# both run this - against 4s for the rest of the sweep on the same backlog.
+# Narrowing loses nothing because the candidates below were built by concatenating this
+# same root, so a held path inside one of them begins with it verbatim. That, and not the
+# root's canonicality, is what makes a prefix test right here where the environ rail
+# needed a name match.
+# The trailing slash is stripped rather than trusted: a root of "/" would otherwise make
+# the pattern "//*", which matches no absolute path at all, and an empty list is read
+# downstream as "nothing is holding this" - the exact fail-open this pass exists to close.
 held_under() {  # <root> <held-paths>
-  local root=$1 p
+  local root="${1%/}" p
   [ -n "$2" ] || return 0
   while IFS= read -r p; do
     case "$p" in "$root"/*) printf '%s\n' "$p" ;; esac
@@ -349,8 +354,9 @@ held_under() {  # <root> <held-paths>
 # holds_live_process <dir> <held-paths>: does any held path resolve inside <dir>?
 # <dir> must be canonical, because readlink returns the kernel's resolved target and
 # a prefix test between two spellings of one path answers "no".
-# A path readlink reported as "<target> (deleted)" still matches, which is the safe
-# direction.
+# A descendant readlink reported as "<target> (deleted)" still matches, which is the safe
+# direction. The directory's own link carrying that suffix does not, and need not: an
+# already-unlinked directory is nothing left to reap.
 holds_live_process() {  # <dir> <held-paths>
   local d=$1 held=$2 p
   [ -n "$held" ] || return 1
@@ -358,6 +364,19 @@ holds_live_process() {  # <dir> <held-paths>
     case "$p" in "$d"|"$d"/*) return 0 ;; esac
   done <<< "$held"
   return 1
+}
+
+# dir_kb <dir>: <dir>'s size in KiB, always a bare number.
+# du echoes the name it was given, so a directory whose name contains a newline comes
+# back as two lines and hands the second one on as if it were a size. The arithmetic
+# that consumes this then aborts the whole run under `set -u`, and every candidate after
+# it goes unconsidered - including the genuinely dead ones this exists to reclaim.
+# /tmp is world-writable, so that name is any local process's to choose.
+dir_kb() {  # <dir>
+  local kb
+  kb=$(du -sk -- "$1" 2>/dev/null | head -1 | cut -f1)
+  case "$kb" in ''|*[!0-9]*) kb=0 ;; esac
+  printf '%s\n' "$kb"
 }
 
 # THE CAPABILITY GATE, before a single directory is considered. A find that cannot
@@ -400,7 +419,7 @@ while IFS= read -r -d '' d; do
       fi
       ;;
   esac
-  kb=$(du -sk "$d" 2>/dev/null | cut -f1); kb=${kb:-0}
+  kb=$(dir_kb "$d")
   if [ "$DRY_RUN" = 1 ]; then
     echo "SCRATCH_REAP: would reap $d (~${kb}K, untouched >${MAX_AGE_HOURS}h)"
   else
@@ -500,7 +519,7 @@ else
         fi
         ;;
     esac
-    kb=$(du -sk "$d" 2>/dev/null | cut -f1); kb=${kb:-0}
+    kb=$(dir_kb "$d")
     if [ "$DRY_RUN" = 1 ]; then
       echo "SCRATCH_REAP: would reap $d (~${kb}K, firstmate task temp, unused >$(( TMP_WINDOW_MINUTES / 60 ))h)"
     else

@@ -21,6 +21,8 @@
 #   (m) ... and so does one that nothing has written for days and no process has open,
 #       but which a live process NAMES in its environment - the 2026-08-24 incident,
 #       and the only rail that answers for it
+#   (n) a task temp root whose NAME contains a newline does not end the sweep: the roots
+#       after it are still considered, and the summary still prints
 #
 # (g) and (h) are regression tests for a defect that deleted live sessions' scratch on
 # every macOS run, so neither may be satisfied by a GNU-only path: both drive the
@@ -385,6 +387,34 @@ test_fm_tmp_root_named_in_live_environ_survives() {
     "with no way to read a process environment the task-temp pass reaps nothing and says so"
 }
 
+# The sweep root is world-writable, so a task temp root's NAME is any local process's to
+# choose - and a newline in one used to end the run. `du` echoes the name it was given, so
+# the size came back as two lines and the second was fed to the arithmetic that totals the
+# reclaim, which under `set -u` aborts bash outright. Every root after it in the same sweep
+# went unconsidered, and the summary never printed. The later root here is the assertion:
+# a test that only checked the newline root itself would have passed throughout.
+test_newline_named_root_does_not_end_the_sweep() {
+  local root sweep nl later out
+  root=$(make_scratch fmnl)
+  sweep="$TMP_ROOT/fmnl-sweep"
+  nl="$sweep/$(printf 'fm-home-nl\nfragment')"
+  later="$sweep/fm-home-zz-later"
+  mkdir -p "$nl" "$later"
+  echo orphan > "$nl/artifact"
+  echo orphan > "$later/artifact"
+  age_days "$nl/artifact" 3
+  age_days "$later/artifact" 3
+  age_days "$nl" 3   # last: creating the entries above bumped the dirs' own mtime
+  age_days "$later" 3
+
+  out=$(FM_SCRATCH_ROOT="$root" FM_SCRATCH_TMP_ROOT="$sweep" "$REAP" 2>/dev/null) ||
+    fail "reaper exited non-zero"
+  assert_not_contains "$out" 'unbound variable' "a crafted directory name never aborts the sweep"
+  assert_tmp_pass_worked "$out" "$later" \
+    "a newline in one task temp root's name does not stop the sweep reaching the next" \
+    "with no way to ask /proc what is alive the task-temp pass reaps nothing and says so"
+}
+
 test_reaps_dead_spares_fresh
 test_cleans_emptied_parent
 test_protect_spares_regardless_of_age
@@ -398,3 +428,4 @@ test_hard_ceiling_reaps_an_unwalkable_dir
 test_rejects_zero_max_age
 test_fm_tmp_root_in_use_survives_stale_dir_mtime
 test_fm_tmp_root_named_in_live_environ_survives
+test_newline_named_root_does_not_end_the_sweep
