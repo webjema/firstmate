@@ -10,8 +10,9 @@
 # provably-working stale panes absorbed-then-escalated past the threshold,
 # terminal-looking stale status lines overridden by an active run, the heartbeat
 # backstop fail-safe, afk coherence (no double-triage while the away-mode
-# daemon owns supervision), and the disk-guard holdback's change detection (one
-# wake per change in the SET of held worktrees, none for a drifting size).
+# daemon owns supervision), detachment (a task handed to the user raises no wake
+# through any scan), and the disk-guard holdback's change detection (one wake per
+# change in the SET of held worktrees, none for a drifting size).
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
@@ -78,6 +79,18 @@ seen_sig() {
 }
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+
+# Run bin/fm-watch.sh's signal scan against <state> and print what it lists. The
+# source guard returns before the singleton lock and the poll loop, so sourcing
+# loads only the function under test; the separate bash keeps the watcher's
+# globals out of this test process.
+scan_signals_in() {  # <state>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    scan_signals
+  ' _ "$WATCH"
+}
 
 # --- disk-guard holdback fixtures -------------------------------------------
 
@@ -1156,6 +1169,92 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+# --- detachment: a task the user drives raises no wake ----------------------
+# AGENTS.md section 6: detach "severs only supervision: the crew's window and
+# worktree stay alive for the user, but the watcher and recovery stop tracking
+# it". The watcher did not implement its half. A detached session keeps running,
+# so its Stop hook keeps writing state/<id>.turn-ended once per turn it ends, and
+# every one of those was an actionable wake costing firstmate a full turn in which
+# the only action available (respawn) is one AGENTS.md forbids. Observed live on
+# 2026-08-23: one detached task produced three identical class=none wakes inside
+# six minutes. bin/fm-detach-lib.sh owns the predicate all three readers share.
+
+test_scan_signals_skips_detached_tasks() {
+  local dir state out
+  dir=$(make_case detach-signal-scan); state="$dir/state"
+  # Two tasks alike in every way the scan can see, except the marker.
+  fm_write_meta "$state/kept-a1.meta" "window=firstmate:fm-kept-a1" "worktree=/wt/kept-a1"
+  fm_write_meta "$state/handed-b2.meta" "worktree=/wt/handed-b2" \
+    "detached=2026-08-23T16:50:25Z" "detached_window=firstmate:fm-handed-b2"
+  printf 'working: still going\n' > "$state/kept-a1.status"
+  printf 'working: still going\n' > "$state/handed-b2.status"
+  : > "$state/kept-a1.turn-ended"
+  : > "$state/handed-b2.turn-ended"
+
+  out=$(scan_signals_in "$state")
+  printf '%s\n' "$out" | grep -F "kept-a1.turn-ended" >/dev/null \
+    || fail "the signal scan dropped an ATTACHED task's turn-end marker: $out"
+  printf '%s\n' "$out" | grep -F "kept-a1.status" >/dev/null \
+    || fail "the signal scan dropped an ATTACHED task's status signal: $out"
+  printf '%s\n' "$out" | grep -F "handed-b2" >/dev/null \
+    && fail "the signal scan still lists a DETACHED task's signals: $out"
+
+  # Clearing the marker is the only route back to supervision, and it must restore
+  # waking at once. The .seen-* signature was deliberately never advanced while the
+  # task was detached, so these same untouched files read as changed again.
+  fm_write_meta "$state/handed-b2.meta" "window=firstmate:fm-handed-b2" "worktree=/wt/handed-b2"
+  out=$(scan_signals_in "$state")
+  printf '%s\n' "$out" | grep -F "handed-b2.turn-ended" >/dev/null \
+    || fail "clearing detached= did not restore waking for the turn-end marker: $out"
+  printf '%s\n' "$out" | grep -F "handed-b2.status" >/dev/null \
+    || fail "clearing detached= did not restore waking for the status signal: $out"
+  pass "scan_signals skips a detached task's status and turn-end signals, and waking returns when the marker clears"
+}
+
+# The heartbeat backstop is the same defect through a second door: it scans every
+# state/*.status for a captain-relevant line the per-wake path might have missed,
+# and a detached crew keeps writing those for the user who is reading them already.
+test_captain_relevant_scan_skips_detached_tasks() {
+  local dir state out
+  dir=$(make_case detach-heartbeat-scan); state="$dir/state"
+  fm_write_meta "$state/kept-a1.meta" "window=firstmate:fm-kept-a1"
+  fm_write_meta "$state/handed-b2.meta" "detached=2026-08-23T16:50:25Z"
+  printf 'done: PR https://x/y/pull/1\n' > "$state/kept-a1.status"
+  printf 'done: PR https://x/y/pull/2\n' > "$state/handed-b2.status"
+  out=$(scan_captain_relevant_statuses "$state")
+  printf '%s' "$out" | grep -F "kept-a1.status" >/dev/null \
+    || fail "the backstop scan dropped an ATTACHED task's captain-relevant status: $out"
+  printf '%s' "$out" | grep -F "handed-b2.status" >/dev/null \
+    && fail "the backstop scan still lists a DETACHED task's captain-relevant status: $out"
+  pass "scan_captain_relevant_statuses skips a detached task, so the heartbeat cannot re-open the door"
+}
+
+test_detached_turn_end_raises_no_wake() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case detach-no-wake); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  fm_write_meta "$state/handed-b2.meta" "worktree=/wt/handed-b2" \
+    "detached=2026-08-23T16:50:25Z" "detached_window=firstmate:fm-handed-b2"
+  # Both markers are in place before the watcher starts, so one poll sees both.
+  # The attached task's wake is what proves the scan RAN - without it the detached
+  # task's silence would be a race, not evidence.
+  : > "$state/handed-b2.turn-ended"
+  : > "$state/attached-a1.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 60 \
+    || { reap "$pid"; fail "the watcher never surfaced the ATTACHED turn-end, so the detached assertions prove nothing"; }
+  grep -F "attached-a1.turn-ended" "$out" >/dev/null \
+    || fail "the surfaced wake did not name the attached task's turn-end: $(cat "$out")"
+  grep -F "handed-b2" "$out" >/dev/null \
+    && fail "the watcher woke for a DETACHED task's turn-end: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the attached turn-end failed"
+  grep -F "handed-b2" "$drain_out" >/dev/null \
+    && fail "a DETACHED task's turn-end reached the durable wake queue: $(cat "$drain_out")"
+  pass "a detached task's turn-end raises no wake, while a sibling attached task's still does"
+}
+
 # --- disk-guard: the wake fires on the HELD SET, never on the reported size ---
 # A leased-and-landed worktree may be held for days, so the holdback is a standing
 # condition and must not be a standing wake. Keying the change-detection on the
@@ -1325,6 +1424,9 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_scan_signals_skips_detached_tasks
+test_captain_relevant_scan_skips_detached_tasks
+test_detached_turn_end_raises_no_wake
 test_disk_guard_unchanged_held_set_wakes_once
 test_disk_guard_new_path_in_held_set_wakes_again
 test_disk_guard_quiet_spell_makes_the_next_episode_news_again

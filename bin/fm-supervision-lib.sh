@@ -12,6 +12,16 @@
 # never a supervision-live decision. This file populates FM_SUP_IN_FLIGHT,
 # FM_SUP_SUPERVISABLE, and FM_SUP_BEACON_DESC for those banners.
 
+# Resolved at source time from BASH_SOURCE so it works whether sourced by a bin/
+# script (which sets its own SCRIPT_DIR) or directly by a test.
+_FM_SUPERVISION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_SUPERVISION_LIB_DIR="."
+
+# The detached-task predicate. It owns that contract for the watcher's wake
+# suppression too, so the supervisable count below and what actually raises a wake
+# read the same marker.
+# shellcheck source=bin/fm-detach-lib.sh
+. "$_FM_SUPERVISION_LIB_DIR/fm-detach-lib.sh"
+
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
   if [ "$(uname)" = Darwin ]; then
@@ -54,10 +64,9 @@ fm_supervision_status() {
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
-    # A detached task demands no live watcher (user-driven, no CI polling);
-    # every other meta - including a released one, whose PR CI the watcher still
-    # polls - does. Presence of the `detached=` marker is the whole test.
-    grep -q '^detached=' "$meta" 2>/dev/null && continue
+    # A detached task demands no live watcher (user-driven); every other meta -
+    # including a released one, whose PR CI the watcher still polls - does.
+    fm_meta_is_detached "$meta" && continue
     FM_SUP_SUPERVISABLE=$((FM_SUP_SUPERVISABLE + 1))
   done
 

@@ -49,8 +49,8 @@ fm_supervision_status "$STATE" "$GRACE"
 
 # The count reports tasks that DEMAND a watcher (FM_SUP_SUPERVISABLE), so the
 # "demands a live watcher?" reading stays honest. Detached tasks (user-driven
-# custody, no firstmate CI polling) are surfaced separately as context rather than
-# folded into the supervised count.
+# custody) are surfaced separately as context rather than folded into the
+# supervised count.
 detached=$(( FM_SUP_IN_FLIGHT - FM_SUP_SUPERVISABLE ))
 flight_ctx="$FM_SUP_SUPERVISABLE task(s) in flight"
 [ "$detached" -gt 0 ] && flight_ctx="$flight_ctx (+$detached detached, custody only)"
