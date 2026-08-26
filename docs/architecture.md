@@ -10,6 +10,10 @@ firstmate's full operating manual for the orchestrator agent itself is [`AGENTS.
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.
 Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, check-script output such as PR merge polling or an X-mode mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, heartbeat backstop hits, and a disk-guard holdback the captain must release.
+A detached task raises none of them.
+`bin/fm-detach.sh` hands the crew to the user but leaves its session running, and that session keeps writing status lines and a turn-end marker once per turn - each one an actionable wake whose only available action is forbidden - so the signal scan and the heartbeat backstop both skip a task whose meta carries `detached=`.
+`bin/fm-detach-lib.sh` is the single owner of that predicate, shared with the guards' supervisable count, and clearing the marker is what restores waking.
+The armed PR check is the deliberate exception: detach leaves it in place exactly as release does, and it is polled by whatever watcher the rest of the fleet keeps alive.
 `bin/fm-wake-kind-lib.sh` is the single owner of which wake kinds exist and of what a wake looks like on the watcher's stdout, so the arm, the bounded checkpoint, and the away-mode daemon all recognise the same set.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.

@@ -1235,16 +1235,25 @@ test_detached_turn_end_raises_no_wake() {
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   fm_write_meta "$state/handed-b2.meta" "worktree=/wt/handed-b2" \
     "detached=2026-08-23T16:50:25Z" "detached_window=firstmate:fm-handed-b2"
+  # The control differs from the detached task in the MARKER and nothing else, so a
+  # pass cannot come from the control merely having a meta the other lacks. It
+  # records no window=, which keeps the pane triage out of a test about the signal
+  # scan; scan_signals never reads that field.
+  fm_write_meta "$state/attached-a1.meta" "worktree=/wt/attached-a1"
   # Both markers are in place before the watcher starts, so one poll sees both.
   # The attached task's wake is what proves the scan RAN - without it the detached
   # task's silence would be a race, not evidence.
   : > "$state/handed-b2.turn-ended"
   : > "$state/attached-a1.turn-ended"
+  # An earlier case in this file exports a WORKING verdict and never clears it,
+  # which would absorb the control's turn-end as provably-working and leave nothing
+  # to surface. Pin the unknown verdict, and hand it back at the end.
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 60 \
     || { reap "$pid"; fail "the watcher never surfaced the ATTACHED turn-end, so the detached assertions prove nothing"; }
+  unset FM_FAKE_CREW_STATE
   grep -F "attached-a1.turn-ended" "$out" >/dev/null \
     || fail "the surfaced wake did not name the attached task's turn-end: $(cat "$out")"
   grep -F "handed-b2" "$out" >/dev/null \

@@ -37,11 +37,13 @@ fm_sup_stat_mtime() {
 #                         context only ("N task(s) in flight"); NOT the gate for
 #                         whether this home still needs a live watcher.
 #   FM_SUP_SUPERVISABLE   count of metas that DEMAND a live watcher = every meta
-#                         that is NOT detached. A detached task (`detached=` line,
-#                         stamped by bin/fm-detach.sh) is one the user drives
-#                         end to end; firstmate does zero watcher supervision or CI
-#                         polling on it, so it must not force a watcher to stay
-#                         armed. A released task (`released=`, bin/fm-teardown.sh's
+#                         that is NOT detached (bin/fm-detach-lib.sh owns that
+#                         predicate). A detached task is one the user drives end to
+#                         end: nothing it writes raises a wake, so it must not force
+#                         a watcher to stay armed. The PR check detach leaves armed
+#                         is polled opportunistically by whatever watcher some OTHER
+#                         task keeps alive, and demands none of its own.
+#                         A released task (`released=`, bin/fm-teardown.sh's
 #                         release-at-PR-open) STILL counts: the watcher is exactly
 #                         what polls its PR's CI, so dropping it would silently kill
 #                         post-PR supervision. The guards gate blind-turn blocking

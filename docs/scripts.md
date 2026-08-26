@@ -51,7 +51,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-context-lib.sh`      | Shared context threshold resolution, native transcript read, and level classification |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
-| `fm-detach-lib.sh`       | Single owner of the "is this task detached?" predicate the watcher and the guards share |
+| `fm-detach-lib.sh`       | Single owner of the "is this task detached?" predicate, shared by watcher and guards |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inheritable-config propagation                        |

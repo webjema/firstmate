@@ -44,6 +44,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-taskstate-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# The detached-task predicate. This script WRITES the marker, so it above all reads
+# it through its one owner: reclaim's gate and the watcher's wake suppression have to
+# agree on which tasks are detached, or a task can be unsupervised and unreclaimable.
+# shellcheck source=bin/fm-detach-lib.sh
+. "$SCRIPT_DIR/fm-detach-lib.sh"
 
 usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -109,12 +114,11 @@ is_idle() {  # <backend> <window>
 }
 
 reclaim_one() {  # <id> <force>
-  local id=$1 force=$2 meta detached window worktree backend
+  local id=$1 force=$2 meta window worktree backend
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || { echo "error: no task $id at $meta" >&2; return 1; }
 
-  detached=$(fm_meta_get "$meta" detached)
-  if [ -z "$detached" ]; then
+  if ! fm_meta_is_detached "$meta"; then
     echo "error: task $id is not detached (no detached= marker); nothing to reclaim" >&2
     return 1
   fi
@@ -144,7 +148,7 @@ reclaim_all() {  # <force>
   local force=$1 meta id any=0 rc=0
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
-    [ -n "$(fm_meta_get "$meta" detached)" ] || continue
+    fm_meta_is_detached "$meta" || continue
     any=1
     id=$(basename "$meta" .meta)
     reclaim_one "$id" "$force" || rc=1

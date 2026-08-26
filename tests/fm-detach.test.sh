@@ -22,6 +22,7 @@
 #   (h) reclaim refuses uncommitted work     -> exit 1, meta preserved (safety reused)
 #   (i) reclaim a detached meta with NO window= -> NO empty-target kill (self-destruct guard)
 #   (j) detach purges watcher markers + queued wakes -> sibling and CI check wake kept
+#   (k) reclaim a VALUELESS detached= marker -> reclaimed, not called "not detached"
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -357,3 +358,24 @@ wake_queue_has "$c/state/.wake-queue" stale 'firstmate:fm-sub-task-x1' \
 wake_queue_has "$c/state/.wake-queue" heartbeat heartbeat \
   || fail "j: detach ATE the fleet-wide heartbeat wake"
 pass "j: detach purges the watcher markers and queued wakes it is the last to be able to address"
+
+# (k) reclaim gates on the marker's PRESENCE, not on its value.
+#
+# bin/fm-detach-lib.sh is the single owner of "is this task detached?", and it
+# answers on the line existing. Reclaim used to ask a different question - is the
+# TIMESTAMP non-empty - and the two disagree on a meta carrying a bare `detached=`:
+# the watcher raises no wake for it (it is detached) while reclaim refuses to
+# return the worktree (it is "not detached"), which is a task nothing supervises
+# and nothing can close. The value is a human-facing stamp; only the line is load
+# bearing, so both readers now read the line.
+c=$(make_case reclaim-valueless-marker)
+write_active_meta "$c" ship
+run "$c" -- task-x1
+expect_code 0 "$CODE" "k: detach exits 0"
+sed -i 's/^detached=.*/detached=/' "$c/state/task-x1.meta"
+grep -q '^detached=$' "$c/state/task-x1.meta" || fail "k: fixture did not produce a valueless marker"
+run "$c" FM_MOCK_WINDOW_EXISTS=0 -- --reclaim task-x1
+expect_code 0 "$CODE" "k: reclaim of a valueless marker exits 0"
+assert_contains "$OUT" "returned to the pool" "k: reclaimed rather than refused"
+assert_absent "$c/state/task-x1.meta" "k: meta purged by teardown"
+pass "k: a valueless detached= marker is still detached, so reclaim returns its worktree"
