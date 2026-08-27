@@ -549,9 +549,11 @@ test_a_future_prune_stamp_does_not_disable_pruning() {
 
 # (q) A default branch that origin/HEAD does not name. -------------------------
 #
-# `git remote add` never sets origin/HEAD, and a project whose default branch is
-# not main/master/trunk would then collect a backup ref for it that the prune
-# could never delete either - it needs the same name for its ancestry base.
+# A repo can reach the hook with origin/HEAD unset - a mirror, a hand-added remote
+# that has not been fetched yet, or any fetch under followRemoteHEAD=never.
+# Such a project whose default branch is not main/master/trunk would then collect a
+# backup ref for it that the prune could never delete either - it needs the same
+# name for its ancestry base.
 test_default_branch_is_learned_when_origin_head_is_unset() {
   local seed bare work first second code=0
   seed="$TMP_ROOT/develop.seed"
@@ -570,8 +572,15 @@ test_default_branch_is_learned_when_origin_head_is_unset() {
   git -C "$work" remote add origin "file://$bare"
   git -C "$work" fetch -q origin
   git -C "$work" reset -q --hard origin/develop
+  # Establish the unset state rather than inherit it.
+  # Since git 2.48 a fetch that finds refs/remotes/origin/HEAD missing creates it,
+  # under remote.<name>.followRemoteHEAD, which defaults to "create".
+  # So the fetch above leaves origin/HEAD set on 2.48+ and unset before it, and this
+  # case is about the repos where it is absent.
+  # --delete is an rc=0 no-op when it is already unset, so both land on that state.
+  git -C "$work" remote set-head origin --delete >/dev/null 2>&1 || true
   [ -z "$(git -C "$work" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)" ] \
-    || fail "develop: the fixture is wrong - remote add is not supposed to set origin/HEAD"
+    || fail "develop: the fixture could not clear origin/HEAD, so this case cannot test what it claims"
   "$HOOKS" "$work" >/dev/null 2>&1
 
   # First commit: nothing knows the default yet, so one backup ref is expected.
