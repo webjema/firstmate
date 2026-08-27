@@ -144,6 +144,7 @@ After any merge you perform without asking, post a one-line "merged <full PR URL
 
 **The mechanical floor** is the project's own Claude Code hooks: secret-scanning, lint, typecheck, and tests, enforced on commit and push whether or not an agent cooperates.
 `bin/fm-hooks-install.sh` installs a starter bundle and never clobbers hooks a project already has.
+It also installs a git `post-commit` hook that mirrors each commit to a `wip/` branch on the project's origin, so a crew dying mid-task no longer strands its committed work on one disk; those branches are backups, never deliveries, and its header owns the contract.
 Crewmates run it inside their worktree and commit the result; firstmate never installs hooks into a clone itself.
 A blocked commit or push means the floor did its job - never steer a crewmate around a hook.
 
