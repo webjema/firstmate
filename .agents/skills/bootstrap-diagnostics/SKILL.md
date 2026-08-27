@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, NEEDS_GH_AUTH, TANGLE, CREW_HARNESS_OVERRIDE, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, POOL_SLOT, or POOL_BUDGET - or when a standalone bin/fm-bootstrap.sh run prints one.
+  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, NEEDS_GH_AUTH, SESSION_SPLIT, TANGLE, CREW_HARNESS_OVERRIDE, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, POOL_SLOT, or POOL_BUDGET - or when a standalone bin/fm-bootstrap.sh run prints one.
   A silent bootstrap section means all good and needs no skill load.
 user-invocable: false
 metadata:
@@ -19,6 +19,21 @@ The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then
   For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease`; treat it as an upgrade request.
   For `tasks-axi`, this also covers an installed build that fails the compatibility probe (`docs/configuration.md` "Backlog backend" owns the definition); `config/backlog-backend=manual` only suppresses the `TASKS_AXI: available` capability line, not this missing-tool report.
 - `NEEDS_GH_AUTH` - ask the user to run `! gh auth login` (interactive; you cannot run it for them).
+- `SESSION_SPLIT: <n> tmux servers running for uid <uid>: pid <p> answers at <socket>; pid(s) <list> do not, so the windows they hold are invisible to every liveness read the fleet makes` - the runtime the whole fleet stands on is serving from more than one process, so every liveness answer is now confidently wrong about whatever the unreachable ones hold.
+  A window that "does not exist" may be alive on another server, and a task that reads as dead may be mid-flight.
+  The mechanism is usually an unlinked socket: the file is removed while its server is still alive and holding the listening socket in the kernel, the next `tmux` command finds nothing at that path, and it starts a second server there.
+  Incident 2026-08-27: the orphan held the previous coordinator and this home's session lock for two hours while every tmux-backed operation kept reaching the new server and returning a coherent answer.
+  So an unexplained read-only session - the lock refused with no other live session you can account for - is this line's problem, not a separate one.
+  **Do not reap anything.**
+  The line reports reachability, not blame: the check counts servers and inspects no sockets, so an unreachable server may equally be a `tmux -L <name>` somebody started deliberately, or this repo's own test suite mid-run.
+  Confirm which is which with `ps -o pid=,lstart=,args= -p <each pid>`, whose start times and argv separate the fleet's server from a stray, and relay the finding in outcome language naming what is unreachable.
+  Killing a server is destructive and reaches the user (`AGENTS.md` section 8), because its windows may hold crews with unlanded work.
+  Only on the user's explicit word, and only with these two facts, both verified during the 2026-08-27 recovery:
+  - Kill an orphaned server with `kill -9`, never `kill`/SIGTERM.
+    A clean tmux shutdown `unlink()`s its socket path on exit, and that path now belongs to the *live* server - so a polite kill reproduces the very bug that caused the split, while SIGKILL left the surviving server's socket intact.
+  - Killing the server does not kill its agents.
+    The pane shells die, but the `claude`/`opencode` processes under them are reparented to init and keep running (~2.2 GB RSS in the incident), so find them by ppid 1 and kill them explicitly or the memory stays gone.
+  Worktrees survive either way, so unlanded work is on disk rather than in the server; recover it through the normal teardown path instead of keeping the orphan alive for it.
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.

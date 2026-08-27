@@ -7,6 +7,7 @@
 #                 "CREW_HARNESS_OVERRIDE: <name>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
+#                 "SESSION_SPLIT: <detail>",
 #                 "POOL_SLOT: <project>: <unusable slot + the exact reclaim command>",
 #                 "POOL_BUDGET: <project>: <why warming stopped>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
@@ -35,6 +36,12 @@
 #          reading would spin up a duplicate agent). Session-start scope only;
 #          see AGENTS.md "Session start" and docs/tmux-backend.md
 #          "Agent liveness probe" for the empirical basis.
+#          A SESSION_SPLIT line means more than one session-provider server is
+#          running for this uid, so the fleet's liveness answers all come from
+#          whichever one the socket path points at while the others still hold
+#          windows. It is READ-ONLY detection and runs in detect-only mode too;
+#          fm_backend_server_split (bin/fm-backend.sh) owns the predicate and the
+#          adapter owns the detail wording.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -357,6 +364,8 @@ if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+session_split=$(fm_backend_server_split "$BACKEND" 2>/dev/null || true)
+[ -n "$session_split" ] && echo "SESSION_SPLIT: $session_split"
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.
