@@ -65,6 +65,8 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-wake-kind-lib.sh" "$fake/bin/fm-wake-kind-lib.sh"
   # fm-peer-lib.sh: teardown sources it to name this home's per-task temp root.
   ln -s "$ROOT/bin/fm-peer-lib.sh" "$fake/bin/fm-peer-lib.sh"
+  # fm-unlanded-lib.sh: teardown sources it for the shared "committed nowhere" ref set.
+  ln -s "$ROOT/bin/fm-unlanded-lib.sh" "$fake/bin/fm-unlanded-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash

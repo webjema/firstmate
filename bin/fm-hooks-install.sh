@@ -19,6 +19,40 @@
 # The starter bundle is deliberately conservative and auto-detected from
 # package.json scripts. It is a floor to tune, not a finished policy.
 #
+# TWO MECHANISMS, NOT ONE. The bundle above is Claude Code hooks, which gate an
+# AGENT's tool calls. This script also installs one GIT hook, post-commit, which
+# fires on every commit however it was made. They are independent: a project that
+# already has its own Claude hooks is left alone above but still gets the git
+# hook, because the two never touch the same file.
+#
+# WHY A POST-COMMIT HOOK EXISTS AT ALL. Crews push once, at review-ready, at the
+# end of a task, so every commit before that moment lives only on one disk. On
+# 2026-08-27 a tmux failure took four crews' windows on one box and 221 commits
+# across three repos existed on no remote ref, some five days old; they were
+# recovered only because someone went looking. The hook closes that interval by
+# mirroring HEAD to refs/heads/wip/<host>/<branch> on origin as each commit is
+# made. It does NOT replace the review-ready push - it makes the wait for it
+# survivable. It cannot help UNCOMMITTED work, which needs an autocommit nobody
+# has asked for.
+#
+# IT MUST NOT WEAKEN THE PRE-PUSH GATE, AND DOES NOT. That gate is the Claude
+# Code PreToolUse hook above, matching `git push` in an agent's Bash calls. A git
+# hook's own push is not a Bash tool call, so it never reaches that gate - which
+# is correct, because the only ref it can write is refs/heads/wip/*: a namespace
+# nothing watches, never a PR source, never merged. The destination is built here
+# and never taken from the caller. A crew's real push to its fm/<id> branch is
+# still a Bash call and still gated, unchanged. The hook also does not pass
+# --no-verify, so a project's own git pre-push hook still runs.
+#
+# That last choice has a price worth naming rather than discovering. On a project
+# whose pre-push hook runs a test suite, the backup push runs it too, in the
+# background, against mid-task state that is often deliberately broken - so the
+# suite fails, the push no-ops, and the backup silently does not happen on
+# exactly the projects that already take quality seriously. The install reports
+# it out loud when it sees such a hook. Making the backup push skip it would fix
+# that, and is a deliberate NON-decision here: bypassing a project's own gate is
+# the captain's call, not this script's.
+#
 # THE GATE MUST REACH A VERDICT INSIDE ITS OWN BUDGET. A PreToolUse hook that
 # outruns the timeout in settings.json is cancelled, and a cancelled hook does
 # not block: the tool call carries on through the normal permission flow. The
@@ -70,6 +104,263 @@ MARKER='fm-quality'
 GATE_BUDGET=280
 GATE_GRACE=5
 GATE_HOOK_TIMEOUT=300
+
+# --- The git post-commit backup hook. ---------------------------------------
+#
+# Runs BEFORE the Claude-hooks branch below, and returns rather than exiting, so
+# a project that already has its own Claude hooks still gets this one: they are
+# separate mechanisms writing separate files (see the header).
+WIP_SENTINEL='fm-wip-push-generated'
+
+# Where git will actually look for hooks. core.hooksPath, when set, REPLACES
+# .git/hooks entirely, so writing to .git/hooks there would install a hook git
+# never runs. Otherwise the common dir, not the worktree's own git dir: one
+# install then covers the clone and every worktree of it.
+resolve_hooks_dir() {
+  local top common configured
+  top=$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null) || return 1
+  configured=$(git -C "$DIR" config --get core.hooksPath 2>/dev/null || true)
+  if [ -n "$configured" ]; then
+    case "$configured" in
+      /*) printf '%s\n' "$configured" ;;
+      *)  printf '%s\n' "$top/$configured" ;;
+    esac
+    return 0
+  fi
+  common=$(git -C "$DIR" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in
+    /*) printf '%s\n' "$common/hooks" ;;
+    *)  printf '%s\n' "$DIR/$common/hooks" ;;
+  esac
+}
+
+install_wip_push_hook() {
+  local hooks_dir target body top configured
+  hooks_dir=$(resolve_hooks_dir) || {
+    echo "wip-push: $DIR is not a git repository - skipped"
+    return 0
+  }
+  target="$hooks_dir/post-commit"
+  body="$hooks_dir/fm-wip-push"
+
+  # core.hooksPath can point INSIDE the working tree, and commonly does: husky
+  # sets it to .husky, a TRACKED directory. An untracked file written there is
+  # dirt in every crew's worktree, which fm-teardown.sh reads as uncommitted work
+  # and refuses on for the rest of the task, and which a crew may commit into the
+  # project by accident. Skipping is the safe half - a hook inside the tree is
+  # the project's own file to add, not firstmate's to plant.
+  configured=$(git -C "$DIR" config --get core.hooksPath 2>/dev/null || true)
+  if [ -n "$configured" ]; then
+    top=$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null || true)
+    if [ -n "$top" ] && [ "${hooks_dir#"$top"/}" != "$hooks_dir" ] \
+       && ! git -C "$DIR" check-ignore -q "$hooks_dir" 2>/dev/null; then
+      echo "wip-push: core.hooksPath points inside the working tree ($hooks_dir) - skipped"
+      echo "          (an untracked hook there reads as uncommitted work to teardown)"
+      return 0
+    fi
+  fi
+
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    [ -e "$target" ] \
+      && echo "wip-push: installed at $target" \
+      || echo "HOOKS_MISSING: $DIR has no post-commit backup hook"
+    return 0
+  fi
+
+  mkdir -p "$hooks_dir"
+
+  # The body lives in its own file that git never invokes, so that a project
+  # which already owns post-commit still has something to call. Only the tiny
+  # dispatcher below is subject to the never-clobber check.
+  cat > "$body" <<'WIPEOF'
+#!/usr/bin/env bash
+# fm-wip-push: mirror this commit to a backup ref on origin the moment it exists.
+#
+# Installed by firstmate's bin/fm-hooks-install.sh, which owns the contract and
+# the rationale. In one line: crews push once, at the end of a task, so every
+# commit before that lives on exactly one disk; this mirrors HEAD to
+# refs/heads/wip/<host>/<branch>, a namespace nothing watches, so losing the
+# machine stops meaning losing the work.
+#
+# THREE RULES, IN PRIORITY ORDER. post-commit runs AFTER the commit is already
+# made, so nothing here may cost the commit anything:
+#   1. Never FAIL the commit. Every path exits 0. No remote, no network, a
+#      rejected push and a detached HEAD are all silent no-ops.
+#   2. Never BLOCK the commit. The network work runs in a background subshell
+#      with its own stdin and its output redirected. The redirect is the
+#      load-bearing part: a backgrounded subshell inherits its caller's stdout,
+#      so without it a caller reading `out=$(git commit ...)` keeps waiting on
+#      the pipe long after git has exited.
+#   3. Never SPEAK. A backup is not news; silence is the success case.
+set -u
+
+branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || exit 0
+[ -n "$branch" ] || exit 0
+git remote get-url origin >/dev/null 2>&1 || exit 0
+
+host=$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)
+host=${host//[^A-Za-z0-9._-]/-}
+[ -n "$host" ] || host=unknown
+
+common=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
+common=$(cd "$common" 2>/dev/null && pwd -P) || exit 0
+
+# A backup ref for the DEFAULT branch is pure noise: it is on the remote already,
+# and the work at risk is on feature branches. origin/HEAD holds the answer in
+# any repo made by `git clone`, but `git remote add` never sets it - and where it
+# is missing, the default branch would both collect a pointless ref and be
+# unprunable, because the prune below needs the same name as its ancestry base.
+# So the background job resolves it once over the network and caches it here.
+default=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+default=${default#origin/}
+[ -n "$default" ] || default=$(cat "$common/fm-wip-default" 2>/dev/null || true)
+case "$default" in *[!A-Za-z0-9._/-]*) default= ;; esac
+case "$branch" in main|master|trunk) exit 0 ;; esac
+if [ -n "$default" ] && [ "$branch" = "$default" ]; then
+  exit 0
+fi
+
+FM_WIP_TIMEOUT=${FM_WIP_TIMEOUT:-120}
+FM_WIP_PRUNE_INTERVAL=${FM_WIP_PRUNE_INTERVAL:-86400}
+
+# Bound the network calls where timeout(1) exists. Nothing waits on this job, so
+# its absence costs nothing a hung push would not have cost anyway.
+net() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --kill-after=10s "${FM_WIP_TIMEOUT}s" "$@"
+  else
+    "$@"
+  fi
+}
+
+(
+  # wip/<host>/<branch>, not wip/<branch>-<host>. The host is a PATH COMPONENT so
+  # the split is unambiguous: host names cannot contain "/" (sanitized above) but
+  # branch names routinely do, so a "-" joiner makes wip/f/x-a from host "b"
+  # indistinguishable from wip/f/x from host "a-b", and makes the prune filter
+  # below match host "box" against another machine's "bigbox".
+  dst="refs/heads/wip/$host/$branch"
+  git check-ref-format "$dst" || exit 0
+
+  # Two commits made inside one push's latency start two force-pushes at once,
+  # and nothing orders their completion: the older one landing last would leave
+  # the backup pointing at the OLDER commit - losing exactly the newest work
+  # this hook exists to save. So serialize per-repo, and push the branch rather
+  # than HEAD, because git resolves the source ref when the push actually runs:
+  # whoever holds the lock last therefore pushes the newest tip either way.
+  # Without flock(1) the pushes stay unordered and that narrow race remains.
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$common/fm-wip-push.lock" || exit 0
+    flock -w "$FM_WIP_TIMEOUT" 9 || exit 0
+  fi
+
+  # Forced, because the ref is a MIRROR of the local branch and not a history.
+  # Without --force the first amend or rebase makes every later backup
+  # non-fast-forward, and the hook fails silently from then on - far worse than
+  # superseding a backup whose commits are still in the local reflog.
+  #
+  # No --no-verify: a project's own git pre-push hook still runs.
+  net git push --quiet --force origin "refs/heads/$branch:$dst" || exit 0
+
+  # --- Prune: merged-only, at most once a day. ------------------------------
+  #
+  # A wip ref dies exactly when its tip is already an ancestor of the remote
+  # default branch: the work landed, so the backup is noise. It is NEVER deleted
+  # by age. An unlanded backup is precisely the work this hook exists to protect,
+  # and a timer would delete the only copy of it. Growth is therefore bounded by
+  # unlanded branches rather than by commits, and a wip ref that persists is a
+  # signal worth keeping.
+  stamp="$common/fm-wip-prune.stamp"
+  last=$(cat "$stamp" 2>/dev/null || true)
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  now=$(date +%s)
+  # A stamp from the FUTURE - one bad container clock, a VM resumed from a
+  # snapshot, a single NTP step - would otherwise disable pruning until real time
+  # caught up with it, which is to say permanently.
+  [ "$last" -le "$now" ] || last=0
+  [ "$(( now - last ))" -ge "$FM_WIP_PRUNE_INTERVAL" ] || exit 0
+  printf '%s\n' "$now" > "$stamp" 2>/dev/null || exit 0
+
+  # Resolve and cache the default branch when origin/HEAD did not answer. Kept
+  # inside the sweep so it costs one extra round trip a day, not one per commit.
+  if [ -z "$default" ]; then
+    default=$(net git ls-remote --symref origin HEAD 2>/dev/null \
+      | awk '$1 == "ref:" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
+    case "$default" in
+      ''|*[!A-Za-z0-9._/-]*) default= ;;
+      *) printf '%s\n' "$default" > "$common/fm-wip-default" 2>/dev/null || true ;;
+    esac
+  fi
+
+  # The ancestry test needs a LOCAL object, so it reads the remote-tracking ref
+  # rather than fetching: a background fetch would move origin/<default> under a
+  # crew mid-task. A stale tracking ref only means pruning less this sweep.
+  base=
+  for candidate in "$default" main master; do
+    [ -n "$candidate" ] || continue
+    if git rev-parse --quiet --verify "refs/remotes/origin/$candidate^{commit}" >/dev/null 2>&1; then
+      base="refs/remotes/origin/$candidate"
+      break
+    fi
+  done
+  [ -n "$base" ] || exit 0
+
+  doomed=()
+  while read -r sha ref; do
+    # Another host's backup is not ours to delete.
+    case "$ref" in "refs/heads/wip/$host/"*) ;; *) continue ;; esac
+    # An object we do not have locally fails this and is kept, not guessed at.
+    git merge-base --is-ancestor "$sha" "$base" 2>/dev/null || continue
+    doomed+=("$ref")
+    [ "${#doomed[@]}" -lt 100 ] || break
+  done < <(net git ls-remote --quiet --heads origin 2>/dev/null)
+
+  [ "${#doomed[@]}" -gt 0 ] || exit 0
+  net git push --quiet origin --delete "${doomed[@]}" || exit 0
+) </dev/null >/dev/null 2>&1 &
+
+exit 0
+WIPEOF
+  chmod +x "$body"
+
+  # NEVER CLOBBERS, exactly as the bundle below does not. A project's own
+  # post-commit carries knowledge this generic hook does not, and chaining into
+  # it automatically would be a guess at its contract.
+  #
+  # The test is for the GENERATED sentinel, not for the string "fm-wip-push". A
+  # project that takes the advice below writes a post-commit that names
+  # fm-wip-push, and a substring test would then read that wrapper as ours and
+  # overwrite it - deleting project logic, silently, on the next task, since
+  # crews run this script every time.
+  if [ -e "$target" ] && ! grep -q "$WIP_SENTINEL" "$target" 2>/dev/null; then
+    echo "wip-push: $target already exists and is not ours - left untouched"
+    echo "          (to get commit backups too, run $body from it)"
+    return 0
+  fi
+
+  cat > "$target" <<WIPDISPATCH
+#!/usr/bin/env bash
+# $WIP_SENTINEL - firstmate wrote this file; bin/fm-hooks-install.sh owns it.
+# The work is in fm-wip-push beside it, so a project that wants its own
+# post-commit can keep this file's job by calling that script instead.
+h="\$(dirname "\$0")/fm-wip-push"
+[ -x "\$h" ] && exec "\$h"
+exit 0
+WIPDISPATCH
+  chmod +x "$target"
+  echo "wip-push: installed the post-commit backup hook at $target"
+  echo "          every commit on a feature branch mirrors to origin refs/heads/wip/<host>/<branch>"
+  echo "          (CI on that project should ignore wip/** or it runs a job per crew commit)"
+
+  # Said out loud because the alternative is a feature that silently does
+  # nothing on exactly the projects that already take quality seriously.
+  if [ -x "$hooks_dir/pre-push" ]; then
+    echo "wip-push: this project has its own git pre-push hook, which the backup push"
+    echo "          also runs - a backup is skipped whenever that hook fails"
+  fi
+}
+
+install_wip_push_hook
 
 # Already has hooks of any kind? Report and stop. This is the common case for a
 # project the user already tuned by hand, and clobbering it would be a
