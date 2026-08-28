@@ -517,10 +517,25 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # line per changed file. .seen-* is updated only after the wake is either
 # surfaced or intentionally absorbed, so a watcher killed mid-cycle never
 # swallows a signal.
+#
+# A DETACHED task raises no signal at all. Detach hands the crew to the user and
+# stops supervision (AGENTS.md section 6), but its session keeps running and its
+# Stop hook keeps writing state/<id>.turn-ended once per turn - each one an
+# actionable wake costing firstmate a full turn in which the one action available
+# is forbidden. Skipping the file rather than absorbing it deliberately leaves
+# .seen-* un-advanced, so clearing the marker (the only way back to supervision)
+# makes the next scan see a changed signature and wake exactly once.
 scan_signals() {
-  local f sig sf
+  local f base task sig sf
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ -e "$f" ] || continue
+    base=${f##*/}
+    case "$base" in
+      *.status)     task=${base%.status} ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *)            continue ;;
+    esac
+    fm_task_is_detached "$STATE" "$task" && continue
     sig=$(stat_sig "$f") || continue
     sf="$STATE/.seen-$(basename "$f" | tr '.' '_')"
     if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then

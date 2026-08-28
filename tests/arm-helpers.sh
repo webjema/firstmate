@@ -29,7 +29,7 @@ make_arm_case() {  # <name>
   # repo's state dir, not the case's.
   cp "$ROOT/bin/fm-watch-arm.sh" "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-wake-kind-lib.sh" \
     "$ROOT/bin/fm-supervision-live.sh" "$ROOT/bin/fm-supervision-lib.sh" \
-    "$ROOT/bin/fm-wake-drain.sh" "$dir/bin/"
+    "$ROOT/bin/fm-detach-lib.sh" "$ROOT/bin/fm-wake-drain.sh" "$dir/bin/"
   cat > "$dir/bin/fm-watch.sh" <<'SH'
 #!/usr/bin/env bash
 # Scripted stand-in for the watcher. It takes the singleton lock exactly the way

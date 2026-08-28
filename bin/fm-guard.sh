@@ -61,9 +61,9 @@ fi
 
 # Compute the supervisable count and the human-readable beacon age via the shared
 # descriptive status (bin/fm-supervision-lib.sh). Only act when a task actually
-# demands a live watcher: FM_SUP_SUPERVISABLE excludes detached tasks (user-
-# driven, no firstmate CI polling), so a home holding only detached work raises no
-# banner. The count also drives the banner text, so it says how much is riding on
+# demands a live watcher: FM_SUP_SUPERVISABLE excludes detached tasks (user-driven,
+# and nothing they write raises a wake), so a home holding only detached work raises
+# no banner. The count also drives the banner text, so it says how much is riding on
 # an absent watcher.
 fm_supervision_status "$STATE" "$GRACE"
 supervisable=$FM_SUP_SUPERVISABLE

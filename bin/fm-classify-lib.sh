@@ -31,6 +31,11 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # shellcheck source=bin/fm-wt-activity-lib.sh
 . "$_FM_CLASSIFY_LIB_DIR/fm-wt-activity-lib.sh"
 
+# The detached-task predicate, so the scans below skip a task firstmate no longer
+# supervises. bin/fm-watch.sh reaches it through this source too.
+# shellcheck source=bin/fm-detach-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-detach-lib.sh"
+
 # The crew current-state reader used for the "provably working" decision.
 # Overridable so tests can stub the pane/log verdict without a real worktree or a
 # live backend endpoint; absent, it points at the real sibling script.
@@ -666,6 +671,11 @@ stale_is_terminal() {  # <window> <state>
 # catch-all backstop for a captain-relevant status the per-wake path might miss.
 # No dedup is applied here: each consumer dedupes against its own seen-state (the
 # daemon against .subsuper-seen-status-*, the watcher against .seen-* signatures).
+#
+# A DETACHED task is skipped. Both consumers are wake backstops, and a backstop
+# that still fired for a task the user drives would re-open the very door
+# bin/fm-watch.sh's signal scan closes: the crew keeps writing captain-relevant
+# lines the user is already reading in the window they own.
 scan_captain_relevant_statuses() {  # <state>
   local state=$1 f last task
   for f in "$state"/*.status; do
@@ -673,6 +683,7 @@ scan_captain_relevant_statuses() {  # <state>
     last=$(last_status_line "$f")
     status_is_captain_relevant "$last" || continue
     task=$(basename "$f"); task="${task%.status}"
+    fm_task_is_detached "$state" "$task" && continue
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
   done
   return 0
