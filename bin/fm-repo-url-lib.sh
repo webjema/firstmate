@@ -24,8 +24,10 @@
 # with the canonical spelling, and firstmate's own warm lock stops treating four
 # spellings of one repository as four independent pools to fill in parallel.
 #
-# CANONICAL FORM: `host[:port]/path`, with the scheme, any userinfo, a default port, a
-# trailing slash and a trailing `.git` removed, and the host lowercased. It is an
+# CANONICAL FORM: `host[:port]/path`, with the scheme, a default port, a trailing slash
+# and a trailing `.git` removed, and the host lowercased. Userinfo is dropped, except a
+# non-`git` user in an scp-style remote, which stays as `user@host/path` because an scp
+# path is relative to that user's home. It is an
 # IDENTITY, not a fetchable URL - never hand it to `git clone`; use
 # fm_repo_url_same to compare, and keep the operator's own spelling for anything a
 # human reads. bin/fm-home-seed.sh is the one exception and says why at its call site.
@@ -42,6 +44,11 @@
 #     are two different directories, and a bare repo really is named `x.git`. Only
 #     trailing slashes are stripped. Resolving symlinks and `..` for a local remote is
 #     bin/fm-home-seed.sh's normalize_origin_url, which owns that separately.
+#   - AN scp PATH'S LEADING SLASH. `git@host:/srv/x` is an absolute server path and
+#     `git@host:srv/x` is ~git/srv/x; both canonicalise to `host/srv/x`. Telling them
+#     apart needs to know whether the far end is a forge (where the path is virtual and
+#     both spellings mean one repo) or a plain ssh account. Bounded: it can only merge
+#     two spellings a single operator wrote for one host.
 #   - `insteadOf` REWRITING needs nothing: `git remote get-url` already applies it
 #     (verified 2026-08-28), and treehouse reads the rewritten URL too, so both sides
 #     see one spelling before this function is reached.
@@ -54,17 +61,56 @@ fm_repo_url_strip_trailing_slashes() {
   printf '%s' "$s"
 }
 
+# fm_repo_url_lower <string>: ASCII lowercase, in pure bash.
+#
+# NOT `tr`, and not `${s,,}`. `tr` is an external command, and a command substitution
+# that fails yields the EMPTY STRING with no error - which here would empty the host
+# and merge two unrelated repositories into one identity, the worst outcome this file
+# has. tests/fm-pool-warm.test.sh already sources its way in with PATH stripped, and
+# fm_pool_sha256 next door exists to ladder around a missing coreutil, so a missing
+# binary is a case this repo meets rather than imagines. `${s,,}` would be the obvious
+# fix and is bash 4: this fleet still runs stock macOS, which ships bash 3.2, and the
+# expansion is a PARSE error there - it would take the whole file down, not one call.
+# Doing it inline cannot fail, and drops two forks per canonicalisation.
+#
+# ASCII only, deliberately: a host is ASCII by the time git hands it over (an IDN is
+# already punycode), and locale-dependent case folding is how `I` becomes `ı`.
+fm_repo_url_lower() {  # <string>
+  local s=${1:-} out='' c rest
+  local upper=ABCDEFGHIJKLMNOPQRSTUVWXYZ lower=abcdefghijklmnopqrstuvwxyz
+  while [ -n "$s" ]; do
+    c=${s%"${s#?}"}
+    s=${s#?}
+    rest=${upper#*"$c"}
+    [ "$rest" = "$upper" ] || c=${lower:$(( ${#upper} - ${#rest} - 1 )):1}
+    out=$out$c
+  done
+  printf '%s' "$out"
+}
+
 # fm_repo_url_canonical <url>: the repository identity of <url> on stdout. Empty in,
 # empty out. Never fails: an unparseable remote canonicalises to itself with trailing
 # slashes removed, which keeps it distinct from everything else rather than colliding.
 fm_repo_url_canonical() {  # <url>
-  local url=${1:-} scheme='' rest hostpart path port=''
+  local url=${1:-} scheme='' rest hostpart path port='' scp_user=''
+
+  # Surrounding whitespace is not part of an identity, and leaving it in does more
+  # than look untidy: a leading space defeats the `*://*` test below, so the URL takes
+  # the unparseable path and keeps its scheme and default port. config/ files are
+  # hand-edited, so this arrives from a real source.
+  while :; do
+    case "$url" in
+      [$' \t']*) url=${url#?} ;;
+      *[$' \t']) url=${url%?} ;;
+      *) break ;;
+    esac
+  done
 
   [ -n "$url" ] || return 0
   rest=$url
   case "$url" in
     *://*)
-      scheme=$(printf '%s' "${url%%://*}" | tr '[:upper:]' '[:lower:]')
+      scheme=$(fm_repo_url_lower "${url%%://*}")
       rest=${url#*://}
       ;;
   esac
@@ -81,11 +127,21 @@ fm_repo_url_canonical() {  # <url>
 
   # scp-like `[user@]host:path`, which git accepts with no scheme. The colon must come
   # before any slash: in `./a:b/c` the colon is part of a path, not a host separator.
+  #
+  # THE SSH USER IS PART OF THE IDENTITY HERE, unlike in a `ssh://` URL, because an scp
+  # path is relative to that user's home: `alice@host:repo.git` and `bob@host:repo.git`
+  # are ~alice/repo.git and ~bob/repo.git, two repositories. `git@` is the exception and
+  # is dropped - every forge uses it as a fixed doorway with a virtual path, which is
+  # what makes `git@github.com:org/repo` and `https://github.com/org/repo` one repo.
   if [ -z "$scheme" ]; then
     case "$rest" in
       *:*)
         case "${rest%%:*}" in
           */*) fm_repo_url_strip_trailing_slashes "$rest"; return 0 ;;
+          *@*)
+            scp_user=${rest%%@*}
+            [ "$scp_user" != git ] || scp_user=''
+            ;;
         esac
         rest="${rest%%:*}/${rest#*:}"
         ;;
@@ -99,7 +155,7 @@ fm_repo_url_canonical() {  # <url>
   case "$hostpart" in
     *:*) port=${hostpart##*:}; hostpart=${hostpart%:*} ;;
   esac
-  hostpart=$(printf '%s' "$hostpart" | tr '[:upper:]' '[:lower:]')
+  hostpart=$(fm_repo_url_lower "$hostpart")
   case "$scheme:$port" in
     https:443|http:80|ssh:22|git:9418) port='' ;;
   esac
@@ -108,7 +164,7 @@ fm_repo_url_canonical() {  # <url>
   path=${path%.git}
   path=$(fm_repo_url_strip_trailing_slashes "$path")
 
-  printf '%s%s%s%s' "$hostpart" "${port:+:$port}" "${path:+/}" "$path"
+  printf '%s%s%s%s%s' "${scp_user:+$scp_user@}" "$hostpart" "${port:+:$port}" "${path:+/}" "$path"
 }
 
 # fm_repo_url_same <url-a> <url-b>: true when both name one repository. Two empty

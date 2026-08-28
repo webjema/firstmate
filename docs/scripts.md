@@ -40,6 +40,8 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-watch.sh`            | Singleton-safe always-on watcher: absorb benign wakes, queue and exit on actionable ones |
 | `fm-pool-warm.sh`        | Keep one free warm treehouse slot ready per in-flight project, inside a disk budget  |
 | `fm-pool-lib.sh`         | Shared reader for a project's treehouse pool state, budget, and lease operations     |
+| `fm-repo-url-lib.sh`     | The one owner of "are these two remote URLs the same repository"                     |
+| `fm-repo-url.sh`         | Print a remote URL's canonical repository identity, or a clone's pool key            |
 | `fm-provision-lib.sh`    | Progress-aware wait for `treehouse get`: tell a warming cold slot from a stuck pane  |
 | `fm-worktree-provision.sh` | Populate a pooled worktree's dependencies by APFS clone from a per-pool cache, then reconcile |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |

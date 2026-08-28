@@ -23,10 +23,12 @@
 # shrinks with nothing noticing. bin/fm-pool-status.sh exists to notice.
 set -u
 
-_FM_POOL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # fm_repo_url_canonical: the one owner of "are these two remote URLs the same repo".
+# Unset after use so this lib leaves nothing but fm_pool_* in a sourcing shell.
+_FM_POOL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-repo-url-lib.sh
 . "$_FM_POOL_LIB_DIR/fm-repo-url-lib.sh"
+unset _FM_POOL_LIB_DIR
 
 # fm_pool_key <project-real-path>: a stable, filesystem-safe slug for one POOL.
 #
@@ -45,8 +47,7 @@ _FM_POOL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #
 # TREEHOUSE COMPARES THE URL LITERALLY, so `.git`, a trailing slash and the ssh
 # spelling are three different pools, and this box really does carry three for one
-# upstream. `git remote get-url` applies the same insteadOf rewriting treehouse does,
-# so both read one URL. Two clones at DIFFERENT paths with the same basename and the
+# upstream. Two clones at DIFFERENT paths with the same basename and the
 # same URL are ONE pool - which is exactly the case the old key got wrong: two homes
 # each holding projects/<name> addressed one pool while taking two different locks
 # keyed by their own paths, so they did not exclude each other at all and could both
@@ -60,17 +61,24 @@ _FM_POOL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # `repo.git`'s pool and `repo`'s pool concurrently, each to its own ceiling, while
 # believing it was managing two unrelated pools. It was filling the fragmentation it
 # should have been refusing to feed. The key now hashes the CANONICAL repository
-# identity (bin/fm-repo-url-lib.sh), so every spelling of one repository takes one
-# lock. That is a COARSER lock than a treehouse pool, never a finer one: it can only
-# serialise two warms that should never have raced, and it can never let two warmers
-# into one pool.
+# identity, which bin/fm-repo-url-lib.sh owns along with what it does and does not
+# fold. Steady-state that is a COARSER lock than a treehouse pool, never a finer one:
+# it can only serialise two warms that should never have raced. What the lock needs is
+# that two homes on one pool derive the SAME string, not that the string equals
+# treehouse's directory name; the basename stays so the key still reads next to the
+# pool family it guards.
 #
-# WHAT THE LOCK ACTUALLY NEEDS is that two homes on one pool derive the SAME string,
-# not that the string equals treehouse's directory name. The basename stays so the key
-# still reads next to the pool family it guards - and because the basename is the
-# OTHER half of treehouse's key: `optiroq-dev-9ae0cf` and `optiroq-allma-9ae0cf` carry
-# one hash and are still two pools. Canonicalising a URL therefore never collapses
-# pools that already exist; only converging the clone directory names does that.
+# CHANGING THIS VALUE RENAMES A LIVE LOCK, and "steady-state" above is the whole
+# caveat. The lock is a file named by this key (bin/fm-pool-warm.sh), so a warmer
+# holding the old name is invisible to one taking the new name, and two warmers then
+# fill one pool - the exact over-provisioning the lock exists to prevent. Secondmate
+# homes carry their OWN bin/ and are fast-forwarded by /updatefirstmate, so the window
+# shuts when the LAST home updates, not the first: change this with no warm in flight
+# and update every home in one pass. The orphaned files are harmless in themselves -
+# zero bytes, and flock on an unheld file succeeds - but nothing collects them, so
+# ~/.treehouse/.fm-warm-locks still carries the path-keyed generation this file
+# replaced in 2026-08-16 (`aisha-832807002.lock`) beside the URL-keyed one it replaced
+# today (`aisha-30bace.lock`). That residue is what this hazard looks like afterwards.
 #
 # A clone with no origin remote falls back to the physical path, which is what
 # this function always did: without a remote there is no shared identity to key

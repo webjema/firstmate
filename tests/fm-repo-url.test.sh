@@ -89,6 +89,12 @@ check 'https://github.com/Org/Repo.git/'     'github.com/Org/Repo'   'trailing s
 check 'https://github.com/Org/Repo//'        'github.com/Org/Repo'   'repeated trailing slashes'
 check 'https://github.com'                   'github.com'            'host with no path'
 check ''                                     ''                      'empty in, empty out'
+check '  https://github.com/Org/Repo.git  '  'github.com/Org/Repo'   'surrounding whitespace'
+# The ssh user is dropped for a URL with a scheme and kept for an scp path, because
+# only the scp path is relative to that user's home. bin/fm-repo-url-lib.sh owns why.
+check 'git@github.com:Org/Repo.git'          'github.com/Org/Repo'   'the forge git@ doorway is dropped'
+check 'alice@host:repo.git'                  'alice@host/repo'       'a non-git scp user is kept'
+check 'ssh://alice@host/srv/repo.git'        'host/srv/repo'         'a non-git ssh:// user is dropped'
 pass "(b) the canonical form drops scheme, userinfo, default port and .git, and lowercases only the host"
 
 # --- (c) genuinely different repositories stay different --------------------
@@ -104,7 +110,9 @@ differ 'https://github.com/Org/Repo' 'https://github.com/Org/Repo2'  'different 
 # host. bin/fm-repo-url-lib.sh's header owns this and the rest of the left-out list.
 differ 'https://github.com/Org/Repo' 'https://github.com/org/repo'   'path case is not folded'
 differ 'https://github.com:8443/Org/Repo' 'https://github.com/Org/Repo' 'non-default port is part of the identity'
-pass "(c) different hosts, owners, names, path case and non-default ports stay distinct"
+# ~alice/repo.git and ~bob/repo.git are two repositories on one host.
+differ 'alice@host:repo.git' 'bob@host:repo.git' 'two ssh users on one host'
+pass "(c) different hosts, owners, names, path case, ssh users and non-default ports stay distinct"
 
 # --- (d) local path remotes -------------------------------------------------
 check '/srv/git/repo.git'        '/srv/git/repo.git'  'a bare repo really is named .git'
@@ -138,9 +146,16 @@ IDENTITY_SITES="bin/fm-pool-lib.sh bin/fm-home-seed.sh"
 PRESENCE_SITES="bin/fm-bearings-snapshot.sh bin/fm-bootstrap.sh bin/fm-ff-lib.sh
 bin/fm-fleet-sync.sh bin/fm-review-diff.sh bin/fm-teardown.sh"
 
+# EVERY WAY TO READ AN ORIGIN URL, not just the one this repo happens to use today.
+# `git config --get remote.origin.url`, `git remote -v` and `git ls-remote --get-url`
+# all return the same string - the last even applies insteadOf - so a pattern matching
+# only `remote get-url` would let a new identity site walk straight past this guard,
+# which is the single thing it exists to stop.
+#
 # Only real code counts as a site: a header comment that discusses `remote get-url`
 # reads no URL, and listing it would make the inventory drift on every doc edit.
-found=$( (cd "$ROOT" && grep -rlE '^[^#]*remote get-url' bin/) | LC_ALL=C sort)
+READ_ORIGIN='remote get-url|remote\.origin\.url|remote -v|ls-remote --get-url'
+found=$( (cd "$ROOT" && grep -rlE "^[^#]*($READ_ORIGIN)" bin/) | LC_ALL=C sort)
 declared=$(printf '%s\n%s\n' "$IDENTITY_SITES" "$PRESENCE_SITES" | tr ' ' '\n' | grep . | LC_ALL=C sort -u)
 [ "$found" = "$declared" ] || fail "(f) the set of bin/ scripts reading an origin URL changed.
 Classify each new or removed one in this test as an IDENTITY site (it decides WHICH
@@ -166,3 +181,34 @@ assert_contains "$body" 'fm_repo_url_canonical' \
 printf '%s' "$body" | grep -q 'get-url[^)]*)[[:space:]]*|' \
   && fail "(f) fm_pool_key pipes a raw remote URL somewhere; it must canonicalise first"
 pass "(f) every bin/ script that derives a repository identity routes through the shared canonicaliser"
+
+# --- (g) no external command, so nothing can fail into a merge ---------------
+#
+# A command substitution whose command is missing yields the EMPTY STRING and no error.
+# When the case-fold was `| tr`, a stripped PATH emptied the host and merged unrelated
+# repositories - and emptied the scheme, which sent every https:// URL down the
+# unparseable path and reverted the whole fix in silence. tests/fm-pool-warm.test.sh
+# sources its way in with PATH stripped, so this is a state the fleet reaches.
+G_URLS="https://github.com/Symanty/OptiroqAllma.git
+https://GitHub.COM/Symanty/OptiroqAllma
+git@github.com:Symanty/OptiroqAllma.git
+git@gitlab.com:Symanty/OptiroqAllma.git"
+got=$(
+  # SC2123 warns that assigning PATH is usually a typo for PATH=$PATH:x. Breaking the
+  # search path IS the experiment here, and it is confined to this subshell.
+  # shellcheck disable=SC2123
+  PATH=/nonexistent-so-only-builtins-work
+  # shellcheck source=bin/fm-repo-url-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-repo-url-lib.sh"
+  for u in $G_URLS; do fm_repo_url_canonical "$u"; printf '\n'; done
+)
+want="$EXPECTED_IDENTITY
+$EXPECTED_IDENTITY
+$EXPECTED_IDENTITY
+gitlab.com/Symanty/OptiroqAllma"
+[ "$got" = "$want" ] || fail "(g) with no external command on PATH the canonicaliser changed its answers.
+--- want ---
+$want
+--- got ---
+$got"
+pass "(g) the canonicaliser uses only shell builtins, so a missing binary cannot empty a host"
