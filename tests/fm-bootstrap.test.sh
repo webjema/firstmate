@@ -47,6 +47,23 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
+  # One tmux server, always. The split-brain check counts real server processes,
+  # so without this fake these cases would report a SESSION_SPLIT line - and
+  # break their expected silence - whenever anything else on the box happened to
+  # be running a second tmux server. tests/fm-tmux-split.test.sh owns that check.
+  cat > "$fakebin/pgrep" <<'SH'
+#!/usr/bin/env bash
+# Answers the tmux server-count probe only; anything else must miss loudly
+# rather than be silently faked into a match.
+for arg; do
+  if [ "$arg" = 'tmux: server' ]; then
+    printf '%s\n' 4242
+    exit 0
+  fi
+done
+exit 1
+SH
+  chmod +x "$fakebin/pgrep"
   add_tasks_axi "$fakebin" "0.1.1"
   printf '%s\n' "$fakebin"
 }

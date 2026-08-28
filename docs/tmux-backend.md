@@ -141,6 +141,32 @@ Incident, 2026-07-15, real tmux 3.4 on Linux (Ubuntu 24.04.4 LTS, 6.17.0-1019-aw
 reclaiming a detached crew whose window was already closed ran teardown with an empty `window=`, and `tmux kill-window -t ""` returned exit 0 and killed the coordinator's own window while an unrelated throwaway session was untouched (confirming the empty target resolves to the ACTIVE window, not the throwaway session's window).
 The empty-target kill is deliberately NOT reproduced live in the test suite or here - doing so kills the running window; the guard is proven instead by a mocked `tmux` that records its arguments (`tests/fm-backend.test.sh`, `tests/fm-detach.test.sh`).
 
+## Server-count probe: a server's comm is not its argv
+
+`fm_backend_tmux_server_pids` (`bin/backends/tmux.sh`) counts the tmux servers this uid owns, and `fm_backend_tmux_server_split` turns a count above one into bootstrap's `SESSION_SPLIT:` line.
+The predicate must match the server's **comm**, never its argv.
+A tmux server keeps the argv of the client command that spawned it, so `pgrep -x -f 'tmux: server'` matches nothing and reports a confident zero on a box that is genuinely split - a predicate that is worse than none, because it makes the split look checked.
+
+Verified with real tmux 3.4 on Linux (Ubuntu 24.04.4 LTS, 6.17.0-1019-aws), 2026-08-27, with two servers live: this box's own, and a decoy on a private `TMUX_TMPDIR` and a private `-L` socket.
+
+```sh
+$ ps -o pid=,comm=,args= -p 141258
+ 141258 tmux: server    tmux -L fmdoc new-session -d -s fmdoc sleep 60
+$ pgrep -x -f 'tmux: server'; echo "exit=$?"
+exit=1
+$ pgrep -u "$(id -u)" -x 'tmux: server'; echo "exit=$?"
+141258
+3097422
+exit=0
+```
+
+`comm` is `tmux: server` while `args` is still the client's `tmux -L fmdoc new-session ...`, which is why the `-f` form found nothing and the comm form found both.
+`tests/fm-tmux-split.test.sh` pins this by asserting a real decoy server's pid appears in the predicate's output, so reintroducing the `-f` turns that test red.
+
+The probe deliberately stops at counting.
+It inspects no sockets, so it cannot tell an orphaned server from a `tmux -L` server started on purpose, and the reported line says only which server answers at the fleet's socket path and which do not.
+Reaping is never automatic: `.agents/skills/bootstrap-diagnostics` owns the handling, including why an orphan must be killed with SIGKILL (a clean tmux shutdown `unlink()`s a socket path that by then belongs to the live server) and why its agents survive the kill.
+
 ## Limitations
 
 The agent-liveness probe above has one known gap (`pi`'s generic `node` process name, see above).

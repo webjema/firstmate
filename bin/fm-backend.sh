@@ -387,6 +387,22 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+# fm_backend_server_split: session-provider split-brain detection. Prints
+# nothing and returns 0 when the backend has at most one server running - the
+# normal case, and the reason a silent bootstrap section still means all good -
+# and one detail line when it has two or more. DETECT ONLY: reaping a server is
+# destructive and can strand a crew's unlanded work, so it stays the captain's
+# call (.agents/skills/bootstrap-diagnostics owns the handling). The wording
+# belongs to the adapter, which knows what a split means for its own provider.
+fm_backend_server_split() {  # <backend>
+  local backend=$1
+  fm_backend_source "$backend" || return 0
+  case "$backend" in
+    tmux) fm_backend_tmux_server_split ;;
+  esac
+  return 0
+}
+
 # fm_backend_remove_worktree / fm_backend_worktree_path: the worktree-provider
 # surface, for a backend that owns the task worktree instead of treehouse. tmux
 # is a session provider only, so both always refuse. They stay defined because

@@ -184,3 +184,66 @@ fm_backend_tmux_agent_alive() {  # <target>
     *) printf 'unknown' ;;
   esac
 }
+
+# fm_backend_tmux_server_pids: every tmux SERVER process this uid owns, one pid
+# per line, empty when none is running.
+#
+# The match is on the server's comm, NOT its argv. A tmux server keeps the argv
+# of the client command that spawned it ("tmux new-session -d -s work ..."), so
+# `pgrep -x -f 'tmux: server'` matches nothing and answers a confident 0 on a
+# box that is actually split - worse than no predicate at all. See
+# docs/tmux-backend.md "Server-count probe" for the verification transcript.
+fm_backend_tmux_server_pids() {
+  pgrep -u "$(id -u)" -x 'tmux: server' 2>/dev/null || true
+}
+
+# fm_backend_tmux_socket_query: one format string from whichever server answers
+# at the socket path a bare `tmux` connects to, empty when none does. Bounded,
+# unlike every other tmux call in this adapter, because its only caller runs at
+# SESSION START and only once the fleet is already known to be degraded - the
+# state a wedged server is most likely to be in - and an unbounded round trip
+# there hangs the captain's first command instead of reporting the problem.
+fm_backend_tmux_socket_query() {  # <format>
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 5 tmux display-message -p "$1" 2>/dev/null | head -1
+  else
+    tmux display-message -p "$1" 2>/dev/null | head -1
+  fi
+}
+
+# fm_backend_tmux_server_split: the split-brain detail line, or nothing at all
+# when at most one server is running. Owns the wording bin/fm-bootstrap.sh
+# prints behind its SESSION_SPLIT: prefix; the handling is owned by
+# .agents/skills/bootstrap-diagnostics, including the 2026-08-27 incident that
+# is the reason this exists.
+#
+# The line reports reachability, never blame. This predicate counts servers
+# across every socket and inspects none of them, so it cannot tell an orphan
+# from a `tmux -L` server somebody started deliberately - and this repo's own
+# test suite runs one. What it can say for certain is that only the server
+# answering at the fleet's socket path is visible to the fleet, so every
+# window-existence and liveness read is answered by that one alone and knows
+# nothing of the windows the others hold.
+fm_backend_tmux_server_split() {
+  local pids count owner path others pid
+  pids=$(fm_backend_tmux_server_pids)
+  [ -n "$pids" ] || return 0
+  count=$(printf '%s\n' "$pids" | wc -l | tr -d '[:space:]')
+  [ "$count" -gt 1 ] || return 0
+
+  owner=$(fm_backend_tmux_socket_query '#{pid}')
+  path=$(fm_backend_tmux_socket_query '#{socket_path}')
+  others=
+  for pid in $pids; do
+    [ "$pid" = "$owner" ] && continue
+    others="${others:+$others }$pid"
+  done
+
+  if [ -n "$owner" ]; then
+    printf '%s tmux servers running for uid %s: pid %s answers at %s; pid(s) %s do not, so the windows they hold are invisible to every liveness read the fleet makes' \
+      "$count" "$(id -u)" "$owner" "$path" "$others"
+  else
+    printf '%s tmux servers running for uid %s and none of them answers at the socket path: pid(s) %s are all invisible to the fleet, so no liveness read can reach any window' \
+      "$count" "$(id -u)" "$others"
+  fi
+}
