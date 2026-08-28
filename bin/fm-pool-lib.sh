@@ -23,6 +23,13 @@
 # shrinks with nothing noticing. bin/fm-pool-status.sh exists to notice.
 set -u
 
+# fm_repo_url_canonical: the one owner of "are these two remote URLs the same repo".
+# Unset after use so this lib leaves nothing but fm_pool_* in a sourcing shell.
+_FM_POOL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-repo-url-lib.sh
+. "$_FM_POOL_LIB_DIR/fm-repo-url-lib.sh"
+unset _FM_POOL_LIB_DIR
+
 # fm_pool_key <project-real-path>: a stable, filesystem-safe slug for one POOL.
 #
 # TREEHOUSE DOES NOT KEY A POOL BY THE CLONE'S PATH, and an earlier version of this
@@ -38,29 +45,47 @@ set -u
 #   repo-f860c9    git@host:org/repo.git
 #   other-a9b5a3   (no origin remote)           <-- sha256 of the repo PATH
 #
-# THE URL IS COMPARED LITERALLY, so `.git`, a trailing slash and the ssh spelling
-# are three different pools, and this box really does carry three for one upstream.
-# `git remote get-url` applies the same insteadOf rewriting treehouse does, so both
-# read one URL. Two clones at DIFFERENT paths with the same basename and the same
-# URL are ONE pool - which is exactly the case the old key got wrong: two homes each
-# holding projects/<name> addressed one pool while taking two different locks keyed
-# by their own paths, so they did not exclude each other at all and could both warm
-# it, over-provisioning by GBs. Hashing the URL instead of the path is the whole fix;
+# TREEHOUSE COMPARES THE URL LITERALLY, so `.git`, a trailing slash and the ssh
+# spelling are three different pools, and this box really does carry three for one
+# upstream. Two clones at DIFFERENT paths with the same basename and the
+# same URL are ONE pool - which is exactly the case the old key got wrong: two homes
+# each holding projects/<name> addressed one pool while taking two different locks
+# keyed by their own paths, so they did not exclude each other at all and could both
+# warm it, over-provisioning by GBs. Hashing the URL instead of the path was that fix;
 # the dep-cache lock beside this one was always keyed by the real pool directory
 # (bin/fm-worktree-provision.sh pool_key_of).
 #
-# WHAT THE LOCK ACTUALLY NEEDS is that two homes on one pool derive the SAME
-# string, not that the string equals treehouse's directory name. Reproducing that
-# name is what makes the lock legible next to the pool it guards; if a future
-# treehouse renamed its pools, both homes would still agree and the lock would
-# still hold.
+# THIS KEY IS DELIBERATELY NOT TREEHOUSE'S DIRECTORY NAME, and hashing the LITERAL url
+# is what it stopped doing (2026-08-28). Mirroring treehouse exactly gave firstmate one
+# independent warm lock and one independent disk budget PER SPELLING, so it would warm
+# `repo.git`'s pool and `repo`'s pool concurrently, each to its own ceiling, while
+# believing it was managing two unrelated pools. It was filling the fragmentation it
+# should have been refusing to feed. The key now hashes the CANONICAL repository
+# identity, which bin/fm-repo-url-lib.sh owns along with what it does and does not
+# fold. Steady-state that is a COARSER lock than a treehouse pool, never a finer one:
+# it can only serialise two warms that should never have raced. What the lock needs is
+# that two homes on one pool derive the SAME string, not that the string equals
+# treehouse's directory name; the basename stays so the key still reads next to the
+# pool family it guards.
+#
+# CHANGING THIS VALUE RENAMES A LIVE LOCK, and "steady-state" above is the whole
+# caveat. The lock is a file named by this key (bin/fm-pool-warm.sh), so a warmer
+# holding the old name is invisible to one taking the new name, and two warmers then
+# fill one pool - the exact over-provisioning the lock exists to prevent. Secondmate
+# homes carry their OWN bin/ and are fast-forwarded by /updatefirstmate, so the window
+# shuts when the LAST home updates, not the first: change this with no warm in flight
+# and update every home in one pass. The orphaned files are harmless in themselves -
+# zero bytes, and flock on an unheld file succeeds - but nothing collects them, so
+# ~/.treehouse/.fm-warm-locks still carries the path-keyed generation this file
+# replaced in 2026-08-16 (`aisha-832807002.lock`) beside the URL-keyed one it replaced
+# today (`aisha-30bace.lock`). That residue is what this hazard looks like afterwards.
 #
 # A clone with no origin remote falls back to the physical path, which is what
 # this function always did: without a remote there is no shared identity to key
 # by, and per-path is then the honest answer.
 fm_pool_key() {  # <project-real-path>
   local path=$1 url hash
-  url=$(git -C "$path" remote get-url origin 2>/dev/null || true)
+  url=$(fm_repo_url_canonical "$(git -C "$path" remote get-url origin 2>/dev/null || true)")
   if [ -n "$url" ]; then
     hash=$(printf '%s' "$url" | fm_pool_sha256 | cut -c1-6)
   fi

@@ -40,6 +40,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# fm_repo_url_same: the one owner of "are these two remote URLs the same repo".
+# shellcheck source=bin/fm-repo-url-lib.sh
+. "$SCRIPT_DIR/fm-repo-url-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -553,10 +556,20 @@ EOF
     git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
     url=$(source_origin_url "$project" "$mode" "$src") || return 1
     dst_url=$(seeded_origin_url "$project" "$dst" "$url") || return 1
-    [ "$dst_url" = "$url" ] || {
-      echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
+    if [ "$dst_url" != "$url" ]; then
+      # A DIFFERENT SPELLING OF THE SAME REPO IS STILL A REFUSAL, and the message has
+      # to say why, because "it is the same repo, just tidier" is exactly the reasoning
+      # that grew one repository into four treehouse pools. treehouse keys a pool on
+      # the literal URL, so the two clones would warm separate pools of one repo.
+      # Reconciling it means rewriting a remote under a home this one may not
+      # supervise, which is the captain's call, not this script's.
+      if fm_repo_url_same "$dst_url" "$url"; then
+        echo "error: seeded project $project at $dst has origin $dst_url, the same repository as $url spelled differently. Each spelling gets its own treehouse worktree pool (see bin/fm-repo-url-lib.sh), so seeding would duplicate the pool rather than share it. Reconcile the two spellings first." >&2
+      else
+        echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
+      fi
       return 1
-    }
+    fi
     return 0
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
