@@ -498,8 +498,12 @@ backlog_append() {  # <file> <title> <body> <repo>
 }
 
 # --- compose -----------------------------------------------------------------
-# The four things the user named, in one body: what is wrong, where, WHY you believe it
-# is wrong, and what you expected instead. The trailer is always the last line.
+# A finding is a bug report, so its body follows a standard bug-report shape: Issue (what is
+# wrong and why), Where, Expected, a Scope / Impact block for the repo/task/severity context,
+# and an Acceptance criteria checklist. It is filled only from what the caller named; sections
+# a general bug template asks for but a finding cannot know - steps to reproduce, environment -
+# are left out rather than stubbed. The trailer is always the last line, and the dedupe key is
+# title+where+repo, so this shape may change without breaking it.
 finding_body() {  # <key>
   local key=$1 why where expected repo task priority
   why=$(record_field "$key" why)
@@ -508,12 +512,20 @@ finding_body() {  # <key>
   repo=$(record_field "$key" repo)
   task=$(record_field "$key" task)
   priority=$(record_field "$key" priority)
-  printf '%s\n\n' "$why"
+  printf 'Issue\n%s\n\n' "$why"
   printf 'Where: %s\n' "$where"
-  printf 'Expected instead: %s\n' "$expected"
-  [ -z "$repo" ] || printf 'Repository: %s\n' "$repo"
-  [ -z "$task" ] || printf 'Found while working on: %s\n' "$task"
-  [ -z "$priority" ] || printf 'Severity: %s\n' "$priority"
+  printf 'Expected: %s\n' "$expected"
+  if [ -n "$repo" ] || [ -n "$task" ] || [ -n "$priority" ]; then
+    printf '\nScope / Impact\n'
+    [ -z "$repo" ] || printf 'Repository: %s\n' "$repo"
+    [ -z "$task" ] || printf 'Found while working on: %s\n' "$task"
+    [ -z "$priority" ] || printf 'Severity: %s\n' "$priority"
+  fi
+  printf '\nAcceptance criteria\n'
+  printf -- '- [ ] The issue above can no longer be reproduced.\n'
+  printf -- '- [ ] Behaviour matches "Expected" above.\n'
+  printf -- '- [ ] A regression test covering it is added or updated where applicable.\n'
+  printf -- '- [ ] Existing functionality remains unaffected.\n'
   printf '\n%s\n' "$(trailer_for "$key")"
 }
 
