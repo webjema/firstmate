@@ -252,7 +252,8 @@ test_product_finding_files_a_card_into_the_section() {
   notes=$(jq -r '.[0].notes' "$FAKE_ASANA_STORE")
   assert_contains "$notes" "the cached key outlives its lease" "the notes must carry WHY"
   assert_contains "$notes" "Where: src/pool.ts:42" "the notes must carry WHERE"
-  assert_contains "$notes" "Expected instead: the lease renewal" "the notes must carry EXPECTED"
+  assert_contains "$notes" "Expected: the lease renewal" "the notes must carry EXPECTED"
+  assert_contains "$notes" "Acceptance criteria" "the notes must follow the Bug template's sections"
   assert_contains "$notes" "[fm-finding: " "the notes must carry the dedupe trailer"
   key=$(basename "$(only_record)" .json)
   assert_grep '"state": "filed"' "$(record_file "$key")" "the local record must say filed"
