@@ -6,6 +6,7 @@
 # Usage:
 #   fm-file-finding.sh --title <t> --where <file:line> --why <w> --expected <e>
 #                      --blocking <yes|no>
+#                      [--needs none|decision|resource] [--question <text>]
 #                      [--scope product|fleet] [--repo <name>] [--task <id>]
 #                      [--key <slug>] [--priority <0-4>]
 #   fm-file-finding.sh flush        re-file every finding held locally by an earlier outage
@@ -15,6 +16,23 @@
 # way to skip a blocker. The refusal prints the escalation path (fix it if the scope is
 # small and adjacent, otherwise append `blocked:`/`needs-decision:` and stop) and exits 2
 # without writing a record or calling any tracker.
+#
+# --needs CLASSIFIES the finding at filing time, when the filer has the most context, and
+# so decides which HOLD a backlog finding lands under (see BACKLOG TARGET). The filing
+# agent already knows whether fixing this needs a human call, so it says so:
+#   none      (the DEFAULT when --needs is omitted) no human input needed. Lands under the
+#             machine-drainable `verify` hold: bin/fm-triage-findings.sh re-reads the
+#             finding in the current code and releases, closes, or escalates it with no
+#             human in the loop. Most findings are mechanical, so this is the default.
+#   decision  fixing it turns on a product/architecture call only the captain can make.
+#   resource  fixing it needs a credential, login, or access the filer does not have.
+# decision and resource land under the `captain` hold and REQUIRE --question naming the
+# exact thing to decide or the exact access needed, so the captain gets an answerable
+# question and not another silent row. Filing decision/resource without --question is
+# REFUSED (exit 2), like a blocker: a human gate with no question is the bug this ends.
+# --question is rejected with --needs none. The classification is recorded on the finding
+# either way, so a product-board (Asana) finding carries the question in its notes even
+# though that route has no dispatch hold to key on.
 #
 # ROUTING - the one-line rule is "does a human tracking the user's product need to see
 # this?", and the default answer is computed rather than asked:
@@ -33,13 +51,23 @@
 # the filed task; left unset it defaults to the basename of the directory holding the git
 # common dir, which is the repository name for a worktree as well as a checkout.
 #
-# BACKLOG TARGET. `tasks-axi add --queue` followed by `tasks-axi hold --kind captain`, so a
-# fleet finding lands non-dispatchable and firstmate's "re-evaluate Queued" sweep cannot
-# turn it into work before a human has read it - the backlog's equivalent of the Asana
-# Triage section. bin/fm-tasks-axi-lib.sh owns whether that backend may be used; when it
-# says no (tool absent, too old, or config/backlog-backend=manual) the row and its hold are
-# appended to backlog.md directly, which AGENTS.md section 9 sanctions and which is better
-# than holding a finding hostage to a tool version.
+# BACKLOG TARGET. `tasks-axi add --queue` followed by `tasks-axi hold`, so a fleet finding
+# lands non-dispatchable and firstmate's "re-evaluate Queued" sweep cannot turn it into
+# work before it has been triaged. --needs picks the hold (see --needs above):
+#   verify   default. `--kind parked`, reason prefixed `verify:`. Machine-drainable by
+#            bin/fm-triage-findings.sh, whose header owns that drain. A `parked` hold that
+#            does NOT carry the `verify:` reason prefix is some other tool's hold and the
+#            drain leaves it alone.
+#   captain  --needs decision|resource. `--kind captain`, reason the sanitized question.
+#            The equivalent of the Asana Triage section: a human reads it before it is work.
+# The DEFAULT is verify, not captain: a filed finding is overwhelmingly a mechanical one a
+# machine can verify and release, and holding every one for a human is the queue-clogging
+# bug this default flip ends. tasks-axi only knows the five hold kinds it enumerates, so
+# `verify` rides in the reason on a `parked` hold rather than a sixth kind of its own.
+# bin/fm-tasks-axi-lib.sh owns whether that backend may be used; when it says no (tool
+# absent, too old, or config/backlog-backend=manual) the row and its hold are appended to
+# backlog.md directly, which AGENTS.md section 9 sanctions and which is better than holding
+# a finding hostage to a tool version.
 #
 # ASANA TARGET. A local knob, never a built-in default: which tracker a fleet files into is
 # a decision only its user can make, and a shipped default would point every other install
@@ -128,6 +156,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-pool-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# The verify-hold contract shared with bin/fm-triage-findings.sh: FM_VERIFY_HOLD_REASON,
+# FM_VERIFY_HOLD_KIND, and fm_sanitize_reason.
+# shellcheck source=bin/fm-finding-lib.sh
+. "$SCRIPT_DIR/fm-finding-lib.sh"
 
 usage() {
   awk '
@@ -459,14 +491,19 @@ backlog_file_finding() {  # <title> <body> <trailer> <repo> <priority>
   # and heartbeat, so without this a filed finding would start work by itself - the one
   # thing the Triage section exists to prevent on the other route.
   if [ -n "$id" ]; then
-    tasks-axi hold "$id" --reason "$HOLD_REASON" --kind captain --file "$file" >/dev/null 2>&1 ||
+    tasks-axi hold "$id" --reason "$HOLD_REASON" --kind "$HOLD_KIND" --file "$file" >/dev/null 2>&1 ||
       echo "warn: filed $id but could not hold it; triage it before it is dispatched" >&2
   fi
   FILED_URL="backlog ${id:-$file}"
   return 0
 }
 
-HOLD_REASON="unreviewed finding - triage before dispatching"
+# HOLD_REASON/HOLD_KIND are re-derived per finding from its record in file_recorded, so the
+# flush path (which parses no args) holds each finding by its own recorded --needs. Seeded to
+# the verify default (bin/fm-finding-lib.sh owns that contract) so an early reference is never
+# unset.
+HOLD_REASON="$FM_VERIFY_HOLD_REASON"
+HOLD_KIND="$FM_VERIFY_HOLD_KIND"
 
 # The hand-written equivalent, for a home whose tasks-axi is absent, too old, or opted out
 # with config/backlog-backend=manual. AGENTS.md section 9 sanctions hand-editing exactly
@@ -481,7 +518,7 @@ backlog_append() {  # <file> <title> <body> <repo>
   row="- [ ] $id - $title"
   [ -z "$repo" ] || row="$row (repo: $repo)"
   row="$row (kind: ship) (since $(date -u +%Y-%m-%d))"
-  row="$row (hold: $HOLD_REASON) (hold-kind: captain)"
+  row="$row (hold: $HOLD_REASON) (hold-kind: $HOLD_KIND)"
   if [ ! -f "$file" ]; then
     printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$file"
   fi
@@ -505,16 +542,23 @@ backlog_append() {  # <file> <title> <body> <repo>
 # are left out rather than stubbed. The trailer is always the last line, and the dedupe key is
 # title+where+repo, so this shape may change without breaking it.
 finding_body() {  # <key>
-  local key=$1 why where expected repo task priority
+  local key=$1 why where expected repo task priority needs question
   why=$(record_field "$key" why)
   where=$(record_field "$key" where)
   expected=$(record_field "$key" expected)
   repo=$(record_field "$key" repo)
   task=$(record_field "$key" task)
   priority=$(record_field "$key" priority)
+  needs=$(record_field "$key" needs)
+  question=$(record_field "$key" question)
   printf 'Issue\n%s\n\n' "$why"
   printf 'Where: %s\n' "$where"
   printf 'Expected: %s\n' "$expected"
+  # The captain question survives the reason's trim and reaches the product board, which has
+  # no dispatch hold to carry it. Named by kind so the reader sees what the human input is.
+  if [ "$needs" = decision ] || [ "$needs" = resource ]; then
+    printf '\nNeeds captain (%s)\n%s\n' "$needs" "$question"
+  fi
   if [ -n "$repo" ] || [ -n "$task" ] || [ -n "$priority" ]; then
     printf '\nScope / Impact\n'
     [ -z "$repo" ] || printf 'Repository: %s\n' "$repo"
@@ -532,11 +576,20 @@ finding_body() {  # <key>
 # Files the finding already recorded under <key>. Prints exactly one verdict line and
 # never returns non-zero for a tracker problem: a tracker outage is not a task failure.
 file_recorded() {  # <key>
-  local key=$1 scope title body trailer ok=0
+  local key=$1 scope title body trailer needs question ok=0
   scope=$(record_field "$key" scope)
   title=$(record_field "$key" title)
   trailer=$(trailer_for "$key")
   body=$(finding_body "$key")
+  # The hold is chosen from the RECORD, not the run's globals: `flush` re-files findings it
+  # never parsed args for, so a decision/resource finding held by an outage must still land
+  # captain when it clears, not fall back to the verify default.
+  needs=$(record_field "$key" needs)
+  question=$(record_field "$key" question)
+  case "$needs" in
+    decision|resource) HOLD_REASON="$needs: $(fm_sanitize_reason "$question")"; HOLD_KIND=captain ;;
+    *) HOLD_REASON="$FM_VERIFY_HOLD_REASON"; HOLD_KIND="$FM_VERIFY_HOLD_KIND" ;;
+  esac
   FILED_URL=""
   API_ERR=""
   ALREADY=0
@@ -590,7 +643,7 @@ fi
 
 # --- file --------------------------------------------------------------------
 TITLE=""; WHERE=""; WHY=""; EXPECTED=""; BLOCKING=""
-SCOPE=""; REPO=""; TASK=""; KEY=""; PRIORITY=""
+SCOPE=""; REPO=""; TASK=""; KEY=""; PRIORITY=""; NEEDS=""; QUESTION=""
 while [ $# -gt 0 ]; do
   # Every flag below takes a value, so a trailing one would make `shift 2` return non-zero
   # and kill the script under `set -e` with no message at all instead of a usage error.
@@ -603,6 +656,8 @@ while [ $# -gt 0 ]; do
     --why) WHY=${2:-}; shift 2 ;;
     --expected) EXPECTED=${2:-}; shift 2 ;;
     --blocking) BLOCKING=${2:-}; shift 2 ;;
+    --needs) NEEDS=${2:-}; shift 2 ;;
+    --question) QUESTION=${2:-}; shift 2 ;;
     --scope) SCOPE=${2:-}; shift 2 ;;
     --repo) REPO=${2:-}; shift 2 ;;
     --task) TASK=${2:-}; shift 2 ;;
@@ -615,6 +670,21 @@ done
 for pair in "title:$TITLE" "where:$WHERE" "why:$WHY" "expected:$EXPECTED" "blocking:$BLOCKING"; do
   [ -n "${pair#*:}" ] || die "--${pair%%:*} is required (see --help)"
 done
+
+# --needs classifies the finding, and decides its backlog hold. Default is `none` (verify) -
+# the whole point of the flip: a filed finding is machine-drainable unless the filer says a
+# human is needed. decision/resource REQUIRE the question, refused like a blocker when it is
+# missing, because a captain hold with no question is the silent row this change ends.
+[ -n "$NEEDS" ] || NEEDS=none
+case "$NEEDS" in
+  none)
+    [ -z "$QUESTION" ] || die "--question is only valid with --needs decision or resource"
+    ;;
+  decision|resource)
+    [ -n "$QUESTION" ] || die "--needs $NEEDS requires --question naming what the captain must decide or the access needed (see --help)"
+    ;;
+  *) die "--needs must be 'none', 'decision', or 'resource', got '$NEEDS'" ;;
+esac
 
 case "$BLOCKING" in
   no) ;;
@@ -659,9 +729,11 @@ fi
 write_record "$KEY" "$(jq -n \
   --arg key "$KEY" --arg scope "$SCOPE" --arg title "$TITLE" --arg where "$WHERE" \
   --arg why "$WHY" --arg expected "$EXPECTED" --arg repo "$REPO" --arg task "$TASK" \
-  --arg priority "$PRIORITY" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg priority "$PRIORITY" --arg needs "$NEEDS" --arg question "$QUESTION" \
+  --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '{key:$key,scope:$scope,title:$title,where:$where,why:$why,expected:$expected,
-    repo:$repo,task:$task,priority:$priority,created:$created,state:"pending",url:"",error:""}')"
+    repo:$repo,task:$task,priority:$priority,needs:$needs,question:$question,
+    created:$created,state:"pending",url:"",error:""}')"
 
 file_recorded "$KEY"
 

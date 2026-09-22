@@ -207,6 +207,11 @@ A tracker it cannot reach leaves the finding held locally instead of dropped, an
 `bin/fm-file-finding.sh flush` re-files what was held, and nothing else will.
 Crewmates file directly through it and report what they filed.
 
+A filed fleet finding is not a human question by default.
+It lands under a machine-drainable hold, and the `triage` skill drains that queue: it verifies each finding against the code as it stands now, then dispatches the ones that still reproduce, closes the ones already fixed or obsolete, and escalates only a genuine product or access call - never dispatching anything destructive, irreversible, or security-sensitive.
+A finding reaches a human hold only when its filer says it must, with `bin/fm-file-finding.sh --needs decision|resource` and the exact question it turns on, because a hold with no question is the silent row this default flip ends.
+The session-start digest surfaces the count still awaiting the drain, so the queue is drained rather than left to sit; load the `triage` skill when the fleet is idle, or on `/triage`.
+
 ### Adding a project
 
 Clone with `git clone <url> projects/<name>`, add its registry line, then draft its direction and put it in front of the user to correct.

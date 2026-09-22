@@ -328,6 +328,25 @@ else
   printf '(none)\n'
 fi
 
+# Filed findings default to a machine-drainable verify hold (bin/fm-file-finding.sh), so the
+# queue is meant to be drained, not to sit. Surfacing the count here is the cadence: no wake
+# fires for a held finding, so without this line the drain would only ever run when a human
+# remembered it. The drain itself never runs from this digest - it needs the judgment half.
+subsection "Findings awaiting the triage drain (verify hold)"
+DRAINABLE=0
+if [ -f "$DATA/backlog.md" ]; then
+  DRAINABLE=$(grep -c '(hold: verify:' "$DATA/backlog.md" 2>/dev/null || true)
+fi
+if [ "$DRAINABLE" -gt 0 ]; then
+  printf '%s finding(s) held for automated triage. When the fleet is otherwise idle, drain\n' "$DRAINABLE"
+  # shellcheck disable=SC2016  # the backticks are literal Markdown for the reader, not expansion.
+  printf 'them: load the `triage` skill - it verifies each finding in the current code, then\n'
+  printf 'dispatches the real ones, closes the fixed or obsolete ones, and escalates only a\n'
+  printf 'genuine product or access question to you.\n'
+else
+  printf '(none)\n'
+fi
+
 subsection "AFK"
 if [ -e "$STATE/.afk" ]; then
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
