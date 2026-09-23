@@ -10,6 +10,12 @@
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #
+# Plus the wrong-branch integrity contract: the compare side is the worktree's
+# actually checked-out HEAD, never the name fm/<id>. A stale fm/<id> left in the
+# shared object store must not be reviewed in place of the crew's real branch, and
+# every run must PRINT the resolved compare ref, base ref, and both SHAs so a wrong
+# comparison is visible in the output.
+#
 # Plus the summary-first contract: the DEFAULT prints the map (base, stat, per-file
 # sizes) and never the diff body, says loudly that the body was elided and how to
 # get it, and --full / --files are the two explicit ways to get code. The base/ref
@@ -147,6 +153,67 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+# --- wrong-branch integrity -------------------------------------------------
+
+# The crew is legitimately on a branch NOT named fm/<id> (the stacked-PR shape),
+# while a stale fm/<id> from an earlier pool slot still exists in the shared
+# object store. The tool must diff the checked-out HEAD branch, never the leftover
+# name, and must warn loudly that the divergent stale branch exists.
+test_reviews_head_not_stale_conventional_branch() {
+  local case_dir out err
+  case_dir=$(make_case wrong-branch)
+  printf 'stale-already-merged\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "stale leftover on fm/task-x1"
+  git -C "$case_dir/wt" checkout -q -b fm/task-x1-r3 origin/main
+  printf 'the-real-work\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "the real change to review"
+  write_task_meta "$case_dir"
+
+  out=$(run_review_diff "$case_dir" task-x1 --full 2> "$case_dir/stderr")
+  err=$(cat "$case_dir/stderr")
+
+  assert_contains "$out" '+the-real-work' "wrong-branch: must diff the checked-out HEAD branch"
+  assert_not_contains "$out" 'stale-already-merged' "wrong-branch: must NOT diff the stale fm/<id> branch"
+  assert_contains "$out" 'compare ref: fm/task-x1-r3' "wrong-branch: must print the resolved compare ref"
+  assert_contains "$err" "stale 'fm/task-x1'" "wrong-branch: must warn about the divergent stale conventional branch"
+  pass "fm-review-diff reviews the checked-out HEAD branch, never a stale fm/<id> in the shared object store"
+}
+
+# The output contract: every run prints the resolved compare ref, base ref, and
+# both short SHAs, so a wrong comparison is visible rather than only inferable.
+test_prints_resolved_refs_and_shas() {
+  local case_dir out
+  case_dir=$(make_case print-refs)
+  stale_and_pr_commits "$case_dir"
+  write_task_meta "$case_dir"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'compare ref: fm/task-x1 (' "print-refs: must print resolved compare ref + short SHA"
+  assert_contains "$out" 'diff base: origin/main (' "print-refs: must print resolved base ref + short SHA"
+  pass "every run prints the resolved compare ref, base ref, and both SHAs"
+}
+
+# A detached worktree cannot name a compare branch: refuse loudly rather than
+# fall back to a guessed name.
+test_detached_head_refuses_loudly() {
+  local case_dir rc
+  case_dir=$(make_case detached)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/wt" checkout -q --detach HEAD
+  write_task_meta "$case_dir"
+
+  set +e
+  run_review_diff "$case_dir" task-x1 --full > "$case_dir/out" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "detached: must exit non-zero"
+  assert_contains "$(cat "$case_dir/stderr")" 'detached HEAD' "detached: must say why it refused"
+  pass "fm-review-diff refuses loudly on a detached worktree instead of guessing a branch"
+}
+
 # --- summary first ----------------------------------------------------------
 
 test_default_is_a_summary_that_admits_what_it_elided() {
@@ -195,5 +262,8 @@ test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_reviews_head_not_stale_conventional_branch
+test_prints_resolved_refs_and_shas
+test_detached_head_refuses_loudly
 test_default_is_a_summary_that_admits_what_it_elided
 test_full_and_files_produce_code

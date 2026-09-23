@@ -11,6 +11,15 @@
 # head is what keeps firstmate's review of the real, mergeable change. If the PR
 # head cannot be resolved, the script falls back to the local branch with a warning.
 #
+# COMPARE SIDE. The compare ref is the worktree's actually checked-out HEAD, never
+# the name fm/<id> guessed from the task id. Pooled worktrees share one object
+# store, so a stale fm/<id> from an earlier slot can resolve while the crew works
+# on a different branch; resolving by name silently reviewed the leftover. When
+# fm/<id> exists but diverges from HEAD, the run warns and reviews HEAD anyway.
+# Every run prints the resolved compare ref, the base ref, and both SHAs (all
+# resolved in the worktree the diff runs in), so a wrong comparison is visible in
+# the output instead of only inferable from the code.
+#
 # SUMMARY FIRST. The default used to print the stat AND the entire unbounded diff,
 # which on a large change is one of the most expensive reads in the supervision loop
 # - and most of it is read by nobody. The default is now the map: the base, the
@@ -94,11 +103,22 @@ default_branch() {
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
-BRANCH="fm/$ID"
-if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
-  BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  [ -n "$BRANCH" ] || { echo "error: branch fm/$ID does not exist and worktree $WT is detached" >&2; exit 1; }
-  git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $WT" >&2; exit 1; }
+# The compare side is the worktree's ACTUALLY checked-out branch, never a name
+# guessed from the task id. Pooled worktrees share one object store, so a stale
+# fm/<id> left by an earlier slot resolves even when the crew is on a different
+# branch (the normal stacked-PR shape); preferring that name silently reviewed
+# the wrong commits with no sign in the output.
+BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+[ -n "$BRANCH" ] || { echo "error: worktree $WT is on a detached HEAD; cannot resolve a compare branch" >&2; exit 1; }
+
+# If the conventional name also exists AND points somewhere other than HEAD, that
+# is exactly the ambiguity that used to review the wrong branch. Say so loudly;
+# the diff still uses HEAD (the real checked-out work), never the leftover name.
+CONV="fm/$ID"
+if [ "$BRANCH" != "$CONV" ] && git -C "$WT" rev-parse --verify --quiet "refs/heads/$CONV" >/dev/null; then
+  if [ "$(git -C "$WT" rev-parse "refs/heads/$CONV")" != "$(git -C "$WT" rev-parse HEAD)" ]; then
+    echo "warning: worktree is on '$BRANCH' ($(git -C "$WT" rev-parse --short HEAD)) but a stale '$CONV' ($(git -C "$WT" rev-parse --short "refs/heads/$CONV")) also exists; reviewing the checked-out branch, not the leftover name" >&2
+  fi
 fi
 
 pr_number_from_target() {
@@ -156,7 +176,14 @@ fi
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
-echo "diff base: $BASE"
+# Print what is actually being compared, on EVERY run: a wrong comparison must be
+# visible in the output, not only inferable from the code. Both SHAs are resolved
+# in $WT, the same repo the diff runs in, so the line proves the two refs agree
+# with what the diff below uses.
+BASE_SHA=$(git -C "$WT" rev-parse --short "$BASE^{commit}")
+COMPARE_SHA=$(git -C "$WT" rev-parse --short "$COMPARE_REF^{commit}")
+echo "compare ref: $COMPARE_REF ($COMPARE_SHA)"
+echo "diff base: $BASE ($BASE_SHA)"
 if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
   echo "no changes vs $BASE"
   exit 0
