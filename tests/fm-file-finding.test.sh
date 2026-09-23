@@ -112,12 +112,13 @@ case "${1:-}" in
   mv) echo "usage: tasks-axi mv <id> [<id>...] <section>"; exit 0 ;;
 esac
 printf '%s\n' "$*" >> "$FAKE_TASKS_LOG"
-file=""; bodyfile=""; reason=""; prev=""
+file=""; bodyfile=""; reason=""; kind=""; prev=""
 for a in "$@"; do
   case "$prev" in
     --file) file=$a ;;
     --body-file) bodyfile=$a ;;
     --reason) reason=$a ;;
+    --kind) kind=$a ;;
   esac
   prev=$a
 done
@@ -132,9 +133,11 @@ case "${1:-}" in
     printf '{"ok":true,"task":{"id":"finding-xx"}}\n'
     ;;
   hold)
-    # tasks-axi renders a hold as suffixes on the task's own row.
-    sed -i "s|^- \[ \] $2 - .*|& (hold: $reason) (hold-kind: captain)|" "$file"
-    printf 'ok: hold %s -> held (captain)\n' "$2"
+    # tasks-axi renders a hold as suffixes on the task's own row, honoring the kind it was
+    # given (parked for a verify hold, captain for a real question) rather than assuming one.
+    [ -n "$kind" ] || kind=captain
+    sed -i "s|^- \[ \] $2 - .*|& (hold: $reason) (hold-kind: $kind)|" "$file"
+    printf 'ok: hold %s -> held (%s)\n' "$2" "$kind"
     ;;
 esac
 SH
@@ -355,15 +358,55 @@ test_scope_is_detected_from_the_repository() {
 }
 
 # A filed finding is a work record, not authorized work: it must land held, so firstmate's
-# "dispatch whatever is Queued and unblocked" sweep cannot turn it into a crew before a
-# human has read it. This is the backlog's equivalent of the Asana Triage section.
+# "dispatch whatever is Queued and unblocked" sweep cannot turn it into a crew before it has
+# been triaged. By default that hold is the machine-drainable verify hold (kind parked, reason
+# prefixed verify:), not a captain hold: the drain, not a human, clears the common case.
 test_backlog_finding_lands_held() {
   new_case held
   run_file "$PROJ_DIR" --scope fleet "${STD_ARGS[@]}" >/dev/null || fail "filing failed"
-  assert_grep "hold: unreviewed finding" "$HOME_DIR/data/backlog.md" \
-    "a filed finding must not be dispatchable before a human has triaged it"
+  assert_grep "hold: verify:" "$HOME_DIR/data/backlog.md" \
+    "a filed finding must land on the machine-drainable verify hold by default"
+  assert_grep "hold-kind: parked" "$HOME_DIR/data/backlog.md" \
+    "the verify hold rides on tasks-axi kind parked"
   assert_grep "hold finding-xx --reason" "$FAKE_TASKS_LOG" "the hold must go through tasks-axi"
-  pass "fm-file-finding.sh: a fleet finding lands held, not dispatchable"
+  pass "fm-file-finding.sh: a fleet finding lands on the verify hold, not dispatchable"
+}
+
+# --needs decision routes the finding to a captain hold instead, and REQUIRES a question - a
+# human hold with no question is the silent row the default flip exists to end.
+test_needs_decision_lands_on_a_captain_hold_with_the_question() {
+  new_case needs_decision
+  run_file "$PROJ_DIR" --scope fleet "${STD_ARGS[@]}" \
+    --needs decision --question "ship US-9 wizard or defer to per-year ingestion?" >/dev/null ||
+    fail "filing a decision finding failed"
+  assert_grep "hold-kind: captain" "$HOME_DIR/data/backlog.md" \
+    "a --needs decision finding must land on a captain hold"
+  assert_grep "hold: decision: ship US-9 wizard" "$HOME_DIR/data/backlog.md" \
+    "the captain hold reason must carry the question the finding turns on"
+  pass "fm-file-finding.sh: --needs decision lands on a captain hold carrying the question"
+}
+
+# The refusal is symmetric with the blocker refusal: a captain hold with no question is
+# refused at filing time, when the filer still has the context to write one.
+test_needs_decision_without_a_question_is_refused() {
+  local out rc=0
+  new_case needs_decision_no_q
+  out=$(run_file "$PROJ_DIR" --scope fleet "${STD_ARGS[@]}" --needs decision 2>&1) || rc=$?
+  expect_code 2 "$rc" "a decision finding with no question must be refused"
+  assert_contains "$out" "requires --question" "the refusal must name the missing question"
+  assert_absent "$HOME_DIR/state/findings" "a refused filing must leave no record to flush"
+  pass "fm-file-finding.sh: --needs decision without --question is refused"
+}
+
+# --question only means something when a human is being asked; pairing it with the default
+# (no human needed) is a contradiction, refused rather than silently dropped.
+test_question_without_needs_is_refused() {
+  local out rc=0
+  new_case question_no_needs
+  out=$(run_file "$PROJ_DIR" --scope fleet "${STD_ARGS[@]}" --question "why?" 2>&1) || rc=$?
+  expect_code 2 "$rc" "a question with no --needs must be refused"
+  assert_contains "$out" "only valid with --needs" "the refusal must explain the contradiction"
+  pass "fm-file-finding.sh: --question without --needs decision|resource is refused"
 }
 
 # A home whose tasks-axi is missing, too old, or opted out with backlog-backend=manual must
@@ -380,8 +423,10 @@ test_manual_backend_still_records_the_finding() {
     "a manual-backend home must not call tasks-axi add"
   assert_grep "the cached key outlives its lease" "$HOME_DIR/data/backlog.md" \
     "the hand-written row must carry the finding"
-  assert_grep "hold: unreviewed finding" "$HOME_DIR/data/backlog.md" \
-    "the hand-written row must be held like the tasks-axi one"
+  assert_grep "hold: verify:" "$HOME_DIR/data/backlog.md" \
+    "the hand-written row must be held on the verify hold like the tasks-axi one"
+  assert_grep "hold-kind: parked" "$HOME_DIR/data/backlog.md" \
+    "the hand-written verify hold rides on kind parked"
   assert_grep "[fm-finding: " "$HOME_DIR/data/backlog.md" \
     "the hand-written row must carry the dedupe trailer"
   pass "fm-file-finding.sh: a manual-backend home still records the finding, held"
@@ -702,6 +747,9 @@ test_fleet_finding_goes_to_the_backlog_and_never_to_asana
 test_fleet_refiling_creates_one_backlog_task
 test_scope_is_detected_from_the_repository
 test_backlog_finding_lands_held
+test_needs_decision_lands_on_a_captain_hold_with_the_question
+test_needs_decision_without_a_question_is_refused
+test_question_without_needs_is_refused
 test_manual_backend_still_records_the_finding
 test_unreadable_scan_payload_defers
 test_routing_follows_the_repo_the_finding_is_about

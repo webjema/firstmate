@@ -660,8 +660,69 @@ EOF
   pass "context digest prints each project's direction in full, ABSENT when the project has none"
 }
 
+test_triage_drain_subsection_counts_only_verify_holds() {
+  local rec root home fakebin out
+  rec=$(new_world triage-drain-count)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  # A backlog carrying two verify holds and one captain hold, rendered exactly as
+  # tasks-axi writes them. The digest counts only the verify holds - the drainable
+  # ones - and must not count the captain question waiting on a human.
+  cat > "$home/data/backlog.md" <<'BL'
+# Backlog
+
+## Queued
+- [ ] a-finding-1 - first (repo: demo) (kind: ship) (since 2026-09-22) (hold: verify: awaiting automated triage - bin/fm-triage-findings.sh) (hold-kind: parked)
+- [ ] a-finding-2 - second (repo: demo) (kind: ship) (since 2026-09-22) (hold: verify: awaiting automated triage - bin/fm-triage-findings.sh) (hold-kind: parked)
+- [ ] a-question-3 - third (repo: demo) (kind: ship) (since 2026-09-22) (hold: decision: which way to build it) (hold-kind: captain)
+BL
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "Findings awaiting the triage drain (verify hold)" "the digest did not label the triage-drain subsection"
+  assert_contains "$out" "2 finding(s) held for automated triage" "the digest miscounted the drainable verify holds"
+  assert_contains "$out" "load the \`triage\` skill" "the digest did not name the triage skill as the drain"
+
+  pass "triage-drain subsection counts only verify holds and points at the triage skill"
+}
+
+test_triage_drain_subsection_none_when_no_verify_holds() {
+  local rec root home fakebin out
+  rec=$(new_world triage-drain-none)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  # Only a captain hold - nothing the drain can act on - so the subsection is (none).
+  cat > "$home/data/backlog.md" <<'BL'
+# Backlog
+
+## Queued
+- [ ] a-question-1 - only (repo: demo) (kind: ship) (since 2026-09-22) (hold: decision: which way) (hold-kind: captain)
+BL
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  # The (none) must be the triage subsection's, not another subsection's, so scope to it.
+  triage_section=$(printf '%s\n' "$out" | awk '/Findings awaiting the triage drain/{flag=1;next}/^AFK$/{flag=0}flag')
+  assert_contains "$triage_section" "(none)" "the triage subsection did not print (none) with no verify holds"
+  case "$triage_section" in
+    *"held for automated triage"*) fail "the triage subsection reported a drainable count with no verify holds: $triage_section" ;;
+  esac
+
+  pass "triage-drain subsection prints (none) when no verify holds are queued"
+}
+
 test_context_digest_absent_empty_present
 test_context_digest_prints_project_directions
+test_triage_drain_subsection_counts_only_verify_holds
+test_triage_drain_subsection_none_when_no_verify_holds
 test_lock_refusal_read_only_path
 test_output_ordering_diagnostics_lead
 test_status_tail_bounding
