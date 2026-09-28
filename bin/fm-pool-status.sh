@@ -47,6 +47,8 @@ TREEHOUSE_ROOT="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
 
 # shellcheck source=bin/fm-pool-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-pool-lib.sh"
+# shellcheck source=bin/fm-unlanded-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-unlanded-lib.sh"
 
 # Evidence for the user's reclaim decision. Deliberately READ-ONLY, and
 # deliberately honest when it cannot tell: an unreadable worktree reports no
@@ -64,7 +66,12 @@ slot_evidence() {  # <slot-path>
   # HEAD, deliberately, not --branches: treehouse checks a slot out DETACHED, so a
   # crew that committed without branching has work that --branches cannot see. Any
   # under-report here reads as "nothing to lose" on a slot that has plenty.
-  commits=$(git -C "$path" log --oneline HEAD --not --remotes 2>/dev/null | grep -c . || true)
+  # The wip/ exclusion is not optional here: the backup hook in
+  # bin/fm-hooks-install.sh pushes every commit to refs/heads/wip/<host>/<branch>,
+  # and the same clone gains refs/remotes/origin/wip/* immediately. A plain
+  # --not --remotes therefore reports a dead crew's 40 commits as zero, directly
+  # above this script's own "DISCARDS any work in it" reclaim command.
+  commits=$(git -C "$path" log --oneline HEAD "${NOT_ON_A_REMOTE[@]}" 2>/dev/null | grep -c . || true)
   if [ "${commits:-0}" -gt 0 ]; then
     [ -n "$evidence" ] && evidence="$evidence and "
     evidence="${evidence}${commits} unpushed commit(s)"

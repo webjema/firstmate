@@ -132,6 +132,28 @@ out2=$(run_status "$C")
 assert_contains "$out2" "1 unpushed commit" "(b2) a detached-HEAD commit is unlanded work and must be reported"
 pass "(b2) work committed on a detached HEAD is still reported as unlanded"
 
+# --- (b3) a BACKUP ref is not a delivery, and must not empty the evidence -----
+# The post-commit hook in bin/fm-hooks-install.sh mirrors every commit to
+# refs/heads/wip/<host>/<branch>, and the pushing clone gains
+# refs/remotes/origin/wip/* immediately. A plain --not --remotes would then read
+# that backup as "pushed" and report a dead crew's commits as nothing at all -
+# directly above this script's own "DISCARDS any work in it" reclaim command.
+C=$(new_case b3)
+fm_git_add_origin "$C/home/projects/proj" "$C/origin.git"
+git -C "$C/home/projects/proj" fetch -q origin
+slot3=$(dirty_slot "$C")
+git -C "$slot3" add rescue-me.txt
+git -C "$slot3" -c user.name=t -c user.email=t@t.t commit -qm 'the dead crew committed work'
+git -C "$slot3" push -q origin "HEAD:refs/heads/wip/testhost/fm/dead-crew"
+git -C "$slot3" fetch -q origin
+git -C "$slot3" rev-parse --quiet --verify refs/remotes/origin/wip/testhost/fm/dead-crew >/dev/null \
+  || fail "(b3) the fixture never created the backup tracking ref it is testing"
+printf '1     dirty        %s\n' "$slot3" > "$C/status.txt"
+out3=$(run_status "$C")
+assert_contains "$out3" "1 unpushed commit" \
+  "(b3) a wip/ backup ref must not make a dead crew's commit read as delivered"
+pass "(b3) a commit that exists only on a wip/ backup ref is still reported as unlanded"
+
 # --- (c) the report is actionable: inspect first, discard only deliberately ----
 assert_contains "$out2" "git -C $slot status" "(c) must print how to INSPECT the work first"
 assert_contains "$out2" "DISCARDS" "(c) the reclaim command must be labelled destructive"

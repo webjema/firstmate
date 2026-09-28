@@ -568,7 +568,7 @@ make_teardown_root() {
   local tid=$1 tasktmp=$2 fake="$TMP_ROOT/teardown-$1" lib
   mkdir -p "$fake/bin/backends" "$fake/state"
   ln -s "$ROOT/bin/fm-teardown.sh" "$fake/bin/fm-teardown.sh"
-  for lib in fm-backend.sh fm-tmux-lib.sh fm-lock-lib.sh fm-taskstate-lib.sh fm-wake-lib.sh fm-wake-kind-lib.sh fm-peer-lib.sh; do
+  for lib in fm-backend.sh fm-tmux-lib.sh fm-lock-lib.sh fm-taskstate-lib.sh fm-wake-lib.sh fm-wake-kind-lib.sh fm-peer-lib.sh fm-unlanded-lib.sh; do
     ln -s "$ROOT/bin/$lib" "$fake/bin/$lib"
   done
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
