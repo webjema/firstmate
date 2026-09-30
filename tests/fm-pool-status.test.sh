@@ -50,8 +50,9 @@ new_case() {  # <name> -> echoes the case dir
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "${1:-}" in
-  status) cat "${TH_STATUS:?}" ;;
+case "${1:-} ${2:-}" in
+  'status --help') printf '      --json   Print pool status as JSON\n' ;;
+  'status --json') jq -s . "${TH_STATUS:?}" ;;
 esac
 exit 0
 SH
@@ -94,7 +95,7 @@ run_status() {  # <case-dir>
 # --- (a) a healthy pool says nothing -----------------------------------------
 C=$(new_case a)
 give_pool_slot "$C"
-printf '1     available    /pool/1/proj\n2     in-use       /pool/2/proj\n' > "$C/status.txt"
+{ fm_th_slot 1 available /pool/1/proj; fm_th_slot 2 in-use /pool/2/proj; } > "$C/status.txt"
 out=$(run_status "$C")
 [ -z "$out" ] || fail "(a) a healthy pool must be silent, got: $out"
 pass "(a) a healthy pool is silent"
@@ -102,7 +103,7 @@ pass "(a) a healthy pool is silent"
 # --- (b) THE INCIDENT: a dirty slot with real work is reported, never swept ---
 C=$(new_case b)
 slot=$(dirty_slot "$C")
-printf '1     dirty        %s\n' "$slot" > "$C/status.txt"
+fm_th_slot 1 dirty "$slot" > "$C/status.txt"
 out=$(run_status "$C")
 assert_contains "$out" "POOL_SLOT" "(b) a dirty slot must be reported"
 assert_contains "$out" "is DIRTY" "(b) it must be named as dirty"
@@ -127,7 +128,7 @@ slot=$(dirty_slot "$C")
 git -C "$slot" add rescue-me.txt
 git -C "$slot" -c user.name=t -c user.email=t@t.t commit -qm 'the dead crew committed work'
 printf 'and left this uncommitted too\n' > "$slot/also-dirty.txt"
-printf '1     dirty        %s\n' "$slot" > "$C/status.txt"
+fm_th_slot 1 dirty "$slot" > "$C/status.txt"
 out2=$(run_status "$C")
 assert_contains "$out2" "1 unpushed commit" "(b2) a detached-HEAD commit is unlanded work and must be reported"
 pass "(b2) work committed on a detached HEAD is still reported as unlanded"
@@ -144,7 +145,7 @@ pass "(c) the report says how to inspect, and marks the reclaim as destructive"
 # here would abort in the operator's terminal too - and look like it worked.
 C=$(new_case d)
 give_pool_slot "$C"
-printf '1     leased       /pool/1/proj  (held by fm-warm-proj)\n' > "$C/status.txt"
+fm_th_slot 1 leased /pool/1/proj fm-warm-proj > "$C/status.txt"
 out=$(run_status "$C")   # no live warmer holds the pool lock
 assert_contains "$out" "no live warmer" "(d) a lease with no live warmer must be reported"
 assert_contains "$out" "treehouse return --force /pool/1/proj" "(d) must print a release command that actually releases"
@@ -155,7 +156,7 @@ pass "(d) a warm lease that outlived its warm is reported as safely releasable"
 # --- (e) a LIVE warmer's lease is its job, not a fault ------------------------
 C=$(new_case e)
 give_pool_slot "$C"
-printf '1     leased       /pool/1/proj  (held by fm-warm-proj)\n' > "$C/status.txt"
+fm_th_slot 1 leased /pool/1/proj fm-warm-proj > "$C/status.txt"
 # A LIVE warmer holds the pool lock the way the code takes it ON THIS BOX: an flock
 # held by a live process where flock exists (`exec sleep` so the pid we record is
 # the one holding the fd), and otherwise the library's own directory lock, taken in
@@ -186,7 +187,7 @@ if command -v jq >/dev/null 2>&1; then
   give_pool_slot "$C"
   slot="$C/th-root/pool/1/proj"          # the pool dir must be derivable from the slot path
   mkdir -p "$slot"
-  printf '1     in-use       %s\n' "$slot" > "$C/status.txt"
+  fm_th_slot 1 in-use "$slot" > "$C/status.txt"
   cat > "$C/th-root/pool/treehouse-state.json" <<EOF
 { "worktrees": [ { "name": "1", "path": "$slot", "owner_pid": 999999 } ] }
 EOF
@@ -201,7 +202,7 @@ fi
 # --- (g) a blocked warm surfaces at session start -----------------------------
 C=$(new_case g)
 give_pool_slot "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 key=$(printf '%s' "$(cd "$C/home/projects/proj" && pwd -P)" | cksum | awk '{print $1}')
 printf 'disk budget reached: pool uses 19.6 GB and the next slot needs about 2.8 GB, over the 20.0 GB budget\n' \
   > "$C/home/state/.pool-warm-blocked.proj-$key"
@@ -213,7 +214,7 @@ pass "(g) a warm stopped by the disk budget surfaces at session start with its n
 # --- (h) bootstrap prints the pool lines -------------------------------------
 C=$(new_case h)
 slot=$(dirty_slot "$C")
-printf '1     dirty        %s\n' "$slot" > "$C/status.txt"
+fm_th_slot 1 dirty "$slot" > "$C/status.txt"
 out=$( cd "$C" && env PATH="$C/fakebin:$PATH" TH_STATUS="$C/status.txt" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$C/home" \
   FM_STATE_OVERRIDE="$C/home/state" FM_CONFIG_OVERRIDE="$C/home/config" \
@@ -230,7 +231,7 @@ pass "(h) bootstrap surfaces the pool diagnostic, and discards nothing"
 # detector was blind to the firstmate pool: the pool every firstmate crewmate runs
 # in, and the pool whose crash-dirty slot motivated this script in the first place.
 C=$(new_case i)
-printf '1     available    /pool/1/proj\n' > "$C/status.txt"   # projects/proj: healthy
+fm_th_slot 1 available /pool/1/proj > "$C/status.txt"   # projects/proj: healthy
 # A separate repo, OUTSIDE projects/, reachable only through a task meta.
 fm_git_init_commit "$C/outside"
 outside_slot="$C/th-root/outside/1/repo"
@@ -243,12 +244,13 @@ fm_write_meta "$C/home/state/t1.meta" \
 cat > "$C/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 set -u
-case "\${1:-}" in
-  status)
+case "\${1:-} \${2:-}" in
+  'status --help') printf -- '--json\n' ;;
+  'status --json')
     if [ "\$PWD" = "$(cd "$C/outside" && pwd -P)" ]; then
-      printf '1     dirty        %s\n' "$outside_slot"
+      printf '[%s]\n' '$(fm_th_slot 1 dirty "$outside_slot")'
     else
-      cat "\${TH_STATUS:?}"
+      jq -s . "\${TH_STATUS:?}"
     fi
     ;;
 esac
@@ -267,13 +269,13 @@ pass "(i) the firstmate pool - named by a meta, not under projects/ - is swept t
 # and the test suite alone littered ~100 of them into the operator's real
 # ~/.treehouse. A project with no slots has nothing to diagnose; do not touch it.
 C=$(new_case j)
-printf '1     available    /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 available /pool/1/proj > "$C/status.txt"
 # A real treehouse that records every invocation, so we can prove it is not called.
 cat > "$C/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 set -u
 printf 'called %s\n' "\$*" >> "$C/th-calls.log"
-case "\${1:-}" in status) cat "\${TH_STATUS:?}" ;; esac
+case "\${1:-} \${2:-}" in 'status --json') jq -s . "\${TH_STATUS:?}" ;; esac
 exit 0
 SH
 chmod +x "$C/fakebin/treehouse"

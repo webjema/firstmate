@@ -70,30 +70,34 @@ set -u
 holder_of() { while [ $# -gt 0 ]; do [ "$1" = --lease-holder ] && { printf '%s' "$2"; return; }; shift; done; }
 case "${1:-}" in
   status)
+    [ "${2:-}" = --help ] && { printf -- '--json\n'; exit 0; }
     # A pool treehouse can no longer describe. The release verdict is a STATUS read,
     # so this is the state in which a release cannot be verified either way.
     [ -n "${TH_STATUS_BREAK:-}" ] && [ -f "$TH_STATUS_BREAK" ] && exit 1
-    cat "${TH_STATUS:?}"
-    # Reality: treehouse's OWN status reports every held lease, its PATH and who
-    # holds it. The stub must too, and must be able to report MORE THAN ONE under the
-    # same holder - that is the state the leak actually produced (six of them), and a
-    # stub that cannot express it cannot catch a release verdict that confuses "this
-    # slot" with "any slot of this holder".
-    if [ -f "${TH_LEASE_STATE:?}" ]; then
-      while read -r lpath lholder; do
-        [ -n "${lpath:-}" ] || continue
-        printf '%s     leased       %s  (held by %s)\n' \
-          "$(basename "$(dirname "$lpath")")" "$lpath" "$lholder"
-      done < "$TH_LEASE_STATE"
-    fi
-    # ... and every slot a return has FREED, which a real pool reports as available
-    # and hands back to the next `get`. Without it the stub can only ever grow.
-    if [ -n "${TH_FREE_STATE:-}" ] && [ -f "$TH_FREE_STATE" ]; then
-      while read -r fpath; do
-        [ -n "${fpath:-}" ] || continue
-        printf '%s     available    %s\n' "$(basename "$(dirname "$fpath")")" "$fpath"
-      done < "$TH_FREE_STATE"
-    fi
+    slot_json() { jq -nc --arg n "$(basename "$(dirname "$3")")" --arg s "$1" --arg h "$2" \
+      --arg p "$3" '{name: $n, status: $s, path: $p, lease_holder: $h}'; }
+    {
+      cat "${TH_STATUS:?}"
+      # Reality: treehouse's OWN status reports every held lease, its PATH and who
+      # holds it. The stub must too, and must be able to report MORE THAN ONE under the
+      # same holder - that is the state the leak actually produced (six of them), and a
+      # stub that cannot express it cannot catch a release verdict that confuses "this
+      # slot" with "any slot of this holder".
+      if [ -f "${TH_LEASE_STATE:?}" ]; then
+        while read -r lpath lholder; do
+          [ -n "${lpath:-}" ] || continue
+          slot_json leased "$lholder" "$lpath"
+        done < "$TH_LEASE_STATE"
+      fi
+      # ... and every slot a return has FREED, which a real pool reports as available
+      # and hands back to the next `get`. Without it the stub can only ever grow.
+      if [ -n "${TH_FREE_STATE:-}" ] && [ -f "$TH_FREE_STATE" ]; then
+        while read -r fpath; do
+          [ -n "${fpath:-}" ] || continue
+          slot_json available "" "$fpath"
+        done < "$TH_FREE_STATE"
+      fi
+    } | jq -s .
     ;;
   get)
     rc=$(cat "${TH_GET_RC:?}")
@@ -307,10 +311,10 @@ warm_log() { cat "$1/home/state/.pool-warm.log" 2>/dev/null || true; }
 # --- (a) a free warm slot exists: warm nothing --------------------------------
 C=$(new_case a)
 in_flight "$C"
-cat > "$C/status.txt" <<'EOF'
-1     in-use       /pool/1/proj
-2     available    /pool/2/proj
-EOF
+{
+  fm_th_slot 1 in-use /pool/1/proj
+  fm_th_slot 2 available /pool/2/proj
+} > "$C/status.txt"
 run_warm "$C" || fail "(a) must exit 0"
 assert_not_contains "$(th_log "$C")" "get" "(a) a pool with a free warm slot must not be grown"
 pass "(a) a free warm slot already waiting means no warming at all"
@@ -318,10 +322,10 @@ pass "(a) a free warm slot already waiting means no warming at all"
 # --- (b) no free slot: provision one preventively -----------------------------
 C=$(new_case b)
 in_flight "$C"
-cat > "$C/status.txt" <<'EOF'
-1     in-use       /pool/1/proj
-2     in-use       /pool/2/proj
-EOF
+{
+  fm_th_slot 1 in-use /pool/1/proj
+  fm_th_slot 2 in-use /pool/2/proj
+} > "$C/status.txt"
 run_warm "$C" || fail "(b) must exit 0"
 log=$(th_log "$C")
 assert_contains "$log" "get --lease --lease-holder fm-warm-proj" "(b) warming IS treehouse get --lease"
@@ -334,7 +338,7 @@ pass "(b) with every slot busy, the next one is provisioned preventively"
 # taken before the install and released only after, on the very path it leased.
 C=$(new_case c)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 run_warm "$C" || fail "(c) must exit 0"
 log=$(th_log "$C")
 assert_contains "$log" "get --lease" "(c) the slot is leased for the install"
@@ -357,10 +361,10 @@ in_flight "$C"
 mkdir -p "$C/th-root/pool/1" "$C/th-root/pool/2"
 dd if=/dev/zero of="$C/th-root/pool/1/blob" bs=1024 count=1024 status=none
 dd if=/dev/zero of="$C/th-root/pool/2/blob" bs=1024 count=1024 status=none
-cat > "$C/status.txt" <<EOF
-1     in-use       $C/th-root/pool/1/proj
-2     in-use       $C/th-root/pool/2/proj
-EOF
+{
+  fm_th_slot 1 in-use "$C/th-root/pool/1/proj"
+  fm_th_slot 2 in-use "$C/th-root/pool/2/proj"
+} > "$C/status.txt"
 FM_POOL_DISK_BUDGET_KB=2560 run_warm "$C" || fail "(d) must exit 0"
 assert_not_contains "$(th_log "$C")" "get" "(d) a budget-blocked pool must NOT be grown"
 blocked=$(warm_log "$C")
@@ -380,10 +384,10 @@ pass "(d2) an unchanged block is reported once, not on every cycle"
 C=$(new_case e)
 in_flight "$C"
 printf 'max_trees = 2\n' > "$C/proj/treehouse.toml"
-cat > "$C/status.txt" <<'EOF'
-1     in-use       /pool/1/proj
-2     in-use       /pool/2/proj
-EOF
+{
+  fm_th_slot 1 in-use /pool/1/proj
+  fm_th_slot 2 in-use /pool/2/proj
+} > "$C/status.txt"
 run_warm "$C" || fail "(e) must exit 0"
 assert_not_contains "$(th_log "$C")" "get" "(e) max_trees must be respected"
 assert_contains "$(warm_log "$C")" "max_trees" "(e) the max_trees block must be reported"
@@ -393,7 +397,7 @@ pass "(e) treehouse's own max_trees ceiling is respected"
 # Two warmers racing would over-provision by GBs. A live lock owner wins.
 C=$(new_case f)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 hold_lock_live "$C" || fail "(f) setup: could not hold the pool lock"
 run_warm "$C" || fail "(f) must exit 0"
 assert_not_contains "$(th_log "$C")" "get" "(f) a second warmer must not warm a pool another owns"
@@ -427,7 +431,7 @@ pass "(g) the lock is scoped to the pool, so two homes never warm one pool twice
 # --- (h) a failed treehouse get breaks nothing -------------------------------
 C=$(new_case h)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 printf '1\n' > "$C/get-rc"             # treehouse get fails
 run_warm "$C" || fail "(h) a failed warm must still exit 0 - it must never break a spawn"
 assert_contains "$(warm_log "$C")" "FAILED" "(h) the failure must be logged"
@@ -436,7 +440,7 @@ pass "(h) a failed warm logs, retires quietly, and leaves no lock behind"
 
 # --- (i) an idle fleet warms nothing -----------------------------------------
 C=$(new_case i)                        # no meta: nothing in flight
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 run_warm "$C" || fail "(i) must exit 0"
 assert_not_contains "$(th_log "$C")" "get" "(i) a project with no work in flight needs no spare"
 pass "(i) an idle fleet warms nothing"
@@ -449,7 +453,7 @@ pass "(i) an idle fleet warms nothing"
 # the EXIT trap on SIGTERM, so a graceful reboot IS a cleanup opportunity.
 C=$(new_case k)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 printf '6\n' > "$C/get-delay"           # long enough to be killed mid-install; no longer
 run_warm_bg "$C"; pid=$WARM_PID
 for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -471,7 +475,7 @@ pass "(k) a warmer killed mid-install releases its lease - the slot is not lost 
 # its own leak report (warmer_is_live() sees the live pid). Permanent and invisible.
 C=$(new_case l)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 printf '10\n' > "$C/get-delay"          # hangs well past the timeout below
 start=$(date +%s)
 FM_POOL_WARM_TIMEOUT=2 run_warm "$C" || fail "(l) a bounded warm must still exit 0"
@@ -512,7 +516,7 @@ pass "(o) the time bound holds, and reports 124, with no timeout binary on the b
 # for three times the bound the warm was given.
 C=$(new_case p)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 SLOT="$C/th-root/pool/9/proj"
 mkdir -p "$SLOT"
 printf '{"name":"proj"}\n' > "$SLOT/package.json"
@@ -542,7 +546,7 @@ pass "(p) the warm provisions the slot it leased, under its own time budget"
 # warm succeeded. A cold slot is survivable; calling it warm is not.
 C=$(new_case qcold)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 SLOT="$C/th-root/pool/9/proj"
 mkdir -p "$SLOT"
 printf '{"name":"proj"}\n' > "$SLOT/package.json"
@@ -565,7 +569,7 @@ pass "(q) a slot whose install failed is logged COLD, never as warmed"
 # other warmer for the whole doubled window.
 C=$(new_case rdeadline)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 SLOT="$C/th-root/pool/9/proj"
 mkdir -p "$SLOT"
 printf '{"name":"proj"}\n' > "$SLOT/package.json"
@@ -601,7 +605,7 @@ pass "(r) the whole warm shares one deadline, so a slow get cannot double the lo
 # content rewrite is covered by tests/fm-worktree-provision.test.sh (q).
 C=$(new_case sclean)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 SLOT="$C/th-root/pool/9/proj"
 mkdir -p "$SLOT"
 printf '{"name":"proj"}\n' > "$SLOT/package.json"
@@ -637,7 +641,7 @@ pass "(s) a warm whose installer rewrites a tracked file returns the slot clean"
 # releases on death.
 C=$(new_case m)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 printf '1\n' > "$C/get-delay"           # long enough for the racers to overlap
 pids=""
 for _ in 1 2 3 4 5; do
@@ -655,7 +659,7 @@ pass "(m) five warmers contending for one stale lock produce exactly one warm"
 # the report. Identity must include the boot.
 C=$(new_case n)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 plant_dir_lock "$C" "$$" a-previous-boot   # a LIVE pid, but recorded on a PREVIOUS boot
 FM_POOL_LOCK_FORCE_DIR=1 run_warm "$C" || fail "(n) must exit 0"
 assert_contains "$(th_log "$C")" "get --lease" "(n) a lock from a previous boot must be reclaimed, not honored forever"
@@ -665,7 +669,7 @@ pass "(n) a live pid from a previous boot is not a live warmer - the lock is rec
 # A warmer killed mid-install (a reboot) must not wedge the pool's warming forever.
 C=$(new_case j)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 plant_dir_lock "$C" 999999 "$(current_boot)"   # a DEAD owner on this boot
 FM_POOL_LOCK_FORCE_DIR=1 run_warm "$C" || fail "(j) must exit 0"
 assert_contains "$(th_log "$C")" "get --lease" "(j) a stale lock must be reclaimed, not honored forever"
@@ -680,7 +684,7 @@ pass "(j) a pool lock whose owner is dead is reclaimed"
 # every cycle. Nothing but the lease state can catch this: the exit code is a lie.
 C=$(new_case t)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 SLOT="$C/th-root/pool/9/proj"
 mkdir -p "$SLOT"
 printf 'node_modules/\n' > "$SLOT/.gitignore"
@@ -707,7 +711,7 @@ pass "(t) a dirty slot's lease is really released, not just logged as released"
 # is treehouse's own status, never the exit code, and this is the branch that says so.
 C=$(new_case u)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 TH_RETURN_NOOP=1 run_warm "$C" || fail "(u) a failed release must still never break a spawn"
 [ "$(lease_state "$C")" = leased ] || fail "(u) setup: the return was supposed to free nothing"
 assert_contains "$(warm_log "$C")" "the slot is still LEASED" "(u) an unreleased slot must be reported as still leased"
@@ -728,7 +732,7 @@ C=$(new_case v)
 in_flight "$C"
 mkdir -p "$C/th-root/pool/1"
 dd if=/dev/zero of="$C/th-root/pool/1/blob" bs=1024 count=1024 status=none
-printf '1     in-use       %s/th-root/pool/1/proj\n' "$C" > "$C/status.txt"
+fm_th_slot 1 in-use "$C/th-root/pool/1/proj" > "$C/status.txt"
 SLOT="$C/th-root/pool/8/proj"
 mkdir -p "$SLOT"
 printf '%s fm-warm-proj\n' "$SLOT" > "$C/lease-state"   # a warm that ended without releasing
@@ -752,7 +756,7 @@ pass "(v) a warm lease leaked by an earlier cycle is reclaimed instead of growin
 # matches. Anything that returns it here would be stealing a slot mid-install.
 C=$(new_case w)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 printf '%s/th-root/pool/9/proj fm-warm-proj\n' "$C" > "$C/lease-state"   # the live warmer's in-flight lease
 hold_lock_live "$C" || fail "(w) setup: could not hold the pool lock"
 run_warm "$C" || fail "(w) must exit 0"
@@ -769,11 +773,11 @@ pass "(w) a lease held while a live warmer owns the pool lock is left alone"
 # to growing the pool exactly as before - and never name either slot in any command.
 C=$(new_case x)
 in_flight "$C"
-cat > "$C/status.txt" <<'EOF'
-1     in-use       /pool/1/proj
-2     leased       /pool/2/proj  (held by fix-login-k3)
-3     leased       /pool/3/proj  (held by fm-warm-otherproject)
-EOF
+{
+  fm_th_slot 1 in-use /pool/1/proj
+  fm_th_slot 2 leased /pool/2/proj fix-login-k3
+  fm_th_slot 3 leased /pool/3/proj fm-warm-otherproject
+} > "$C/status.txt"
 run_warm "$C" || fail "(x) must exit 0"
 log=$(th_log "$C")
 assert_contains "$log" "get --lease --lease-holder fm-warm-proj" "(x) with no lease of its own to reuse, the warmer provisions a new slot"
@@ -791,8 +795,7 @@ pass "(x) a crew's lease and a foreign warm lease are both out of the reaper's r
 # sibling leak is still standing, and must be returned exactly once.
 C=$(new_case y)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj
-' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 SLOT="$C/th-root/pool/8/proj"
 SIBLING="$C/th-root/pool/9/proj"
 mkdir -p "$SLOT" "$SIBLING"
@@ -817,7 +820,7 @@ pass "(y) with several leaks under one holder, each release is judged on its own
 # this case pins is that the pool still got its slot.
 C=$(new_case z)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 SLOT="$C/th-root/pool/8/proj"
 mkdir -p "$SLOT"
 printf '%s fm-warm-proj\n' "$SLOT" > "$C/lease-state"
@@ -838,7 +841,7 @@ C=$(new_case aa)
 in_flight "$C"
 mkdir -p "$C/th-root/pool/1"
 dd if=/dev/zero of="$C/th-root/pool/1/blob" bs=1024 count=1024 status=none
-printf '1     in-use       %s/th-root/pool/1/proj\n' "$C" > "$C/status.txt"
+fm_th_slot 1 in-use "$C/th-root/pool/1/proj" > "$C/status.txt"
 SLOT="$C/th-root/pool/8/proj"
 mkdir -p "$SLOT"
 printf '%s fm-warm-proj\n' "$SLOT" > "$C/lease-state"
@@ -857,7 +860,7 @@ pass "(aa) a reclaim that leaves no free slot falls back under the ceilings"
 # captain looking for crashed processes that never existed.
 C=$(new_case ab)
 in_flight "$C"
-printf '1     in-use       /pool/1/proj\n' > "$C/status.txt"
+fm_th_slot 1 in-use /pool/1/proj > "$C/status.txt"
 TH_BREAK_STATUS_ON_RETURN=1 run_warm "$C" || fail "(ab) an unverifiable release must still never break a spawn"
 assert_contains "$(warm_log "$C")" "still LEASED" "(ab) a release that cannot be verified must be reported as unreleased"
 assert_contains "$(warm_log "$C")" "unreadable" "(ab) and must name the reason, or the log sends its reader hunting the wrong cause"
