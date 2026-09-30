@@ -3,18 +3,19 @@
 # pool". Sourced by bin/fm-pool-warm.sh and bin/fm-pool-status.sh.
 #
 # treehouse (the external Go binary) owns the pool; firstmate only READS it, and
-# reads it exactly one way: `treehouse status` run inside the project clone. That
-# output is the structured contract, verified against treehouse v2.0.0 on
-# 2026-07-14:
+# fm_pool_read is the one place that does. It never parses the human `treehouse
+# status` table: its columns, `~/` abbreviation, indented process lines and banners
+# changed shape between v2 and v3. It reads a machine source instead:
 #
-#   1     available    ~/.treehouse/optiroq-80b6c6/1/optiroq
-#   2     leased       ~/.treehouse/optiroq-80b6c6/2/optiroq  (held by fm-warm-optiroq)
-#   3     in-use       ~/.treehouse/optiroq-80b6c6/3/optiroq
-#                      bash (1620624), claude (1620863), npm exec (1620891)
-#   4     dirty        ~/.treehouse/optiroq-80b6c6/4/optiroq
+#   treehouse v3.0.0+  `treehouse status --json` - a documented array of
+#                      {name, status, path, lease_holder, ...}.
+#   treehouse v2.x     no --json. The pool's own treehouse-state.json (unversioned
+#                      in v2) plus git and the process table, deriving each slot's
+#                      state exactly as v2's pool.List does (cmd/status.go and
+#                      internal/pool/pool.go at v2.0.0).
 #
-# A slot line starts with the slot NAME; the indented continuation lines under an
-# in-use slot list its processes and are not slots. Paths are ~-abbreviated.
+# Slot states: available, in-use, leased, dirty, "you're here" (v3 adds damaged and
+# unverified). Only `available` is a slot `treehouse get` can hand over.
 #
 # DIRTY IS THE ONE THAT BITES (verified, 2026-07-14): `treehouse get` SKIPS a
 # dirty slot forever, and `treehouse prune` REFUSES to reclaim it ("Skipped 1
@@ -104,58 +105,201 @@ fm_pool_sha256() {
   fi
 }
 
-# fm_pool_read <project-real-path>: read the pool once. Returns 1 when treehouse
-# cannot report on it at all (not a pool, treehouse missing/errored). On success
-# sets:
-#   FM_POOL_TABLE      one line per slot: "<name>\t<state>\t<path>\t<detail>"
-#   FM_POOL_SLOTS      total slot count
-#   FM_POOL_AVAILABLE  slots that are free AND warm - i.e. what a `treehouse get`
-#                      could actually hand over right now
-#   FM_POOL_DIR        the pool directory (parent of the slots), or empty
 fm_pool_has_slots() {  # <project-real-path>
   # Does this project have any treehouse slots at all? Answered from GIT, not from
   # treehouse - because `treehouse status` is NOT read-only: merely asking it about
-  # a repo CREATES that repo's pool directory (verified 2026-07-14). A diagnostic
-  # that sweeps every project must not leave a trail of empty pools behind it, and
-  # a test suite must not litter the operator's real ~/.treehouse.
+  # a repo CREATES that repo's pool directory (verified 2026-07-14, and v3's
+  # `status --json` runs the same code). A diagnostic that sweeps every project
+  # must not leave a trail of empty pools behind it, and a test suite must not
+  # litter the operator's real ~/.treehouse.
   # A pool slot is a linked git worktree of the project, so git already knows. A
   # project with no linked worktree has no slots, hence nothing to diagnose - and
   # that includes no dirty slot, so this guard cannot hide the incident.
   [ "$(git -C "$project" worktree list --porcelain 2>/dev/null | grep -c '^worktree ')" -gt 1 ]
 }
 
+# fm_pool_read <project-real-path>: read the pool once. Returns 1 when the pool
+# cannot be read at all (not a pool, treehouse errored) or when its machine output
+# or state file is in a shape this reader does not know - it says which on stderr
+# and never guesses. On success sets:
+#   FM_POOL_TABLE      one line per slot: "<name>\t<state>\t<path>\t<lease-holder>"
+#   FM_POOL_SLOTS      total slot count
+#   FM_POOL_AVAILABLE  slots that are free AND warm - i.e. what a `treehouse get`
+#                      could actually hand over right now
+#   FM_POOL_DIR        the pool directory (parent of the slots), or empty
 fm_pool_read() {  # <project-real-path>
-  local project=$1 out line name state path detail
-  out=$( (cd "$project" 2>/dev/null && treehouse status 2>/dev/null) ) || return 1
+  local project=$1 rows name state path holder
   FM_POOL_TABLE=""
   FM_POOL_SLOTS=0
   FM_POOL_AVAILABLE=0
   FM_POOL_DIR=""
-  while IFS= read -r line; do
-    # Slot lines start with the slot name in column 1; process/continuation lines
-    # under an in-use slot are indented, and must never be counted as slots.
-    case "$line" in
-      ''|[[:space:]]*) continue ;;
-    esac
-    name=$(printf '%s' "$line" | awk '{print $1}')
-    state=$(printf '%s' "$line" | awk '{print $2}')
-    path=$(printf '%s' "$line" | awk '{print $3}')
-    [ -n "$name" ] && [ -n "$state" ] && [ -n "$path" ] || continue
-    case "$path" in
-      '~'/*) path="$HOME/${path#'~'/}" ;;
-      /*) ;;
-      *) continue ;;   # not a slot line
-    esac
-    detail=$(printf '%s' "$line" | sed -n 's/.*(held by \([^)]*\)).*/\1/p')
+  [ -d "$project" ] || return 1
+  if treehouse status --help 2>/dev/null | grep -q -- '--json'; then
+    rows=$(fm_pool_rows_json "$project") || return 1
+  else
+    rows=$(fm_pool_rows_state "$project") || return 1
+  fi
+  while IFS=$'\037' read -r name state path holder; do
+    [ -n "$name" ] || continue
     FM_POOL_SLOTS=$((FM_POOL_SLOTS + 1))
     [ "$state" = available ] && FM_POOL_AVAILABLE=$((FM_POOL_AVAILABLE + 1))
     [ -n "$FM_POOL_DIR" ] || FM_POOL_DIR=$(dirname "$(dirname "$path")")
-    FM_POOL_TABLE="${FM_POOL_TABLE}${name}	${state}	${path}	${detail}
+    FM_POOL_TABLE="${FM_POOL_TABLE}${name}	${state}	${path}	${holder}
 "
-  done <<EOF
-$out
-EOF
+  done <<ROWS
+$rows
+ROWS
   return 0
+}
+
+fm_pool_unrecognised() {  # <project> <what>
+  printf 'fm_pool_read: %s: unrecognised %s - refusing to guess the pool state\n' \
+    "$(basename "$1")" "$2" >&2
+}
+
+# One "<name> <state> <path> <holder>" row per slot, from treehouse v3+. Fields are
+# split by \037, not a tab: bash's read merges empty tab-separated fields.
+fm_pool_rows_json() {  # <project-real-path>
+  local project=$1 out
+  out=$( (cd "$project" && treehouse status --json 2>/dev/null) ) || return 1
+  [ -n "$out" ] || { fm_pool_unrecognised "$project" "treehouse status --json output"; return 1; }
+  printf '%s' "$out" | jq -r '
+    if type != "array" then error("not an array") else .[] end
+    | if (.name | type) == "string" and (.status | type) == "string"
+         and (.path | type) == "string"
+      then [.name, .status, .path, (.lease_holder // "")] | join("\u001f")
+      else error("slot without name, status or path") end' 2>/dev/null \
+    || { fm_pool_unrecognised "$project" "treehouse status --json output"; return 1; }
+}
+
+# The same rows for treehouse v2, which has no --json: its state file says which
+# slots exist and which are leased or owned; git and the process table say the rest.
+# The order below is v2's pool.List, and it matters: a leased slot is leased even
+# with processes in it, and a slot with processes is in-use even when dirty.
+fm_pool_rows_state() {  # <project-real-path>
+  local project=$1 pool entries cwds='' cwds_read=no name path leased pid started holder
+  local destroying owned state real c
+  pool=$(fm_pool_state_dir "$project") || return 1
+  [ -n "$pool" ] || return 0
+  # v2 writes no "version"; v3 writes one and reinterprets entries on read
+  # (quarantine, recovery), so a versioned file is not ours to interpret.
+  entries=$(jq -r '
+    if type != "object" or (.version // 0) != 0
+       or ((.worktrees // []) | type) != "array"
+      then error("unknown state layout") else (.worktrees // [])[] end
+    | if (.name | type) == "string" and (.path | type) == "string"
+      then . else error("slot without name or path") end
+    | [.name, .path, (.leased == true | tostring), (.owner_pid // 0 | tostring),
+       (.owner_started_at // 0 | tostring), (.lease_holder // ""),
+       (.destroying == true | tostring)] | join("\u001f")' \
+    "$pool/treehouse-state.json" 2>/dev/null) \
+    || { fm_pool_unrecognised "$project" "$pool/treehouse-state.json"; return 1; }
+  while IFS=$'\037' read -r name path leased pid started holder destroying; do
+    [ -n "$name" ] || continue
+    # v2 heals on every read: a slot whose directory is gone leaves the pool, and a
+    # recorded owner that is gone is cleared - with its destroying mark, so a slot
+    # whose destroy crashed counts again.
+    [ -d "$path" ] || continue
+    owned=no
+    fm_pool_pid_started "$pid" "$started" && owned=yes
+    [ "$destroying" = true ] && { [ "$owned" = yes ] || [ "$pid" = 0 ]; } && continue
+    if [ "$leased" = true ]; then
+      printf '%s\037leased\037%s\037%s\n' "$name" "$path" "$holder"
+      continue
+    fi
+    state=available
+    if [ "$owned" = yes ]; then
+      state=in-use
+    else
+      if [ "$cwds_read" = no ]; then
+        cwds=$(fm_pool_cwds) || {
+          printf 'fm_pool_read: %s: cannot list process working directories to tell in-use slots apart\n' \
+            "$(basename "$project")" >&2
+          return 1
+        }
+        cwds_read=yes
+      fi
+      real=$(cd "$path" && pwd -P)
+      while IFS= read -r c; do
+        case "$c" in "$real"|"$real"/*) state=in-use; break ;; esac
+      done <<CWDS
+$cwds
+CWDS
+      if [ "$state" = available ] \
+         && [ -n "$(git -C "$path" status --porcelain --untracked-files=all 2>/dev/null)" ]; then
+        state=dirty
+      fi
+    fi
+    printf '%s\037%s\037%s\037\n' "$name" "$state" "$path"
+  done <<ENTRIES
+$entries
+ENTRIES
+}
+
+# The pool directory holding this project's slots: a slot is a linked worktree at
+# <pool>/<slot>/<repo>, and a pool holds treehouse-state.json. Prints nothing when
+# no slot lives in a pool. A clone whose origin was re-spelled can have slots in
+# two pools; treehouse reads only the one named by the CURRENT origin
+# (<repo>-<first 6 hex of sha256(origin url, else the repo path)>), so that wins.
+fm_pool_state_dir() {  # <project-real-path>
+  local project=$1 dirs top url d
+  dirs=$(git -C "$project" worktree list --porcelain 2>/dev/null \
+    | sed -n 's/^worktree //p' | tail -n +2 \
+    | while IFS= read -r wt; do
+        d=$(dirname "$(dirname "$wt")")
+        [ -f "$d/treehouse-state.json" ] && printf '%s\n' "$d"
+      done | sort -u)
+  case "$dirs" in
+    *"
+"*) ;;
+    *) printf '%s' "$dirs"; return 0 ;;
+  esac
+  top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || top=$project
+  url=$(git -C "$project" remote get-url origin 2>/dev/null) || url=$top
+  d="$(basename "$top")-$(printf '%s' "$url" | fm_pool_sha256 | cut -c1-6)"
+  dirs=$(printf '%s\n' "$dirs" | while IFS= read -r c; do
+    [ "$(basename "$c")" = "$d" ] && printf '%s\n' "$c"
+  done)
+  case "$dirs" in
+    ''|*"
+"*) fm_pool_unrecognised "$project" "slot layout: slots in several pools, not exactly one named for the current origin"
+        return 1 ;;
+  esac
+  printf '%s' "$dirs"
+}
+
+# fm_pool_pid_started <pid> <started-ms>: is the recorded owner still that process?
+# treehouse records the start time (gopsutil CreateTime, epoch ms) beside the pid
+# so a recycled pid is not mistaken for the owner. It is recomputed from /proc and
+# compared within a second; without /proc only liveness can be checked.
+fm_pool_pid_started() {  # <pid> <started-ms>
+  local pid=$1 want=$2 have
+  case "$pid" in ''|0|*[!0-9]*) return 1 ;; esac
+  case "$want" in ''|0|*[!0-9]*) return 1 ;; esac
+  if [ ! -d /proc/self ]; then
+    ps -p "$pid" >/dev/null 2>&1
+    return
+  fi
+  have=$(sed 's/.*) //' "/proc/$pid/stat" 2>/dev/null | awk \
+    -v btime="$(awk '/^btime/ {print $2}' /proc/stat)" \
+    -v hz="$(getconf CLK_TCK 2>/dev/null || echo 100)" \
+    '{ printf "%d", ($20 / hz + btime) * 1000 }')
+  [ -n "$have" ] || return 1
+  [ $((have - want)) -le 1000 ] && [ $((want - have)) -le 1000 ]
+}
+
+# Every process's working directory, one per line (symlinks already resolved).
+fm_pool_cwds() {
+  local d
+  if [ -n "$(find /proc/self/cwd -maxdepth 0 -printf '%l' 2>/dev/null)" ]; then
+    find /proc/[0-9]*/cwd -maxdepth 0 -printf '%l\n' 2>/dev/null || true
+  elif [ -d /proc/self ]; then
+    for d in /proc/[0-9]*; do readlink "$d/cwd" 2>/dev/null || :; done
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -a -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'
+  else
+    return 1
+  fi
 }
 
 # fm_pool_max_trees <project-real-path>: treehouse's own pool ceiling. Its

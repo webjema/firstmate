@@ -121,7 +121,7 @@ orphaned_owner_pid() {  # <pool-dir> <slot-path>
 }
 
 report_project() {  # <project-real-path>
-  local project=$1 name line slot state path holder evidence pid
+  local project=$1 name slot state path holder evidence pid
   name=$(basename "$project")
 
   # Read-only means read-only: `treehouse status` CREATES a project's pool
@@ -169,7 +169,7 @@ report_project() {  # <project-real-path>
         ;;
       in-use)
         pid=$(orphaned_owner_pid "$FM_POOL_DIR" "$path") || continue
-        printf 'POOL_SLOT: %s: slot %s is ORPHANED (its owner pid %s is gone) but still reserved - inspect it before reclaiming: git -C %s status\n' \
+        printf 'POOL_SLOT: %s: slot %s is ORPHANED (its owner pid %s is gone) but the slot is still in use - inspect it before reclaiming: git -C %s status\n' \
           "$name" "$slot" "$pid" "$path"
         ;;
     esac

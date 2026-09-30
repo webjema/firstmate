@@ -98,6 +98,15 @@ SH
   done
 }
 
+# fm_th_slot <name> <status> <path> [lease-holder]: one slot of a stubbed
+# `treehouse status --json` (treehouse v3+), as one JSON line. A stub answers
+# `status --json` with `jq -s .` over these lines, and `status --help` with a line
+# naming --json - which is how bin/fm-pool-lib.sh detects that interface.
+fm_th_slot() {
+  jq -nc --arg n "$1" --arg s "$2" --arg p "$3" --arg h "${4:-}" \
+    '{name: $n, status: $s, path: $p, lease_holder: $h}'
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
