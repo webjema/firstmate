@@ -12,10 +12,10 @@
 #   treehouse v2.x     no --json. The pool's own treehouse-state.json (unversioned
 #                      in v2) plus git and the process table, deriving each slot's
 #                      state exactly as v2's pool.List does (cmd/status.go and
-#                      internal/pool/pool.go at v2.0.0, read 2026-09-30).
+#                      internal/pool/pool.go at v2.0.0).
 #
-# Slot states: available, in-use, leased, dirty (v3 adds damaged, unverified and
-# "you're here"). Only `available` is a slot `treehouse get` can hand over.
+# Slot states: available, in-use, leased, dirty, "you're here" (v3 adds damaged and
+# unverified). Only `available` is a slot `treehouse get` can hand over.
 #
 # DIRTY IS THE ONE THAT BITES (verified, 2026-07-14): `treehouse get` SKIPS a
 # dirty slot forever, and `treehouse prune` REFUSES to reclaim it ("Skipped 1
@@ -139,7 +139,7 @@ fm_pool_read() {  # <project-real-path>
   else
     rows=$(fm_pool_rows_state "$project") || return 1
   fi
-  while IFS=$(printf '\t') read -r name state path holder; do
+  while IFS=$'\037' read -r name state path holder; do
     [ -n "$name" ] || continue
     FM_POOL_SLOTS=$((FM_POOL_SLOTS + 1))
     [ "$state" = available ] && FM_POOL_AVAILABLE=$((FM_POOL_AVAILABLE + 1))
@@ -157,15 +157,17 @@ fm_pool_unrecognised() {  # <project> <what>
     "$(basename "$1")" "$2" >&2
 }
 
-# One "<name>\t<state>\t<path>\t<holder>" row per slot, from treehouse v3+.
+# One "<name> <state> <path> <holder>" row per slot, from treehouse v3+. Fields are
+# split by \037, not a tab: bash's read merges empty tab-separated fields.
 fm_pool_rows_json() {  # <project-real-path>
   local project=$1 out
   out=$( (cd "$project" && treehouse status --json 2>/dev/null) ) || return 1
-  [ -n "$out" ] && printf '%s' "$out" | jq -r '
+  [ -n "$out" ] || { fm_pool_unrecognised "$project" "treehouse status --json output"; return 1; }
+  printf '%s' "$out" | jq -r '
     if type != "array" then error("not an array") else .[] end
     | if (.name | type) == "string" and (.status | type) == "string"
          and (.path | type) == "string"
-      then [.name, .status, .path, (.lease_holder // "")] | @tsv
+      then [.name, .status, .path, (.lease_holder // "")] | join("\u001f")
       else error("slot without name, status or path") end' 2>/dev/null \
     || { fm_pool_unrecognised "$project" "treehouse status --json output"; return 1; }
 }
@@ -176,7 +178,7 @@ fm_pool_rows_json() {  # <project-real-path>
 # with processes in it, and a slot with processes is in-use even when dirty.
 fm_pool_rows_state() {  # <project-real-path>
   local project=$1 pool entries cwds='' cwds_read=no name path leased pid started holder
-  local state real c
+  local destroying owned state real c
   pool=$(fm_pool_state_dir "$project") || return 1
   [ -n "$pool" ] || return 0
   # v2 writes no "version"; v3 writes one and reinterprets entries on read
@@ -187,21 +189,26 @@ fm_pool_rows_state() {  # <project-real-path>
       then error("unknown state layout") else (.worktrees // [])[] end
     | if (.name | type) == "string" and (.path | type) == "string"
       then . else error("slot without name or path") end
-    | select(.destroying != true)
     | [.name, .path, (.leased == true | tostring), (.owner_pid // 0 | tostring),
-       (.owner_started_at // 0 | tostring), (.lease_holder // "")] | @tsv' \
+       (.owner_started_at // 0 | tostring), (.lease_holder // ""),
+       (.destroying == true | tostring)] | join("\u001f")' \
     "$pool/treehouse-state.json" 2>/dev/null) \
     || { fm_pool_unrecognised "$project" "$pool/treehouse-state.json"; return 1; }
-  while IFS=$(printf '\t') read -r name path leased pid started holder; do
+  while IFS=$'\037' read -r name path leased pid started holder destroying; do
     [ -n "$name" ] || continue
-    # v2 heals a slot whose directory is gone out of the pool on every read.
+    # v2 heals on every read: a slot whose directory is gone leaves the pool, and a
+    # recorded owner that is gone is cleared - with its destroying mark, so a slot
+    # whose destroy crashed counts again.
     [ -d "$path" ] || continue
+    owned=no
+    fm_pool_pid_started "$pid" "$started" && owned=yes
+    [ "$destroying" = true ] && { [ "$owned" = yes ] || [ "$pid" = 0 ]; } && continue
     if [ "$leased" = true ]; then
-      printf '%s\tleased\t%s\t%s\n' "$name" "$path" "$holder"
+      printf '%s\037leased\037%s\037%s\n' "$name" "$path" "$holder"
       continue
     fi
     state=available
-    if fm_pool_pid_started "$pid" "$started"; then
+    if [ "$owned" = yes ]; then
       state=in-use
     else
       if [ "$cwds_read" = no ]; then
@@ -223,7 +230,7 @@ CWDS
         state=dirty
       fi
     fi
-    printf '%s\t%s\t%s\t\n' "$name" "$state" "$path"
+    printf '%s\037%s\037%s\037\n' "$name" "$state" "$path"
   done <<ENTRIES
 $entries
 ENTRIES
@@ -250,10 +257,15 @@ fm_pool_state_dir() {  # <project-real-path>
   top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || top=$project
   url=$(git -C "$project" remote get-url origin 2>/dev/null) || url=$top
   d="$(basename "$top")-$(printf '%s' "$url" | fm_pool_sha256 | cut -c1-6)"
-  printf '%s\n' "$dirs" | while IFS= read -r c; do
-    [ "$(basename "$c")" = "$d" ] && printf '%s' "$c"
-  done | grep . \
-    || { fm_pool_unrecognised "$project" "slot layout: slots in several pools, none named for the current origin"; return 1; }
+  dirs=$(printf '%s\n' "$dirs" | while IFS= read -r c; do
+    [ "$(basename "$c")" = "$d" ] && printf '%s\n' "$c"
+  done)
+  case "$dirs" in
+    ''|*"
+"*) fm_pool_unrecognised "$project" "slot layout: slots in several pools, not exactly one named for the current origin"
+        return 1 ;;
+  esac
+  printf '%s' "$dirs"
 }
 
 # fm_pool_pid_started <pid> <started-ms>: is the recorded owner still that process?
@@ -278,8 +290,11 @@ fm_pool_pid_started() {  # <pid> <started-ms>
 
 # Every process's working directory, one per line (symlinks already resolved).
 fm_pool_cwds() {
-  if [ -d /proc/self ]; then
+  local d
+  if [ -n "$(find /proc/self/cwd -maxdepth 0 -printf '%l' 2>/dev/null)" ]; then
     find /proc/[0-9]*/cwd -maxdepth 0 -printf '%l\n' 2>/dev/null || true
+  elif [ -d /proc/self ]; then
+    for d in /proc/[0-9]*; do readlink "$d/cwd" 2>/dev/null || :; done
   elif command -v lsof >/dev/null 2>&1; then
     lsof -a -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'
   else

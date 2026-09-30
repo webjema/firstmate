@@ -8,10 +8,11 @@
 #
 #   (a) treehouse v2 (no --json): state from the state file, git and the process table
 #   (b) a recorded owner is in-use only while it is still THAT process
-#   (c) destroying entries and vanished slots are not slots
+#   (c) destroying entries and vanished slots are not slots - unless the destroy crashed
 #   (d) a project with no slots reads as an empty pool
 #   (e) a state file in an unknown shape fails loudly, never guessed
 #   (f) treehouse v3+: `status --json` is the source, and malformed output fails loudly
+#   (g) slots in two pools: the pool named for the current origin is the pool
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -97,10 +98,15 @@ $(row 4 in-use "$S4")"
 pass "(a) treehouse v2: available, dirty, leased and in-use come from state, git and the process table"
 
 # --- (b) owner liveness is pid AND start time --------------------------------
+# Start times are recomputed from /proc; elsewhere only liveness can be checked.
+if [ -d /proc/self ]; then
 C=$(new_case b v2)
 S1=$(add_slot "$C" 1); S2=$(add_slot "$C" 2)
 sleep 300 & OWNER=$!; BG_PIDS+=("$OWNER")
-STARTED=$(date +%s%3N)
+# What treehouse records: gopsutil's CreateTime, from the whole-second boot time
+# plus the start tick - not the wall clock, which differs by up to a second.
+STARTED=$(sed 's/.*) //' "/proc/$OWNER/stat" | awk -v bt="$(awk '/^btime/ {print $2}' /proc/stat)" \
+  -v hz="$(getconf CLK_TCK)" '{ printf "%d", ($20 / hz + bt) * 1000 }')
 cat > "$C/th-root/pool/treehouse-state.json" <<JSON
 {"worktrees":[
  {"name":"1","path":"$S1","created_at":"2026-01-01T00:00:00Z","owner_pid":$OWNER,"owner_started_at":$STARTED},
@@ -111,20 +117,25 @@ expect_code 0 "$RC" "(b) read ($ERR)"
 assert_contains "$FM_POOL_TABLE" "$(row 1 in-use "$S1")" "(b) a live owner holds its slot"
 assert_contains "$FM_POOL_TABLE" "$(row 2 available "$S2")" "(b) a recycled pid is not the owner"
 pass "(b) a recorded owner holds its slot only while pid and start time both match"
+fi
 
 # --- (c) destroying and vanished slots ----------------------------------------
 C=$(new_case c v2)
-S1=$(add_slot "$C" 1); S2=$(add_slot "$C" 2)
+S1=$(add_slot "$C" 1); S2=$(add_slot "$C" 2); S3=$(add_slot "$C" 3)
+sh -c 'exit 0' & GONE=$!; wait "$GONE"
 cat > "$C/th-root/pool/treehouse-state.json" <<JSON
 {"worktrees":[
  {"name":"1","path":"$S1","created_at":"2026-01-01T00:00:00Z","destroying":true},
  {"name":"2","path":"$S2","created_at":"2026-01-01T00:00:00Z"},
+ {"name":"3","path":"$S3","created_at":"2026-01-01T00:00:00Z","destroying":true,"owner_pid":$GONE,"owner_started_at":1700000000000},
  {"name":"9","path":"$C/th-root/pool/9/proj","created_at":"2026-01-01T00:00:00Z"}]}
 JSON
 read_pool "$C"
 expect_code 0 "$RC" "(c) read ($ERR)"
-[ "$FM_POOL_TABLE" = "$(row 2 available "$S2")"$'\n' ] || fail "(c) only slot 2 is a slot: $FM_POOL_TABLE"
-pass "(c) destroying entries and vanished slot directories are skipped"
+WANT="$(row 2 available "$S2")
+$(row 3 available "$S3")"
+[ "$FM_POOL_TABLE" = "$WANT"$'\n' ] || fail "(c) slots 2 and 3 are the slots: $FM_POOL_TABLE"
+pass "(c) destroying entries and vanished slot directories are skipped; a crashed destroy is a slot again"
 
 # --- (d) no slots --------------------------------------------------------------
 C=$(new_case d v2)
@@ -161,8 +172,9 @@ cat > "$C/th.json" <<JSON
 JSON
 read_pool "$C"
 expect_code 0 "$RC" "(f) a v3 pool reads ($ERR)"
-[ "$FM_POOL_TABLE" = "$(row 1 available "$S1")
-$(row 2 leased "$S2" fm-warm-y)"$'\n' ] || fail "(f) v3 rows: $FM_POOL_TABLE"
+WANT="$(row 1 available "$S1")
+$(row 2 leased "$S2" fm-warm-y)"
+[ "$FM_POOL_TABLE" = "$WANT"$'\n' ] || fail "(f) v3 rows: $FM_POOL_TABLE"
 [ "$FM_POOL_AVAILABLE" = 1 ] && [ "$FM_POOL_DIR" = "$C/th-root/pool" ] \
   || fail "(f) available=$FM_POOL_AVAILABLE dir=$FM_POOL_DIR"
 assert_not_contains "$(grep -vx 'status --help\|status --json' "$C/th-calls.log")" status \
@@ -174,3 +186,33 @@ for bad in '{}' "[{\"name\":\"1\",\"status\":\"available\"}]" 'not json'; do
   assert_contains "$ERR" "unrecognised treehouse status --json output" "(f) the failure says why for $bad"
 done
 pass "(f) treehouse v3+: status --json is read, and output of an unknown shape fails loudly"
+
+# --- (g) slots in two pools ------------------------------------------------------
+C=$(new_case g v2)
+CUR="$C/th-root/proj-$(printf '%s' "$C/proj" | fm_pool_sha256 | cut -c1-6)"
+OLD="$C/th-root/proj-000000"
+for pool in "$CUR" "$OLD"; do
+  mkdir -p "$pool/1"
+  git -C "$C/proj" worktree add -q --detach "$pool/1/proj" 2>/dev/null
+  printf '{"worktrees":[{"name":"1","path":"%s","created_at":"2026-01-01T00:00:00Z"}]}\n' \
+    "$pool/1/proj" > "$pool/treehouse-state.json"
+done
+read_pool "$C"
+expect_code 0 "$RC" "(g) read ($ERR)"
+[ "$FM_POOL_DIR" = "$CUR" ] && [ "$FM_POOL_TABLE" = "$(row 1 available "$CUR/1/proj")"$'\n' ] \
+  || fail "(g) the current origin's pool wins: dir=$FM_POOL_DIR table=$FM_POOL_TABLE"
+TWIN="$C/elsewhere/$(basename "$CUR")"
+mkdir -p "$TWIN/1"
+git -C "$C/proj" worktree add -q --detach "$TWIN/1/proj" 2>/dev/null
+printf '{"worktrees":[]}\n' > "$TWIN/treehouse-state.json"
+read_pool "$C"
+expect_code 1 "$RC" "(g) two pools both named for the current origin"
+assert_contains "$ERR" "not exactly one named for the current origin" "(g) the failure says why"
+rm -rf "$CUR" "$TWIN"; git -C "$C/proj" worktree prune
+mkdir -p "$C/th-root/proj-111111/1"
+git -C "$C/proj" worktree add -q --detach "$C/th-root/proj-111111/1/proj" 2>/dev/null
+printf '{"worktrees":[]}\n' > "$C/th-root/proj-111111/treehouse-state.json"
+read_pool "$C"
+expect_code 1 "$RC" "(g) two pools, neither named for the current origin"
+assert_contains "$ERR" "not exactly one named for the current origin" "(g) the failure says why when none matches"
+pass "(g) slots in several pools: the one named for the current origin is read, and an ambiguous layout fails loudly"
