@@ -231,3 +231,19 @@ assert_present() {
 # isolate itself is a test that will forget. Set FM_PEER_CACHE_DIR before sourcing
 # to point a suite at a directory it wants to inspect.
 export FM_PEER_CACHE_DIR="${FM_PEER_CACHE_DIR:-$(fm_test_tmproot fm-peer-cache)}"
+
+# --- host /tmp isolation -----------------------------------------------------
+#
+# bin/fm-scratch-reap.sh and bin/fm-disk-guard.sh (both run by bin/fm-bootstrap.sh)
+# default to walking and deleting from the host /tmp and $HOME's caches, and
+# bin/fm-spawn.sh creates task temp roots under FM_SCRATCH_TMP_ROOT. Left at their
+# defaults, a suite that runs bootstrap walks the developer's real /tmp - ~300s on a
+# 27k-entry /tmp - and can delete from it. Redirected here, once, for the same reason
+# as the peer cache above. A suite that exercises a janitor sets its own roots.
+FM_TEST_JANITOR_ROOT=$(fm_test_tmproot fm-janitor)
+mkdir -p "$FM_TEST_JANITOR_ROOT/claude-0" "$FM_TEST_JANITOR_ROOT/tmp"
+export FM_SCRATCH_ROOT="${FM_SCRATCH_ROOT:-$FM_TEST_JANITOR_ROOT/claude-0}"
+export FM_SCRATCH_TMP_ROOT="${FM_SCRATCH_TMP_ROOT:-$FM_TEST_JANITOR_ROOT/tmp}"
+export FM_DISK_TMP_ROOT="${FM_DISK_TMP_ROOT:-$FM_TEST_JANITOR_ROOT/tmp}"
+export FM_DISK_PATH="${FM_DISK_PATH:-$FM_TEST_JANITOR_ROOT}"
+export FM_DISK_CACHES="${FM_DISK_CACHES-}"

@@ -201,9 +201,11 @@ fm_peer_live_homes() {  # <fm-root> <my-state-dir>
 
 # --- 3. the per-task temp root ----------------------------------------------
 
-# fm_task_tmp_root <home> <task-id>: the per-task temp root under /tmp, scoped to
-# the instance that owns the task. bin/fm-spawn.sh creates it and records it as
-# meta `tasktmp=`; bin/fm-teardown.sh removes it.
+# fm_task_tmp_root <home> <task-id>: the per-task temp root under FM_SCRATCH_TMP_ROOT
+# (default /tmp), scoped to the instance that owns the task. It reads the same variable
+# as bin/fm-scratch-reap.sh's orphan sweep, so the two always name one root.
+# bin/fm-spawn.sh creates it and records it as meta `tasktmp=`; bin/fm-teardown.sh
+# removes it.
 #
 # The home is resolved physically, so an instance that spells its own FM_HOME two
 # ways across a spawn and a teardown still names one directory.
@@ -217,5 +219,5 @@ fm_peer_live_homes() {  # <fm-root> <my-state-dir>
 fm_task_tmp_root() {  # <home> <task-id>
   local home=$1 id=$2 real
   real=$(fm_peer_realpath "$home")
-  printf '/tmp/fm-%s-%s' "$(fm_peer_slug "$real")" "$id"
+  printf '%s/fm-%s-%s' "${FM_SCRATCH_TMP_ROOT:-/tmp}" "$(fm_peer_slug "$real")" "$id"
 }
