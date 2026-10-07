@@ -56,6 +56,13 @@ fm_test_cleanup() {
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  # lib.sh's own roots (below) belong to the shell that sourced it. This function
+  # also runs as the EXIT trap fm_test_tmproot sets inside each $(...) subshell,
+  # which must not take them.
+  [ "$BASHPID" = "${FM_TEST_LIB_PID:-}" ] || return 0
+  for d in "${FM_TEST_LIB_DIRS[@]:-}"; do
+    [ -n "$d" ] && rm -rf "$d"
+  done
 }
 
 fm_test_tmproot() {
@@ -230,7 +237,23 @@ assert_present() {
 # Redirected here, once, rather than in each suite: a test that has to REMEMBER to
 # isolate itself is a test that will forget. Set FM_PEER_CACHE_DIR before sourcing
 # to point a suite at a directory it wants to inspect.
-export FM_PEER_CACHE_DIR="${FM_PEER_CACHE_DIR:-$(fm_test_tmproot fm-peer-cache)}"
+#
+# Both roots are made and registered here in the sourcing shell, not through
+# $(fm_test_tmproot): that registers in a subshell and the root is never removed.
+FM_TEST_LIB_PID=$BASHPID
+FM_TEST_LIB_DIRS=()
+trap fm_test_cleanup EXIT
+fm_test_lib_root() {
+  local root
+  root=$(mktemp -d "${TMPDIR:-/tmp}/$1.XXXXXX")
+  root=$(cd "$root" && pwd -P)
+  FM_TEST_LIB_DIRS+=("$root")
+  printf -v "$2" '%s' "$root"
+}
+if [ -z "${FM_PEER_CACHE_DIR:-}" ]; then
+  fm_test_lib_root fm-peer-cache FM_PEER_CACHE_DIR
+fi
+export FM_PEER_CACHE_DIR
 
 # --- host /tmp isolation -----------------------------------------------------
 #
@@ -240,7 +263,7 @@ export FM_PEER_CACHE_DIR="${FM_PEER_CACHE_DIR:-$(fm_test_tmproot fm-peer-cache)}
 # defaults, a suite that runs bootstrap walks the developer's real /tmp - ~300s on a
 # 27k-entry /tmp - and can delete from it. Redirected here, once, for the same reason
 # as the peer cache above. A suite that exercises a janitor sets its own roots.
-FM_TEST_JANITOR_ROOT=$(fm_test_tmproot fm-janitor)
+fm_test_lib_root fm-janitor FM_TEST_JANITOR_ROOT
 mkdir -p "$FM_TEST_JANITOR_ROOT/claude-0" "$FM_TEST_JANITOR_ROOT/tmp"
 export FM_SCRATCH_ROOT="${FM_SCRATCH_ROOT:-$FM_TEST_JANITOR_ROOT/claude-0}"
 export FM_SCRATCH_TMP_ROOT="${FM_SCRATCH_TMP_ROOT:-$FM_TEST_JANITOR_ROOT/tmp}"

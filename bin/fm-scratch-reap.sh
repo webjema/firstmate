@@ -85,7 +85,8 @@
 #   --verbose              print a summary even when nothing was reaped
 #   -h|--help              this header
 # Env for the second pass: FM_SCRATCH_TMP_ROOT (default /tmp) is the root it sweeps
-# for fm-* task temp roots; FM_SCRATCH_PROC_ROOT (default /proc) is where the
+# for fm-* task temp roots, and the root bin/fm-peer-lib.sh's fm_task_tmp_root
+# creates them under; FM_SCRATCH_PROC_ROOT (default /proc) is where the
 # process and environment rails look.
 # Prints one "SCRATCH_REAP: ..." line per reaped (or would-reap) dir plus a
 # summary line; stays silent on a clean sweep unless --verbose. Always exits 0

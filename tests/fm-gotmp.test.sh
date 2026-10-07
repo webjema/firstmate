@@ -94,8 +94,6 @@ META
   printf '%s' "$fake"
 }
 
-# --- fm-spawn side ---
-
 # --- fm-teardown side (real subprocess) ---
 
 test_teardown_removes_tasktmp_dir() {

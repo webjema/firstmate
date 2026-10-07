@@ -18,14 +18,6 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-shared-instances)
 fm_git_identity
 
-# Per-task temp roots live under /tmp by contract (bin/fm-peer-lib.sh), outside
-# TMP_ROOT, so they are cleaned by id here. Own EXIT trap per tests/lib.sh.
-shared_cleanup() {
-  rm -rf /tmp/fm-*-sharedtmp-x1
-  fm_test_cleanup
-}
-trap shared_cleanup EXIT
-
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 # harness_pid()/holder_alive() in fm-lock.sh walk `ps` looking for a harness command
 # name; report every queried pid as a live claude so lock acquisition and the peer
