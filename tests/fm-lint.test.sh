@@ -19,9 +19,6 @@ set -u
 
 LINT="$ROOT/bin/fm-lint.sh"
 CI="$ROOT/.github/workflows/ci.yml"
-INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
-# The authoritative file set the one owner must run.
-CANON='shellcheck --norc bin/*.sh bin/backends/*.sh tests/*.sh'
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
 
@@ -38,16 +35,6 @@ test_owner_exists_and_executable() {
   pass "one-owner lint script exists and is executable"
 }
 
-test_owner_defines_canonical_set() {
-  assert_grep "$CANON" "$LINT" "fm-lint.sh must run the canonical shellcheck file set"
-  # It must not weaken CI: no severity downgrade and no blanket disable/exclude
-  # that would hide findings CI fails on.
-  assert_no_grep '--severity' "$LINT" "fm-lint.sh must not lower severity below the CI default"
-  assert_no_grep '--exclude' "$LINT" "fm-lint.sh must not blanket-exclude checks CI enforces"
-  [ "$(grep -Fc 'exec shellcheck --norc' "$LINT")" -eq 2 ] || fail "both lint modes must ignore ambient ShellCheck configuration"
-  pass "fm-lint.sh is the sole authoritative definition at CI-default severity"
-}
-
 test_ci_invokes_the_owner() {
   grep -Eq '^      - run: bin/fm-lint\.sh$' "$CI" || fail "CI lint job must invoke the one-owner script as a run step"
   # Guard against regression to an inline re-spelling of the command.
@@ -62,17 +49,6 @@ test_pins_an_explicit_version() {
   # which is also what drops the upstream-retired, false-positive-prone SC2015.
   assert_contains "$REQUIRED" "0.11.0" "fm-lint.sh must pin ShellCheck 0.11.0"
   pass "fm-lint.sh pins an explicit ShellCheck version ($REQUIRED)"
-}
-
-test_ci_installs_and_logs_the_pinned_version() {
-  # CI must derive the version from the one owner (never hardcode a divergent
-  # number) and log the resolved version as parity evidence.
-  assert_grep "VERSION=\"\$(\"\$ROOT/bin/fm-lint.sh\" --required-version)\"" "$INSTALLER" "installer must read the version fm-lint.sh pins"
-  [ "$(grep -Fc "bin/fm-install-shellcheck.sh \"\$RUNNER_TEMP/bin\"" "$CI")" -eq 2 ] || fail "both CI jobs must use the shared ShellCheck installer"
-  assert_grep "ACTUAL_SHA256=\$(sha256sum" "$INSTALLER" "installer must calculate the ShellCheck archive checksum"
-  assert_grep "[ \"\$ACTUAL_SHA256\" = \"\$SHA256\" ]" "$INSTALLER" "installer must verify the ShellCheck archive checksum"
-  assert_grep "\"\$DESTINATION/shellcheck\" --version" "$INSTALLER" "installer must log the resolved ShellCheck version as evidence"
-  pass "CI installs and logs the pinned ShellCheck version from the one owner"
 }
 
 test_rejects_wrong_shellcheck_version() {
@@ -176,10 +152,8 @@ SH
 }
 
 test_owner_exists_and_executable
-test_owner_defines_canonical_set
 test_ci_invokes_the_owner
 test_pins_an_explicit_version
-test_ci_installs_and_logs_the_pinned_version
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts

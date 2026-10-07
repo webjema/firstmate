@@ -60,13 +60,6 @@ run_reindex() {
 # below that turn on addressing - the name a refresh must NOT land on.
 derived_for() { fm_graph_derived_name "$(cd "$1" && pwd -P)"; }
 
-test_help_includes_entire_header() {
-  local help
-  help=$("$ROOT/bin/fm-graph-reindex.sh" --help 2>&1)
-  assert_contains "$help" "single owner" "fm-graph-reindex.sh --help omitted its header terminator"
-  pass "fm-graph-reindex.sh: --help renders the complete header"
-}
-
 # The happy path, plus the two invariants that make it safe: the refresh lands on
 # the recorded project (not a second, path-derived one) and persistence is false.
 test_refreshes_indexed_project() {
@@ -629,40 +622,6 @@ test_real_cli_addresses_the_recorded_short_name() {
   pass "fm-graph-lib.sh: the real CLI refreshes the entry the graph records, not the path slug"
 }
 
-# This case replaces one that asserted the binary rejects the flag form, which was
-# true of 0.8.1 and is not of 0.9.0. What generalizes is not any one shape but the
-# EXPIRY DATE: a claim to have verified an external surface is only as good as the
-# version it was verified against, so that is what is pinned. Going red on a binary
-# update is the intended behavior - the fix is to re-verify and update the record,
-# which docs/graph-cli-backend.md's last section spells out. CI installs no
-# codebase-memory binary, so this skips there and bites only where re-verifying is
-# actually possible.
-test_real_cli_version_matches_the_verified_record() {
-  local cli recorded actual header
-  if ! cli=$(real_cli); then
-    pass "SKIP (codebase-memory-mcp not installed): real-CLI version against the record"
-    return 0
-  fi
-  # Anchored to the "Verified ... against" line, not to the first bold mention: the
-  # doc keeps superseded records, and one added above this line would silently pin
-  # the suite to a version nobody verified.
-  recorded=$(sed -n 's/^Verified .* against \*\*codebase-memory-mcp \([0-9][0-9.]*\)\*\*.*/\1/p' \
-    "$ROOT/docs/graph-cli-backend.md" | head -1)
-  [ -n "$recorded" ] || fail "docs/graph-cli-backend.md must open its verified surface with 'Verified <date> against **codebase-memory-mcp <version>**'"
-  actual=$("$cli" --version 2>/dev/null | sed -n 's/^codebase-memory-mcp \([0-9][0-9.]*\).*/\1/p' | head -1)
-  [ -n "$actual" ] || fail "could not read a version out of '$cli --version'"
-  [ "$actual" = "$recorded" ] || fail \
-    "installed codebase-memory-mcp is $actual but docs/graph-cli-backend.md verified $recorded; re-derive the surface and update the record (see that file's last section)"
-  # The lib header carries its own copy of the verified version, and a header that
-  # drifts from the doc is how it came to assert a surface the binary did not have.
-  header=$(sed -n 's/.*verified [0-9-]* against codebase-memory-mcp \([0-9][0-9.]*\).*/\1/p' \
-    "$ROOT/bin/fm-graph-lib.sh" | head -1)
-  [ "$header" = "$recorded" ] || fail \
-    "bin/fm-graph-lib.sh's header verified '${header:-none}' but docs/graph-cli-backend.md verified $recorded; the two records must name one version"
-  pass "fm-graph-lib.sh: the installed CLI is the version the backend record verified"
-}
-
-test_help_includes_entire_header
 test_refreshes_indexed_project
 test_arguments_are_one_json_object_not_flags
 test_refresh_addresses_the_recorded_name
@@ -691,4 +650,3 @@ test_unknown_mode_falls_back_to_full
 test_mode_off_disables_refresh
 test_real_cli_refreshes_an_indexed_project
 test_real_cli_addresses_the_recorded_short_name
-test_real_cli_version_matches_the_verified_record

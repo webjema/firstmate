@@ -158,7 +158,6 @@ $ CBM_CACHE_DIR=$P/cache codebase-memory-mcp cli index_repository '{"repo_path":
 
 Firstmate keeps building the JSON form regardless, and `tests/graph-helpers.sh`'s stub keeps refusing flags, because the JSON object is the one shape that has worked across every surface this binary has had while the flag form has now flipped twice.
 The suite no longer asserts that flags are rejected - that assertion was true of one version, not of the tool.
-`test_real_cli_version_matches_the_verified_record` replaces it and pins the thing that actually generalizes: the installed version against the version this file records as verified.
 
 ## Diagnostics go to stderr
 
@@ -213,7 +212,6 @@ Flags:
 
 So the one shape both recorded versions accept is also the shape on its way out.
 Firstmate has not moved: raw JSON still works on 0.9.0, the warning is on stderr where nothing parses it, and `--args-file` and piped stdin both take the same jq-built object, so the migration is small and can be made deliberately when the fleet's owner chooses a floor version.
-`test_real_cli_version_matches_the_verified_record` is what surfaces the next move, since a version bump reddens the suite until this record is re-derived.
 
 ## Isolating the graph in tests
 
@@ -273,6 +271,5 @@ Making a failure loud is necessary and is not the same as making the success rea
 
 Run `bin/fm-test.sh tests/fm-graph.test.sh`.
 The `test_real_cli_*` cases drive the installed binary, so a surface change fails there rather than on the fleet.
-`test_real_cli_version_matches_the_verified_record` fails on any version this file has not been re-verified against, which is deliberate: it is the expiry date above made mechanical.
-It reads the version out of the `Verified <date> against **codebase-memory-mcp <version>**` line that opens "Verified surface", so that line's wording is load-bearing, and it also asserts that `bin/fm-graph-lib.sh`'s header names the same version - a header drifting from this record is how it came to assert a surface the binary did not have.
+Keep `bin/fm-graph-lib.sh`'s header naming the same version as the `Verified <date> against **codebase-memory-mcp <version>**` line that opens "Verified surface" - a header drifting from this record is how it came to assert a surface the binary did not have.
 When one does fail, re-derive the surface with `codebase-memory-mcp --help` and `codebase-memory-mcp cli`, update `bin/fm-graph-lib.sh`'s CLI-SURFACE block with the new version and date, and update this file's evidence with the exact commands and output you ran.

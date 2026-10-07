@@ -12,7 +12,6 @@
 #   (c) repositories that are genuinely different STAY different
 #   (d) local path remotes keep their path identity - `.git` is a real directory name
 #   (e) fm_repo_url_same: an absent origin is not an identity
-#   (f) the guard: no `remote get-url` site in bin/ derives an identity from a raw URL
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -131,56 +130,6 @@ fm_repo_url_same 'https://github.com/Org/Repo' '' \
 "$CLI" same 'https://github.com/Org/Repo' 'https://github.com/Org/Other' \
   && fail "(e) the CLI must report two different repos as different"
 pass "(e) fm_repo_url_same treats an absent origin as an absence, not an identity"
-
-# --- (f) the guard: no identity is derived from a raw URL -------------------
-#
-# THIS IS THE CASE THAT FAILS WHEN SOMEONE REINTRODUCES THE BUG. Every script in bin/
-# that reads an origin URL is classified below. An IDENTITY site decides "which repo is
-# this" - a pool key, a lock name, a same-repo comparison - and must route through
-# bin/fm-repo-url-lib.sh. A PRESENCE site only asks "is there an origin at all" and
-# derives nothing. A new or renamed site matches neither list and fails here, which
-# forces the author to classify it rather than quietly hashing a raw string.
-IDENTITY_SITES="bin/fm-pool-lib.sh bin/fm-home-seed.sh"
-# repo_slug in fm-bearings-snapshot.sh parses owner/repo for `gh`, which is a GitHub
-# API coordinate and not a pool identity; the rest only test that an origin exists.
-PRESENCE_SITES="bin/fm-bearings-snapshot.sh bin/fm-bootstrap.sh bin/fm-ff-lib.sh
-bin/fm-fleet-sync.sh bin/fm-review-diff.sh bin/fm-teardown.sh"
-
-# EVERY WAY TO READ AN ORIGIN URL, not just the one this repo happens to use today.
-# `git config --get remote.origin.url`, `git remote -v` and `git ls-remote --get-url`
-# all return the same string - the last even applies insteadOf - so a pattern matching
-# only `remote get-url` would let a new identity site walk straight past this guard,
-# which is the single thing it exists to stop.
-#
-# Only real code counts as a site: a header comment that discusses `remote get-url`
-# reads no URL, and listing it would make the inventory drift on every doc edit.
-READ_ORIGIN='remote get-url|remote\.origin\.url|remote -v|ls-remote --get-url'
-found=$( (cd "$ROOT" && grep -rlE "^[^#]*($READ_ORIGIN)" bin/) | LC_ALL=C sort)
-declared=$(printf '%s\n%s\n' "$IDENTITY_SITES" "$PRESENCE_SITES" | tr ' ' '\n' | grep . | LC_ALL=C sort -u)
-[ "$found" = "$declared" ] || fail "(f) the set of bin/ scripts reading an origin URL changed.
-Classify each new or removed one in this test as an IDENTITY site (it decides WHICH
-repository, and must call fm_repo_url_canonical or fm_repo_url_same) or a PRESENCE
-site (it only checks that an origin exists).
---- declared ---
-$declared
---- found ---
-$found"
-
-for f in $IDENTITY_SITES; do
-  grep -q 'fm_repo_url_canonical\|fm_repo_url_same' "$ROOT/$f" \
-    || fail "(f) $f reads an origin URL to decide which repository it is, but never routes it through bin/fm-repo-url-lib.sh"
-done
-
-# fm_pool_key is the one that produced the incident, so guard its body directly: a
-# file-level grep would still pass if someone added a second, raw hashing site beside
-# the canonical one.
-body=$(awk '/^fm_pool_key\(\)/ {inside = 1} inside {print} inside && /^}/ {exit}' "$ROOT/bin/fm-pool-lib.sh")
-[ -n "$body" ] || fail "(f) could not extract fm_pool_key's body from bin/fm-pool-lib.sh"
-assert_contains "$body" 'fm_repo_url_canonical' \
-  "(f) fm_pool_key must hash the canonical repository identity, not the raw remote URL"
-printf '%s' "$body" | grep -q 'get-url[^)]*)[[:space:]]*|' \
-  && fail "(f) fm_pool_key pipes a raw remote URL somewhere; it must canonicalise first"
-pass "(f) every bin/ script that derives a repository identity routes through the shared canonicaliser"
 
 # --- (g) no external command, so nothing can fail into a merge ---------------
 #

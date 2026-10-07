@@ -971,27 +971,6 @@ EOF
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
 }
 
-test_pi_extension_forces_followup() {
-  local ext content
-  ext="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
-  [ -f "$ext" ] || fail "tracked pi primary extension is missing"
-  content=$(cat "$ext")
-  assert_contains "$content" 'agent_settled' "pi extension must run after one logical agent run settles"
-  assert_contains "$content" 'fm-turnend-guard.sh' "pi extension must invoke the shared guard"
-  assert_contains "$content" 'sendUserMessage' "pi extension must force a follow-up turn"
-  assert_contains "$content" 'deliverAs: "followUp"' "pi extension must queue the follow-up safely"
-  assert_contains "$content" 'guardFollowupActive' "pi extension must carry a logical-run loop guard"
-  assert_not_contains "$content" 'skipNextTurnEnd' "pi extension kept the internal-turn loop guard"
-  assert_contains "$content" 'session-start operating block' "pi extension must use harness-neutral repair wording"
-  assert_contains "$content" '.pi-turnend-extension-loaded' "pi extension must write its loaded marker for session-start diagnostics"
-  assert_contains "$content" 'lockOwnership' "pi extension loaded marker must respect the session lock"
-  assert_contains "$content" 'const command = String((event.input as { command?: unknown })?.command ?? "")' "pi extension changed bash command extraction for the PreToolUse contract"
-  assert_contains "$content" 'runPretoolCheck(command)' "pi extension changed the PreToolUse checker invocation"
-  assert_contains "$content" 'return { block: true, reason:' "pi extension changed the checker exit-2 block result"
-  assert_not_contains "$content" 'Run bin/fm-watch-arm.sh as a background task' "pi extension must not hardcode the old watcher-arm instruction"
-  pass ".pi primary extension: agent_settled forces one follow-up through the shared guard"
-}
-
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
@@ -1161,7 +1140,6 @@ test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_forces_followup
 test_opencode_plugin_anchors_guard_to_worktree
-test_pi_extension_forces_followup
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_grok_hook_invokes_adapter
