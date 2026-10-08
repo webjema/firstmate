@@ -146,6 +146,11 @@
 # retired quietly; this script always exits 0 for a failed warm, and a failed warm
 # never corrupts a slot (the lease is released either way) nor wakes the user.
 #
+# LOW MEMORY SKIPS THE PASS. While MemAvailable is below the reserve
+# (bin/fm-mem-lib.sh), a warm logs SKIP and makes no lease and no install; the
+# next interval tries again. An install that does run gets nice -n 10 and
+# ionice -c3 where the box has them, so a warm never competes with a crew.
+#
 # TWO CEILINGS, both of which STOP warming rather than fill the disk silently:
 #
 #   DISK BUDGET (per project pool). Default 20 GB, FM_POOL_DISK_BUDGET_GB or
@@ -173,6 +178,8 @@ LOG="$STATE/.pool-warm.log"
 
 # shellcheck source=bin/fm-pool-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-pool-lib.sh"
+# shellcheck source=bin/fm-mem-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-mem-lib.sh"
 
 log() {  # <message>
   mkdir -p "$STATE" 2>/dev/null || true
@@ -253,7 +260,7 @@ release_pool_lock() { release_warm_resources; }
 # warm_one <project-real-path>: enforce always-plus-one for ONE pool.
 warm_one() {  # <project-real-path>
   local project=$1 name avail slots max_trees pool_dir used_kb est_kb budget_kb path rc timeout_secs line
-  local warm_deadline prov_rc prov_out reaped reclaimed rel_rc rel_err
+  local warm_deadline prov_rc prov_out reaped reclaimed rel_rc rel_err short
   name=$(basename "$project")
 
   fm_pool_read "$project" || {
@@ -267,6 +274,11 @@ warm_one() {  # <project-real-path>
   # and this is the common case, so it must stay cheap.
   if [ "$avail" -ge 1 ]; then
     clear_blocked "$project"
+    return 0
+  fi
+
+  if short=$(fm_mem_short "$CONFIG"); then
+    log "SKIP $name: ${short% *} GB memory available, below the ${short#* } GB reserve; retrying next interval"
     return 0
   fi
 
@@ -404,7 +416,7 @@ warm_one() {  # <project-real-path>
   # that possible at all - `< <(...)` throws the child's status away.
   prov_rc=0
   prov_out=$(FM_PROVISION_DEADLINE=$warm_deadline \
-               "$SCRIPT_DIR/fm-worktree-provision.sh" "$path" 2>&1) || prov_rc=$?
+               ${LOW_PRIORITY[@]+"${LOW_PRIORITY[@]}"} "$SCRIPT_DIR/fm-worktree-provision.sh" "$path" 2>&1) || prov_rc=$?
   while IFS= read -r line; do
     [ -n "$line" ] && log "PROVISION $name: $line"
   done <<EOF
@@ -477,6 +489,9 @@ resolve_project() {  # <name-or-path>
 # warmer killed mid-install cannot ask at all, which is how it leaked its lease and
 # removed a slot from the pool forever.
 WARM_LEASE_PROJECT=""
+LOW_PRIORITY=()
+command -v nice >/dev/null 2>&1 && LOW_PRIORITY+=(nice -n 10)
+command -v ionice >/dev/null 2>&1 && LOW_PRIORITY+=(ionice -c3)
 # INT/TERM as well as EXIT: bash runs the EXIT trap on a caught signal, and a
 # reboot's SIGTERM is precisely the case that was leaking the lease.
 trap release_warm_resources EXIT INT TERM

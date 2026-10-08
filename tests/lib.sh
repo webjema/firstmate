@@ -270,3 +270,13 @@ export FM_SCRATCH_TMP_ROOT="${FM_SCRATCH_TMP_ROOT:-$FM_TEST_JANITOR_ROOT/tmp}"
 export FM_DISK_TMP_ROOT="${FM_DISK_TMP_ROOT:-$FM_TEST_JANITOR_ROOT/tmp}"
 export FM_DISK_PATH="${FM_DISK_PATH:-$FM_TEST_JANITOR_ROOT}"
 export FM_DISK_CACHES="${FM_DISK_CACHES-}"
+
+# --- host memory isolation ---------------------------------------------------
+#
+# bin/fm-mem-lib.sh makes spawns wait and pool warms skip while the host is short of
+# memory, and puts crews in a real systemd scope. A suite must not stall or skip
+# because the developer's box is busy, so it reads an ample fake meminfo and makes
+# no scope. A suite that exercises either sets its own values.
+printf 'MemTotal: 67108864 kB\nMemAvailable: 67108864 kB\n' > "$FM_TEST_JANITOR_ROOT/meminfo"
+export FM_MEMINFO="${FM_MEMINFO:-$FM_TEST_JANITOR_ROOT/meminfo}"
+export FM_CREW_MEMORY_HIGH="${FM_CREW_MEMORY_HIGH-off}"

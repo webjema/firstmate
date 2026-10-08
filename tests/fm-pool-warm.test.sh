@@ -42,6 +42,8 @@
 #   (z) a reclaim that CANNOT free its slot            -> grows the pool, never starves
 #   (aa) a reclaim whose slot does not come back free  -> the ceilings still apply
 #   (ab) a pool treehouse can no longer describe       -> unverifiable is a FAILURE
+#   (ac) MemAvailable below the reserve                -> skips the pass, no install
+#   (ad) the install itself                            -> runs at nice 10, idle io class
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -866,3 +868,43 @@ assert_contains "$(warm_log "$C")" "still LEASED" "(ab) a release that cannot be
 assert_contains "$(warm_log "$C")" "unreadable" "(ab) and must name the reason, or the log sends its reader hunting the wrong cause"
 assert_not_contains "$(warm_log "$C")" "WARMED proj" "(ab) an unverified slot is never announced as one the pool can hand out"
 pass "(ab) a release the pool cannot confirm is failed closed, with its reason named"
+
+# --- (ac)/(ad) memory admission and install priority ---------------------------
+# A slot that needs an install, and an npm that records the priority it ran at.
+mem_case() {  # <name> -> echoes the case dir
+  local c
+  c=$(new_case "$1")
+  in_flight "$c"
+  fm_th_slot 1 in-use /pool/1/proj > "$c/status.txt"
+  mkdir -p "$c/th-root/pool/9/proj"
+  printf '{"name":"proj"}\n' > "$c/th-root/pool/9/proj/package.json"
+  cat > "$c/fakebin/npm" <<SH
+#!/usr/bin/env bash
+io=none; command -v ionice >/dev/null 2>&1 && io=\$(ionice -p \$\$)
+printf 'nice=%s io=%s\n' "\$(nice)" "\$io" >> "$c/npm.log"
+mkdir -p node_modules/pkg && printf 'x\n' > node_modules/pkg/index.js
+SH
+  chmod +x "$c/fakebin/npm"
+  : > "$c/npm.log"
+  printf '%s\n' "$c"
+}
+
+C=$(mem_case ac)
+printf 'MemTotal: 16000000 kB\nMemAvailable: 1200000 kB\n' > "$C/meminfo"
+FM_MEMINFO="$C/meminfo" FM_MEM_RESERVE_GB=4 run_warm "$C" || fail "(ac) must exit 0"
+[ ! -s "$C/npm.log" ] || fail "(ac) a warm below the memory reserve must make no install call"
+assert_not_contains "$(th_log "$C")" "get" "(ac) and must not lease a slot"
+assert_contains "$(warm_log "$C")" "SKIP proj: 1.1 GB memory available, below the 4 GB reserve" "(ac) the skip is logged with its numbers"
+printf 'MemTotal: 16000000 kB\nMemAvailable: 9000000 kB\n' > "$C/meminfo"
+FM_MEMINFO="$C/meminfo" FM_MEM_RESERVE_GB=4 run_warm "$C" || fail "(ac) must exit 0"
+assert_grep "nice=" "$C/npm.log" "(ac) the next pass with memory back installs as usual"
+pass "(ac) a warm below the memory reserve skips its pass and the next interval warms"
+
+C=$(mem_case ad)
+run_warm "$C" || fail "(ad) must exit 0"
+want=$(( $(nice) + 10 )); [ "$want" -le 19 ] || want=19
+assert_grep "nice=$want" "$C/npm.log" "(ad) the install must run 10 nicer than the warmer"
+if command -v ionice >/dev/null 2>&1; then
+  assert_grep "io=idle" "$C/npm.log" "(ad) the install must run in the idle io class"
+fi
+pass "(ad) a warm install runs at low cpu and io priority"
