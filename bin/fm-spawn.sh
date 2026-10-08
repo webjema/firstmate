@@ -75,6 +75,10 @@
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# Before creating the window, a ship/scout spawn waits while MemAvailable is below the memory
+# reserve, printing `mem-wait:` lines, and launches anyway once the wait bound passes.
+# A ship/scout crew on a verified harness launches inside its own user systemd scope
+# with MemoryHigh when the box can make one. bin/fm-mem-lib.sh owns both contracts.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -106,6 +110,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-context-lib.sh"
 # shellcheck source=bin/fm-peer-lib.sh
 . "$SCRIPT_DIR/fm-peer-lib.sh"
+# shellcheck source=bin/fm-mem-lib.sh
+. "$SCRIPT_DIR/fm-mem-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -265,8 +271,10 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -586,6 +594,8 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     exit 1
   fi
 }
+
+[ "$KIND" = secondmate ] || fm_mem_wait_for_reserve "$CONFIG" "$ID"
 
 W="fm-$ID"
 SES=$(fm_backend_tmux_container_ensure)
@@ -970,6 +980,8 @@ LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+elif [ "$RAW_LAUNCH" = 0 ]; then
+  LAUNCH="$(fm_mem_scope_prefix "$CONFIG")$LAUNCH"
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
