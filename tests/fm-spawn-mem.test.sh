@@ -40,6 +40,8 @@ SH
 }
 
 # make_case <name> <id>...: one home with a brief per id, a project, a worktree.
+# Pins config/crew-harness so a spawn with no explicit harness (the batch form)
+# never falls through to host detection, which is `unknown` on a CI runner.
 # Sets CASE, HOME_DIR, PROJ, WT, FAKEBIN.
 make_case() {
   local id
@@ -54,6 +56,7 @@ make_case() {
     printf 'brief\n' > "$HOME_DIR/data/$id/brief.md"
   done
   fm_git_worktree "$PROJ" "$WT" "fm/$1"
+  printf 'claude\n' > "$HOME_DIR/config/crew-harness"
   touch "$HOME_DIR/state/.last-watcher-beat"
   : > "$CASE/tmuxlog"
 }
@@ -67,7 +70,7 @@ run_spawn() {  # [VAR=value...] -- <spawn args...>
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT" TMUX="fake,1,0" \
     FM_FAKE_TMUXLOG="$CASE/tmuxlog" FM_MEMINFO="$CASE/meminfo" \
-    FM_MEM_RESERVE_GB=4 FM_SPAWN_MEM_POLL=1 \
+    FM_MEM_RESERVE_GB=4 FM_SPAWN_MEM_POLL=1 FM_CREW_MEMORY_HIGH=off \
     PATH="$FAKEBIN:$PATH" \
     ${vars[@]+"${vars[@]}"} \
     "$SPAWN" "$@" 2>&1
