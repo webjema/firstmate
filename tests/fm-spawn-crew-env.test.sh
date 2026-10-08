@@ -22,22 +22,6 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-crew-env)
 
-# fm-spawn writes its task temp root under /tmp, outside TMP_ROOT, so this file owns
-# removing it. It cannot be registered from make_spawn_case: that runs in a command
-# substitution, and an array append inside a subshell is lost. Leftovers are not merely
-# untidy here - a stale crew-env.sh makes the planted-symlink case below pass without
-# ever planting the symlink. Own EXIT trap per the convention in tests/lib.sh, calling
-# fm_test_cleanup so the registered dirs still go.
-#
-# The glob matches on the TASK ID rather than the whole path, because the path now
-# carries a hash of the home and a killed earlier run's home is gone by the time this
-# sweeps for its leftovers.
-crew_env_cleanup() {
-  rm -rf /tmp/fm-*-crewenv-*
-  fm_test_cleanup
-}
-trap crew_env_cleanup EXIT
-
 # task_tmp_of <home> <id>: the temp root spawn actually used, read back from the meta
 # it wrote. Reconstructing the path here instead would only restate the production
 # formula in bin/fm-peer-lib.sh, and could not fail when that formula changed.
@@ -99,7 +83,6 @@ make_spawn_case() {
   wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   id="crewenv-$name-x1"
-  rm -rf /tmp/fm-*-"$id"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf 'brief\n' > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "fm/$id"

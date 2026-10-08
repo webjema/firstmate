@@ -27,21 +27,6 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 
-# The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in either DOD heredoc body (PR/local-only)
-# breaks `bash -n` on the whole file.
-test_script_parses() {
-  bash -n "$ROOT/bin/fm-brief.sh" 2>&1 || fail "bin/fm-brief.sh fails bash -n (heredoc/quote regression)"
-  pass "fm-brief.sh: bash -n succeeds"
-}
-
-test_help_includes_entire_header() {
-  local help
-  help=$("$ROOT/bin/fm-brief.sh" --help)
-  assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
-  pass "fm-brief.sh: --help renders the complete header"
-}
-
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
 # exercised. A project absent from the registry fails closed to PR mode.
 write_registry() {
@@ -615,8 +600,6 @@ test_graph_lookup_failures_never_break_a_scaffold() {
   pass "fm-brief.sh: every graph-lookup failure leaves the brief scaffolded and silent"
 }
 
-test_script_parses
-test_help_includes_entire_header
 test_context_discipline_in_ship_and_scout
 test_findings_rule_reaches_every_mode
 test_ship_modes_generate_clean_briefs

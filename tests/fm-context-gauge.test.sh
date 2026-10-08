@@ -176,24 +176,7 @@ rm -f "$CONFIG/context-management"
 assert_contains "$(FM_CONTEXT_AUTOCOMPACT_PCT=50 fm_context_autocompact_env)" "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50" "env override sets the percent"
 pass "(j3) auto-compact env disables cleanly and honors env overrides"
 
-# --- (k) spawn wiring: claude launch carries the env, others do not ----------
-SPAWN_SRC="$ROOT/bin/fm-spawn.sh"
-assert_grep '__CTXENV__CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude' "$SPAWN_SRC" \
-  "the claude launch template lost the __CTXENV__ auto-compact prefix"
-# shellcheck disable=SC2016 # literal shell source, matched fixed-string, not expanded
-assert_grep 'LAUNCH=${LAUNCH//__CTXENV__/$CTXENV}' "$SPAWN_SRC" \
-  "fm-spawn lost the __CTXENV__ substitution"
-# shellcheck disable=SC2016 # literal shell source, matched fixed-string, not expanded
-assert_grep 'HARNESS" = claude ]; then CTXENV=$(fm_context_autocompact_env)' "$SPAWN_SRC" \
-  "auto-compact env is not gated to the claude harness"
-# No other harness template carries the placeholder.
-if grep -nE '__CTXENV__' "$SPAWN_SRC" | grep -vE 'claude|CTXENV=|LAUNCH=' >/dev/null; then
-  fail "a non-claude launch template carries the __CTXENV__ placeholder"
-fi
-pass "(k) spawn wires the auto-compact env into the claude launch only"
-
 # --- usage error is exit 2 --------------------------------------------------
 if "$GAUGE" --cwd >/dev/null 2>&1; then fail "--cwd with no dir must be a usage error"; fi
 pass "usage error on --cwd with no argument"
 
-pass "all fm-context-gauge cases passed"

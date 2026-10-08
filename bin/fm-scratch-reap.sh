@@ -85,7 +85,8 @@
 #   --verbose              print a summary even when nothing was reaped
 #   -h|--help              this header
 # Env for the second pass: FM_SCRATCH_TMP_ROOT (default /tmp) is the root it sweeps
-# for fm-* task temp roots; FM_SCRATCH_PROC_ROOT (default /proc) is where the
+# for fm-* task temp roots, and the root bin/fm-peer-lib.sh's fm_task_tmp_root
+# creates them under; FM_SCRATCH_PROC_ROOT (default /proc) is where the
 # process and environment rails look.
 # Prints one "SCRATCH_REAP: ..." line per reaped (or would-reap) dir plus a
 # summary line; stays silent on a clean sweep unless --verbose. Always exits 0
@@ -311,8 +312,8 @@ proc_env_capability() {
 #
 # BY NAME, NOT BY PATH, and that is the whole point. A record holds whatever string the
 # process was exec'd with, while a candidate here has been canonicalized for the process
-# rail - and fm_task_tmp_root (bin/fm-peer-lib.sh) hardcodes the literal /tmp, which
-# bin/fm-spawn.sh exports verbatim as GOTMPDIR. So on any host where the sweep root has
+# rail - and fm_task_tmp_root (bin/fm-peer-lib.sh) uses the unresolved root spelling,
+# which bin/fm-spawn.sh exports verbatim as GOTMPDIR. So on any host where the sweep root has
 # a symlink component the two spellings can never be equal, and a path match would leave
 # this rail silently blind for exactly the directories it exists to save. A task root's
 # name carries a checksum of its home path and its task id, so the name is specific

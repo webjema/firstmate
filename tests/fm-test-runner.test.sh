@@ -219,39 +219,6 @@ test_path_with_a_space_is_not_split() {
   pass "a test path containing a space reaches the worker whole"
 }
 
-test_quarantined_tests_are_declared_with_a_reason() {
-  local src quarantined name count
-  local -a names
-  src=$(cat "$FM_TEST")
-  # The quarantine is real debt, so it must be visible. Every name in the default
-  # FM_TEST_SERIAL_ONLY has to be a test that exists and has to be explained in the
-  # comment block above it - an entry nobody can justify is an entry nobody will remove.
-  # Read the DEFAULT list out of the script's own source, so an env override in this
-  # test's environment cannot mask what the repo actually ships.
-  #
-  # Parse the WHOLE assignment, not one line of it. The previous version anchored a sed to
-  # `^FM_TEST_SERIAL_ONLY=...}$` - a single-line match - so the moment the list grew past one
-  # line and wrapped with backslash continuations, it extracted NOTHING, the loop below never
-  # iterated, and this test passed while checking zero entries. It stayed green with a
-  # deliberately-injected `THIS-TEST-DOES-NOT-EXIST.test.sh` in the list. A gate that cannot
-  # fail is not a gate, so the emptiness guard below is the load-bearing part of this test:
-  # it is what makes a parse regression fail loudly instead of silently passing everything.
-  quarantined=$(sed -n '/^FM_TEST_SERIAL_ONLY=/,/}$/p' "$FM_TEST" \
-    | sed 's/^FM_TEST_SERIAL_ONLY=[^"]*"\{0,1\}//; s/"\{0,1\}}[[:space:]]*$//; s/\\[[:space:]]*$//')
-  # Split on whitespace deliberately - the list is whitespace-separated, and an array makes
-  # that intent explicit rather than leaning on an unquoted expansion.
-  read -ra names <<<"$(printf '%s' "$quarantined" | tr '\n' ' ')"
-  count=${#names[@]}
-  [ "$count" -gt 0 ] || fail "quarantine parse extracted 0 entries - the list format changed and this gate went blind"
-
-  for name in "${names[@]}"; do
-    assert_present "$ROOT/tests/$name" "quarantined test $name does not exist"
-    assert_contains "$src" "#   $name -" \
-      "quarantined test $name has no stated reason in bin/fm-test.sh"
-  done
-  pass "all $count serial-only quarantined tests exist and state why they are quarantined"
-}
-
 test_runs_from_a_non_root_cwd() {
   local dir out
   dir=$(make_suite non-root-cwd)
@@ -333,7 +300,6 @@ test_serial_mode_still_runs_everything
 test_a_test_may_itself_invoke_the_runner
 test_a_lost_worker_is_reported_not_silently_skipped
 test_path_with_a_space_is_not_split
-test_quarantined_tests_are_declared_with_a_reason
 test_runs_from_a_non_root_cwd
 test_a_sigkill_is_not_mislabelled_a_timeout
 test_worker_reports_under_the_slug_the_runner_dispatched

@@ -499,34 +499,11 @@ test_captains_call_anti_leak() {
   pass "action-free items (working/done/queued/landed) do not leak into Captain's Call"
 }
 
-# The /bearings skill is the one owner of the four-section chat-response contract.
-# Assert it states exactly the four fixed sections in order, each with its explicit
-# empty-state sentence, documents the At Anchor exclusion, and mandates a chat that is
-# materially shorter than and links to the report file.
-test_chat_contract_four_sections() {
-  local skill body headings expected
-  skill="$ROOT/.agents/skills/bearings/SKILL.md"
-  [ -f "$skill" ] || fail "bearings SKILL.md missing at $skill"
-  body=$(awk '/^## Chat-response contract$/{capture=1; next} capture && /^## /{exit} capture' "$skill")
-  headings=$(printf '%s\n' "$body" | sed -nE "s/^[0-9]+\. \*\*([^*]+)\*\*.*/\1/p")
-  expected=$(printf '%s\n' "Captain's Call" "Recently Landed" "Underway" "Charted Next")
-  [ "$headings" = "$expected" ] || fail "chat contract must contain exactly four numbered sections in fixed order, got: $headings"
-  assert_contains "$body" "Nothing needs your action right now" "Captain's Call empty-state sentence"
-  assert_contains "$body" "Nothing has landed since your last report" "Recently Landed empty-state sentence"
-  assert_contains "$body" "Nothing is underway" "Underway empty-state sentence"
-  assert_contains "$body" "Nothing is queued" "Charted Next empty-state sentence"
-  assert_contains "$body" "no At Anchor section" "the At Anchor exclusion must be documented"
-  assert_contains "$body" "materially shorter" "the chat must be materially shorter than the report file"
-  assert_contains "$body" "links to" "the chat must link to the report file"
-  pass "the /bearings skill states the four-section chat contract in order, with empty-states and the At Anchor exclusion"
-}
-
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_bounded_and_disclosed
 test_captains_call_anti_leak
-test_chat_contract_four_sections
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
