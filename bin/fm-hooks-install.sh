@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Ensure a project worktree has a mechanical quality floor: Claude Code hooks that
-# enforce secret-scanning, lint, typecheck, and tests without an agent's cooperation.
+# enforce secret-scanning, lint, typecheck, and - where no CI runs them - tests, without an
+# agent's cooperation.
 # Hooks are the floor that cannot be talked out of it. The judgment layer on top of
 # them is the crewmate's own independent review of its diff and firstmate's independent,
 # direction-aware review of the diff before it reaches the user. The crewmate's review
@@ -30,8 +31,11 @@
 # itself, GATE_HOOK_TIMEOUT is what settings.json allows it, and the gap between
 # them is what turns a slow check into a named refusal instead of a silent pass.
 # The price is real and falls on the slowest pushes - a check against a cold
-# cache is refused rather than allowed - and the remedy is the one crews already
-# follow: run the check once by hand, which warms the cache, then push.
+# cache is refused rather than allowed.
+#
+# TESTS ENTER THE GATE ONLY WHERE NO CI RUNS THEM. A repo with a CI workflow runs
+# its suite there, so a local copy on every push only repeats it; the gate then
+# keeps typecheck alone. Without CI, the push gate is the only full run there is.
 # Usage: fm-hooks-install.sh [repo-or-worktree-dir]
 #        fm-hooks-install.sh --check [repo-or-worktree-dir]   report only, never write
 set -eu
@@ -108,6 +112,14 @@ TEST_CMD=$(detect_script test)
 TYPECHECK_CMD=$(detect_script typecheck)
 LINT_CMD=$(detect_script lint)
 
+HAS_CI=0
+if [ -f "$DIR/.gitlab-ci.yml" ] \
+    || compgen -G "$DIR/.github/workflows/*.yml" >/dev/null \
+    || compgen -G "$DIR/.github/workflows/*.yaml" >/dev/null; then
+  HAS_CI=1
+  TEST_CMD=""
+fi
+
 mkdir -p "$HOOKDIR"
 
 # --- Secret scan: universal, no project knowledge needed. -------------------
@@ -179,7 +191,7 @@ EOF
 
 gate_refuse() {
   echo "BLOCKED: $1" >&2
-  echo "The push is refused rather than allowed unchecked. Run the checks by hand once - that also warms the build cache - then push." >&2
+  echo "The push is refused rather than allowed unchecked." >&2
   exit 2
 }
 
@@ -234,7 +246,10 @@ EOF
   if [ -n "$TEST_CMD" ]; then
     printf '\ngate_run tests %s\n' "$TEST_CMD"
   fi
-  if [ -z "$TYPECHECK_CMD" ] && [ -z "$TEST_CMD" ]; then
+  if [ "$HAS_CI" -eq 1 ]; then
+    printf '\n# Tests run in CI, so this gate does not repeat them.\n'
+  fi
+  if [ -z "$TYPECHECK_CMD" ] && [ -z "$TEST_CMD" ] && [ "$HAS_CI" -eq 0 ]; then
     printf '\n# No test or typecheck script was detected at install time.\n# Add the project'"'"'s real check commands here - an empty gate is not a gate.\n'
   fi
   printf '\nexit 0\n'
@@ -305,13 +320,14 @@ EOF
 
 echo "hooks: installed the fm-quality starter bundle in $SETTINGS"
 [ -n "$TEST_CMD" ]      && echo "  pre-push test:      $TEST_CMD"
+[ "$HAS_CI" -eq 1 ]     && echo "  pre-push test:      none - CI runs the tests"
 [ -n "$TYPECHECK_CMD" ] && echo "  pre-push typecheck: $TYPECHECK_CMD"
 [ -n "$LINT_CMD" ]      && echo "  post-edit lint:     detected"
 if [ -n "$TEST_CMD" ] || [ -n "$TYPECHECK_CMD" ]; then
   echo "  pre-push budget:    ${GATE_BUDGET}s for all checks together, under the hook's ${GATE_HOOK_TIMEOUT}s timeout"
-  echo "                      a check that overruns REFUSES the push - run it once by hand to warm caches, then push"
+  echo "                      a check that overruns REFUSES the push"
 fi
-if [ -z "$TEST_CMD" ] && [ -z "$TYPECHECK_CMD" ]; then
+if [ -z "$TEST_CMD" ] && [ -z "$TYPECHECK_CMD" ] && [ "$HAS_CI" -eq 0 ]; then
   echo "  WARNING: no test or typecheck script detected - the pre-push gate is empty until you fill it in"
 fi
 exit 0

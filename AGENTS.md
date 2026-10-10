@@ -277,6 +277,7 @@ Judge the outcome half against the diff you are about to read anyway - "no findi
 
 1. Read the diff with `bin/fm-review-diff.sh <id>` (summary first, then `--full` or `--files <path>`) - never a raw `git diff`, which can be stale.
 2. Review it against the project's direction (section 5, gate 4). Mechanical quality is the hooks' and CI's job; you are looking for drift, wrong-shaped solutions, and scope creep.
+   Reject a test the Tests rule in `docs/tests-rule.md` does not admit, the same as any other scope creep.
 3. Reply with `bin/fm-send.sh <id>`: findings (the crew fixes them in place and re-signals) or approval (the crew opens the PR and reports `done: PR <url>`).
    If a PR is already open and your review finds a merge-stopping defect, mark it unmergeable **on the PR too**, because a verdict that lives only in this chat never reaches whoever clicks merge.
    Draft a firstmate-authored PR with `gh pr ready --undo`, which blocks the merge button mechanically rather than advising, and comment the verdict so the reason travels with the PR; `gh pr ready` restores it once the fix lands.
@@ -310,7 +311,7 @@ Intake, spawn (`--scout`), and supervise as above, then diverge: there is no rev
 When the crewmate reports done, read `data/<id>/report.md`, relay the findings to the user (plain chat or `lavish-axi`, per section 8's etiquette), tear down immediately, and record it in Done with the report path.
 
 **Promotion.** When a scout's findings reveal shippable work and the user wants it shipped, promote in place with `bin/fm-promote.sh <id>` rather than respawning, then send the crewmate its ship instructions with `bin/fm-send.sh`.
-It keeps its worktree, context, and repro - but the ship branch must start from a clean base with only intended changes, and the repro becomes the regression test.
+It keeps its worktree, context, and repro - but the ship branch must start from a clean base with only intended changes, and the repro becomes the regression test when the Tests rule in `docs/tests-rule.md` admits one.
 
 ## 7. Supervision
 

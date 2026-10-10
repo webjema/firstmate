@@ -11,6 +11,7 @@
 #   (a) project with its own hooks -> untouched, reported
 #   (b) project with no hooks -> starter bundle installed
 #   (c) the pre-push gate is wired from the project's OWN detected npm scripts
+#   (c2) a repo with CI keeps tests out of the push gate, typecheck stays
 #   (d) no detectable test/typecheck -> installs, but says loudly that the gate is empty
 #   (e) --check never writes
 #   (f) re-running is idempotent
@@ -93,6 +94,25 @@ test_pre_push_gate_uses_detected_scripts() {
   assert_grep 'npm run typecheck' "$dir/.claude/hooks/fm-quality-pre-push.sh" "detected: wires the project's typecheck script"
   assert_grep 'git push' "$dir/.claude/hooks/fm-quality-pre-push.sh" "detected: only fires on push"
   pass "the pre-push gate is wired from the project's own detected scripts"
+}
+
+# (c2) CI already runs the suite; the push gate must not repeat it. -----------
+test_ci_repo_keeps_tests_out_of_the_gate() {
+  local dir
+  dir=$(make_project with_ci '{ "test": "vitest run", "typecheck": "tsc -b" }')
+  mkdir -p "$dir/.github/workflows"
+  : > "$dir/.github/workflows/ci.yml"
+  "$HOOKS" "$dir" >/dev/null
+
+  assert_no_grep 'npm run test' "$dir/.claude/hooks/fm-quality-pre-push.sh" "ci: the gate does not run the test script"
+  assert_grep 'npm run typecheck' "$dir/.claude/hooks/fm-quality-pre-push.sh" "ci: the gate still runs typecheck"
+
+  dir=$(make_project ci_tests_only '{ "test": "vitest run" }')
+  mkdir -p "$dir/.github/workflows"
+  : > "$dir/.github/workflows/ci.yaml"
+  "$HOOKS" "$dir" >/dev/null
+  assert_no_grep 'npm run test' "$dir/.claude/hooks/fm-quality-pre-push.sh" "ci, tests only: the gate does not run the test script"
+  pass "a repo with CI keeps tests out of the push gate"
 }
 
 # (d) An empty gate is worse than no gate if it pretends to be one. -----------
@@ -200,7 +220,6 @@ test_overrunning_check_refuses_the_push() {
   expect_code 2 "$code" "overrun: an unfinished check must block the push, not let it through"
   assert_contains "$out" 'BLOCKED' "overrun: refuses out loud"
   assert_contains "$out" 'tests' "overrun: names which check ran out of budget"
-  assert_contains "$out" 'by hand' "overrun: says how to get past it"
   pass "a check that outruns the gate's budget refuses the push instead of passing it"
 }
 
@@ -241,6 +260,7 @@ test_failing_check_still_blocks() {
 test_never_clobbers_existing_hooks
 test_installs_bundle_when_absent
 test_pre_push_gate_uses_detected_scripts
+test_ci_repo_keeps_tests_out_of_the_gate
 test_empty_gate_is_announced_loudly
 test_check_never_writes
 test_rerun_is_idempotent
