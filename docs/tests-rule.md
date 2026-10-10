@@ -9,5 +9,5 @@ Delete it.
 A bug fix adds one regression test only if the bug meets the same bar.
 Prove it can fail once: break the guarded line.
 Run the tests your change affects.
-CI runs the full suite.
+CI runs the full suite; a repo without CI runs it in the push hook.
 Project files may name what is critical there; they do not restate this rule.
