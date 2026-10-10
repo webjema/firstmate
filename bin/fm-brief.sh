@@ -35,13 +35,15 @@
 #               fixed in place and re-signalled `review-ready:`, and only an approval opens
 #               the PR (plain gh) with `done: PR <url>`. The review gate sits BEFORE the PR so
 #               a finding costs one fix, not a re-review plus a re-run of the crew's end-to-end
-#               exercise and full suite and the PR's CI - the largest source of rework measured
+#               exercise and tests and the PR's CI - the largest source of rework measured
 #               in the fleet.
 #               The push still happens, so the work is durable against a box reboot.
 #   local-only  implement on branch, stop and report
 #               `done: ready in branch fm/<id> - reviewed by: <mechanism> - <what it found>`
 #               (no push/PR);
 #               firstmate reviews, user approves, firstmate merges to local main
+# Ship briefs embed docs/tests-rule.md verbatim in the quality floor: crews work in other
+# repos, so the rule text travels in the brief and that file stays its one owner.
 # Both modes require an INDEPENDENT review of the diff and name no command to get one.
 # Naming one is unsafe in two directions: a harness may refuse to let an agent invoke its
 # review command (Claude Code's built-in `/code-review` and `/verify` are both
@@ -378,7 +380,7 @@ case "$MODE" in
 This project ships **local-only**: no remote, no PR.
 
 1. Implement the change and commit it on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-   Run the tests your change AFFECTS as you go. Run the project's FULL suite EXACTLY ONCE, at the end, before step 6 - not after every edit.
+   Run the tests your change AFFECTS as you go. No CI runs here, so run the full suite once, at the end, before step 6.
 $(review_gate "\`done:\` line at step 6")
 4. Direction check: in one line, state how this change honors the Direction above. If it moves against the direction, stop and escalate under rule 6 instead of shipping it.
 5. Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
@@ -396,10 +398,10 @@ This project ships by **pull request**, but the PR is the LAST step, not the fir
 Firstmate reviews your pushed branch BEFORE any PR exists, so its findings cost you a fix on the same branch - not a re-review, a re-run of CI, and a churned PR.
 
 1. Implement the change and commit it on your branch.
-   Run the tests your change AFFECTS as you go. Run the project's FULL suite EXACTLY ONCE, at the end, before step 6 - not after every edit. Re-running the whole suite per edit was the single biggest time sink measured in this fleet.
+   Run the tests your change AFFECTS. The full suite runs once, at the last gate - CI, or the push hook where no CI exists - never locally by habit.
 $(review_gate "\`review-ready:\` line at step 6, and again in the PR body at step 7")
    **State in the PR body how you exercised it.**
-4. Satisfy the project's quality hooks. They run automatically on commit and push (secret scan, lint, typecheck, tests). A blocked commit or push means the gate caught something real; fix the cause, never work around the gate.
+4. Satisfy the project's quality hooks. They run automatically on commit and push (secret scan, lint, typecheck, and tests where no CI runs them). A blocked commit or push means the gate caught something real; fix the cause, never work around the gate.
 5. Direction check: in one line, state how this change honors the Direction above.
    If the task as specified would move AGAINST the direction, do not quietly implement it - escalate under rule 6.
 6. **Push your branch. Open NO PR.** The push makes your work durable; the PR would only make firstmate's review expensive to act on.
@@ -462,9 +464,13 @@ $RULE1
 $(findings_block "$CREW_FILE_CMD" 'List every finding you filed, with its filed-task reference, in the summary you report at the end and in the PR body if you open one.')
 
 # Quality floor
-The project's Claude Code hooks are the mechanical floor: they enforce secret-scanning, lint, typecheck, and tests whether or not you cooperate.
+The project's Claude Code hooks are the mechanical floor: they enforce secret-scanning, lint, typecheck, and - where no CI runs them - tests, whether or not you cooperate.
 Run \`$FM_ROOT/bin/fm-hooks-install.sh .\` in the worktree. If the project already has hooks it will say so and change nothing; if it has none, it installs a starter bundle you should tune to this project and commit with your change.
 Never disable, bypass, or work around a hook. A blocked commit or push is the floor doing its job.
+
+$(cat "$SCRIPT_DIR/../docs/tests-rule.md")
+
+Name each test you added and the rule it guards in your report line.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

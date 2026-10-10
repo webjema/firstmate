@@ -568,7 +568,6 @@ finding_body() {  # <key>
   printf '\nAcceptance criteria\n'
   printf -- '- [ ] The issue above can no longer be reproduced.\n'
   printf -- '- [ ] Behaviour matches "Expected" above.\n'
-  printf -- '- [ ] A regression test covering it is added or updated where applicable.\n'
   printf -- '- [ ] Existing functionality remains unaffected.\n'
   printf '\n%s\n' "$(trailer_for "$key")"
 }

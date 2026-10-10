@@ -96,7 +96,7 @@ Aggregated matrices surface token spending holes and rework hotspots across proj
                                ▼
                     ┌─────────────────────┐
                     │  7. DEPLOYED QA     │
-                    │  (Test Generation)  │
+                    │    (Acceptance)     │
                     └──────────┬──────────┘
                                │
             ┌──────────────────┼──────────────────┐
@@ -133,7 +133,7 @@ Aggregated matrices surface token spending holes and rework hotspots across proj
 - **Inputs:** `artifacts/requirements.json`, project direction, codebase architecture.
 - **Responsibilities:**
   - Formulate detailed technical architecture, exact file modifications, and interface signatures.
-  - Define unit, integration, and regression test strategies.
+  - Name the tests the Tests rule in `docs/tests-rule.md` admits, or none.
   - Decompose large tasks into a Directed Acyclic Graph (DAG) of subtasks.
   - Determine file disjointness for each subtask and assign execution modes (`parallel` vs `sequential`).
   - Declare clear interface contracts between subtasks to prevent integration divergence.
@@ -175,14 +175,12 @@ Aggregated matrices surface token spending holes and rework hotspots across proj
   - If deployment fails, trigger `DEPLOY_FIX` (capped at 2 attempts) to resolve deployment configuration without altering product behavior.
 - **Outputs:** Deployed environment preview and `artifacts/deploy.json`.
 
-### Stage 7: Deployed QA and Test Generation (`QA`)
+### Stage 7: Deployed QA (`QA`)
 - **Inputs:** Deployed environment URL, Asana card, acceptance criteria.
 - **Responsibilities:**
   - Exercise acceptance criteria end-to-end against the live deployed environment.
-  - Generate automated integration and end-to-end regression tests matching the exercised scenarios.
-  - Package new test suites into a dedicated QA test PR.
   - Return `PASS`, `FAIL_CODE` (routes back to `FIX`), or `FAIL_CRITERION` (escalates to human if deployed behavior reveals the requirement itself was invalid).
-- **Outputs:** `artifacts/qa.json` and QA test PR.
+- **Outputs:** `artifacts/qa.json`.
 
 ### Stage 8: Closeout and Human Communication (`CLOSEOUT`)
 - **Inputs:** Final run artifacts, metrics journal, test receipts.
