@@ -192,7 +192,7 @@ while [ "$#" -gt 0 ]; do
     --serial) MODE=serial; shift ;;
     --jobs) shift; [ "$#" -gt 0 ] || { echo "fm-test.sh: --jobs needs a number" >&2; exit 1; }; JOBS=$1; shift ;;
     --list) MODE=list; shift ;;
-    --shard) shift; [ "$#" -gt 0 ] || { echo "fm-test.sh: --shard needs <i>/<n>" >&2; exit 1; }; SHARD=$1; shift ;;
+    --shard) shift; [ -n "${1:-}" ] || { echo "fm-test.sh: --shard needs <i>/<n>" >&2; exit 1; }; SHARD=$1; shift ;;
     --affected) shift; [ "$#" -gt 0 ] || { echo "fm-test.sh: --affected needs a git ref" >&2; exit 1; }; AFFECTED_REF=$1; shift ;;
     --worker) WORKER=1; shift ;;
     --rundir) shift; [ "$#" -gt 0 ] || { echo "fm-test.sh: --rundir needs a path" >&2; exit 1; }; RUNDIR=$1; shift ;;
@@ -240,7 +240,9 @@ serial_weight() {  # <test basename> -> its recorded seconds, 1 when none is rec
 if [ -n "$AFFECTED_REF" ]; then
   base=$(git merge-base "$AFFECTED_REF" HEAD) \
     || { echo "fm-test.sh: --affected: no merge base with $AFFECTED_REF" >&2; exit 1; }
-  changed=$( { git diff --name-only "$base"; git ls-files --others --exclude-standard; } | LC_ALL=C sort -u)
+  # --no-renames keeps a renamed file's OLD name, which its stale callers still spell.
+  changed=$( { git -c core.quotePath=false diff --name-only --no-renames "$base"
+               git -c core.quotePath=false ls-files --others --exclude-standard; } | LC_ALL=C sort -u)
   full=0
   while IFS= read -r p; do
     case "$p" in
@@ -252,11 +254,13 @@ if [ -n "$AFFECTED_REF" ]; then
   if [ "$full" = 0 ]; then
     keys=$(mktemp "${TMPDIR:-/tmp}/fm-test-keys.XXXXXX")
     [ -z "$changed" ] || printf '%s\n' "$changed" | sed 's|.*/||' | LC_ALL=C sort -u > "$keys"
+    # A test that globs bin/* reaches every bin/ file without naming it.
+    case $'\n'"$changed" in *$'\n'bin/*) echo 'bin/*' >> "$keys" ;; esac
     # A bin/ script that mentions a changed file is changed too, as far as its tests go.
     while :; do
       before=$(wc -l < "$keys")
       [ "$before" -eq 0 ] && break
-      { cat "$keys"; grep -lF -f "$keys" bin/*.sh bin/backends/*.sh 2>/dev/null | sed 's|.*/||'; } \
+      { cat "$keys"; grep -lF -f "$keys" bin/*.sh bin/*.mjs bin/backends/*.sh 2>/dev/null | sed 's|.*/||'; } \
         | LC_ALL=C sort -u > "$keys.next"
       mv "$keys.next" "$keys"
       [ "$(wc -l < "$keys")" -eq "$before" ] && break
@@ -286,9 +290,11 @@ done
 if [ -n "$SHARD" ]; then
   shard_i=${SHARD%/*}
   shard_n=${SHARD#*/}
-  case "$shard_i/$shard_n" in
-    *[!0-9/]*|/*|*/) echo "fm-test.sh: --shard needs <i>/<n>, got $SHARD" >&2; exit 1 ;;
+  case "$SHARD" in
+    *[!0-9/]*|/*|*/|*/*/*) echo "fm-test.sh: --shard needs <i>/<n>, got $SHARD" >&2; exit 1 ;;
   esac
+  shard_i=$(( 10#$shard_i ))
+  shard_n=$(( 10#$shard_n ))
   [ "$shard_i" -ge 1 ] && [ "$shard_i" -le "$shard_n" ] \
     || { echo "fm-test.sh: --shard $SHARD is out of range" >&2; exit 1; }
   if [ "$shard_n" -gt 1 ] && [ "$shard_i" -eq 1 ]; then
