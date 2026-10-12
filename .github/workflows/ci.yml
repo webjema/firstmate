@@ -31,7 +31,7 @@ jobs:
       - run: bin/fm-lint.sh
 
   test-shards:
-    name: Behavior tests (shard ${{ matrix.shard }}/5)
+    name: Behavior tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
     # A shard should finish in ~2 minutes; this generous cap fails loudly on a
     # hung watcher or tmux test instead of riding GitHub's 360-minute default.
@@ -39,8 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # bin/fm-test.sh owns what each shard holds: shard 1 is the parallel phase,
-        # 2..5 split the serial tail. Change the 5 here and in the run line together.
+        # bin/fm-test.sh owns what each shard holds; this list owns how many there are.
         shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v6
@@ -74,9 +73,9 @@ jobs:
         run: |
           set -eu
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            bin/fm-test.sh --shard ${{ matrix.shard }}/5 --affected "origin/$BASE_REF"
+            bin/fm-test.sh --shard ${{ matrix.shard }}/${{ strategy.job-total }} --affected "origin/$BASE_REF"
           else
-            bin/fm-test.sh --shard ${{ matrix.shard }}/5
+            bin/fm-test.sh --shard ${{ matrix.shard }}/${{ strategy.job-total }}
           fi
 
   # Branch protection requires this job name, so it stays one check over all shards.
