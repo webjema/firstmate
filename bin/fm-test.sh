@@ -3,10 +3,12 @@
 #
 # The file set, the parallelism, the serial-only exceptions, the per-test timeout,
 # and the output format live here and ONLY here, exactly as bin/fm-lint.sh owns the
-# lint definition. Both gates invoke this script with no arguments:
-#   - CI:       .github/workflows/ci.yml runs `bin/fm-test.sh`.
-#   - Local:    a crewmate runs `bin/fm-test.sh` once before signalling review-ready.
-# A local pass is therefore a CI pass, because they are the same run.
+# lint definition. Both gates invoke this script:
+#   - CI:       .github/workflows/ci.yml runs `bin/fm-test.sh --shard <i>/<n>` per job,
+#               adding `--affected origin/main` on a pull request; main runs it all.
+#   - Local:    a crewmate runs `bin/fm-test.sh` (or `--affected origin/main`) once
+#               before signalling review-ready.
+# A local pass is therefore a CI pass, because the shards of a run are the same run.
 #
 # WHY PARALLEL. The suite used to be a serial `for f in tests/*.test.sh` in CI and in
 # every crew's habit. Individual tests take 0-63s while the whole serial suite took
@@ -36,7 +38,22 @@
 #   fm-test.sh <path>...       run only the given test files (developer convenience)
 #   fm-test.sh --serial        run everything serially (bisecting a parallel-safety bug)
 #   fm-test.sh --jobs <n>      override the parallel width (default: nproc)
-#   fm-test.sh --list          print the canonical file set and exit
+#   fm-test.sh --list          print the selected file set and exit
+#   fm-test.sh --shard <i>/<n> run only shard i of n (CI runs one job per shard)
+#   fm-test.sh --affected <ref> run only the tests a change since <ref> can reach
+#
+# SHARDS. With n >= 2, shard 1 is the whole parallel phase and shards 2..n split the
+# serial tail. The serial tail is the CI critical path, and its tests are serial only
+# because they must not share ONE box with other load - on separate CI runners they
+# are alone again. The split is longest-first onto the least-loaded shard, by the
+# measured seconds recorded next to each FM_TEST_SERIAL_ONLY entry; ties go by name,
+# then by the lowest shard. Every test of the selection lands in exactly one shard.
+#
+# AFFECTED. --affected keeps a test when the change since `git merge-base <ref> HEAD`
+# (committed, uncommitted, or untracked) names the test itself, or names a file the
+# test mentions by basename, directly or through any chain of bin/ scripts that
+# mention each other. A change to this runner, to .github/, or to a test helper under
+# tests/ selects the whole file set. It is a filter, so --shard still applies after it.
 #
 # Exit status is 0 only when every test passed.
 set -eu
@@ -114,6 +131,9 @@ cd "$ROOT" || exit 1
 #     own and reaps aimed at whole process trees; it bounded-waits on a watcher surviving a
 #     kill, which a starved box turns into a false green
 #
+# The number after each entry's `=` is its measured CI seconds. --shard balances the
+# serial tail on it; an entry with no number weighs 1.
+#
 # The cost is real, and stating it honestly is the point (measured on this 8-core box):
 #   serial (the old CI loop)          421s
 #   parallel, quarantine EMPTY        155s   <- and red about 1 run in 6
@@ -132,32 +152,34 @@ cd "$ROOT" || exit 1
 # was the stated justification for this list being empty. State what is proven, not what is
 # convenient.
 FM_TEST_SERIAL_ONLY=${FM_TEST_SERIAL_ONLY:-"\
-fm-watcher-lock.test.sh \
-fm-supervision-liveness.test.sh \
-fm-watch-checkpoint.test.sh \
-fm-watch-triage.test.sh \
-fm-silent-holes.test.sh \
-fm-wake-queue.test.sh \
-fm-wake-payload.test.sh \
-fm-wt-activity.test.sh \
-fm-turnend-body.test.sh \
-fm-wake-daemon-lifecycle-e2e.test.sh \
-fm-afk-inject-e2e.test.sh \
-fm-secondmate-safety.test.sh \
-fm-pi-primary-live-e2e.test.sh \
-fm-afk-launch.test.sh \
-fm-daemon.test.sh \
-fm-backend-tmux-smoke.test.sh \
-fm-pi-watch-extension.test.sh \
-fm-pool-warm.test.sh \
-fm-turnend-guard.test.sh \
-fm-watch-arm-supervision.test.sh \
-fm-watch-arm-hosting.test.sh"}
+fm-watcher-lock.test.sh=22 \
+fm-supervision-liveness.test.sh=3 \
+fm-watch-checkpoint.test.sh=3 \
+fm-watch-triage.test.sh=67 \
+fm-silent-holes.test.sh=23 \
+fm-wake-queue.test.sh=8 \
+fm-wake-payload.test.sh=5 \
+fm-wt-activity.test.sh=23 \
+fm-turnend-body.test.sh=10 \
+fm-wake-daemon-lifecycle-e2e.test.sh=4 \
+fm-afk-inject-e2e.test.sh=41 \
+fm-secondmate-safety.test.sh=18 \
+fm-pi-primary-live-e2e.test.sh=1 \
+fm-afk-launch.test.sh=33 \
+fm-daemon.test.sh=14 \
+fm-backend-tmux-smoke.test.sh=3 \
+fm-pi-watch-extension.test.sh=3 \
+fm-pool-warm.test.sh=22 \
+fm-turnend-guard.test.sh=3 \
+fm-watch-arm-supervision.test.sh=29 \
+fm-watch-arm-hosting.test.sh=10"}
 
 JOBS=${FM_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}
 TIMEOUT=${FM_TEST_TIMEOUT:-300}
 MODE=parallel
 FILES=()
+SHARD=
+AFFECTED_REF=
 # Internal worker state. Carried as FLAGS, never as exported environment: the worker
 # runs the test as a child process, so anything it exports is inherited by the test -
 # and a test that itself invokes fm-test.sh (tests/fm-test-runner.test.sh does) would
@@ -170,6 +192,8 @@ while [ "$#" -gt 0 ]; do
     --serial) MODE=serial; shift ;;
     --jobs) shift; [ "$#" -gt 0 ] || { echo "fm-test.sh: --jobs needs a number" >&2; exit 1; }; JOBS=$1; shift ;;
     --list) MODE=list; shift ;;
+    --shard) shift; [ -n "${1:-}" ] || { echo "fm-test.sh: --shard needs <i>/<n>" >&2; exit 1; }; SHARD=$1; shift ;;
+    --affected) shift; [ "$#" -gt 0 ] || { echo "fm-test.sh: --affected needs a git ref" >&2; exit 1; }; AFFECTED_REF=$1; shift ;;
     --worker) WORKER=1; shift ;;
     --rundir) shift; [ "$#" -gt 0 ] || { echo "fm-test.sh: --rundir needs a path" >&2; exit 1; }; RUNDIR=$1; shift ;;
     --timeout) shift; [ "$#" -gt 0 ] || { echo "fm-test.sh: --timeout needs seconds" >&2; exit 1; }; TIMEOUT=$1; shift ;;
@@ -200,8 +224,108 @@ elif [ "$WORKER" = 0 ]; then
   done
 fi
 
+# FM_TEST_SERIAL_ONLY entries are "<name>[=<seconds>]".
+SERIAL_NAMES=
+for entry in $FM_TEST_SERIAL_ONLY; do SERIAL_NAMES="$SERIAL_NAMES ${entry%%=*}"; done
+serial_weight() {  # <test basename> -> its recorded seconds, 1 when none is recorded
+  local entry
+  for entry in $FM_TEST_SERIAL_ONLY; do
+    case "$entry" in
+      "$1="*) printf '%s\n' "${entry#*=}"; return ;;
+    esac
+  done
+  echo 1
+}
+
+if [ -n "$AFFECTED_REF" ]; then
+  base=$(git merge-base "$AFFECTED_REF" HEAD) \
+    || { echo "fm-test.sh: --affected: no merge base with $AFFECTED_REF" >&2; exit 1; }
+  # --no-renames keeps a renamed file's OLD name, which its stale callers still spell.
+  changed=$( { git -c core.quotePath=false diff --name-only --no-renames "$base"
+               git -c core.quotePath=false ls-files --others --exclude-standard; } | LC_ALL=C sort -u)
+  full=0
+  while IFS= read -r p; do
+    case "$p" in
+      bin/fm-test.sh|.github/*) full=1 ;;
+      tests/*.test.sh) ;;
+      tests/*) full=1 ;;
+    esac
+  done <<< "$changed"
+  if [ "$full" = 0 ]; then
+    keys=$(mktemp "${TMPDIR:-/tmp}/fm-test-keys.XXXXXX")
+    [ -z "$changed" ] || printf '%s\n' "$changed" | sed 's|.*/||' | LC_ALL=C sort -u > "$keys"
+    # A test that globs bin/* reaches every bin/ file without naming it.
+    case $'\n'"$changed" in *$'\n'bin/*) echo 'bin/*' >> "$keys" ;; esac
+    # A bin/ script that mentions a changed file is changed too, as far as its tests go.
+    while :; do
+      before=$(wc -l < "$keys")
+      [ "$before" -eq 0 ] && break
+      { cat "$keys"; grep -lF -f "$keys" bin/*.sh bin/*.mjs bin/backends/*.sh 2>/dev/null | sed 's|.*/||'; } \
+        | LC_ALL=C sort -u > "$keys.next"
+      mv "$keys.next" "$keys"
+      [ "$(wc -l < "$keys")" -eq "$before" ] && break
+    done
+    kept=()
+    for f in "${FILES[@]}"; do
+      if grep -qxF "$(basename "$f")" "$keys" || { [ -s "$keys" ] && grep -qF -f "$keys" "$f"; }; then
+        kept+=("$f")
+      fi
+    done
+    rm -f "$keys"
+    FILES=(${kept[@]+"${kept[@]}"})
+  fi
+fi
+
+# Split the file set into a parallel phase and a serial tail phase.
+PARALLEL=()
+SERIAL=()
+for f in "${FILES[@]}"; do
+  name=$(basename "$f")
+  case " $SERIAL_NAMES " in
+    *" $name "*) SERIAL+=("$f") ;;
+    *) PARALLEL+=("$f") ;;
+  esac
+done
+
+if [ -n "$SHARD" ]; then
+  shard_i=${SHARD%/*}
+  shard_n=${SHARD#*/}
+  case "$SHARD" in
+    *[!0-9/]*|/*|*/|*/*/*) echo "fm-test.sh: --shard needs <i>/<n>, got $SHARD" >&2; exit 1 ;;
+  esac
+  shard_i=$(( 10#$shard_i ))
+  shard_n=$(( 10#$shard_n ))
+  [ "$shard_i" -ge 1 ] && [ "$shard_i" -le "$shard_n" ] \
+    || { echo "fm-test.sh: --shard $SHARD is out of range" >&2; exit 1; }
+  if [ "$shard_n" -gt 1 ] && [ "$shard_i" -eq 1 ]; then
+    SERIAL=()
+  elif [ "$shard_n" -gt 1 ]; then
+    PARALLEL=()
+    bins=$(( shard_n - 1 ))
+    loads=()
+    for (( b = 1; b <= bins; b++ )); do loads[b]=0; done
+    kept=()
+    while IFS=$'\t' read -r w f; do
+      best=1
+      for (( b = 2; b <= bins; b++ )); do
+        [ "${loads[b]}" -lt "${loads[best]}" ] && best=$b
+      done
+      loads[best]=$(( loads[best] + w ))
+      [ "$best" -eq $(( shard_i - 1 )) ] && kept+=("$f")
+    done < <(for f in ${SERIAL[@]+"${SERIAL[@]}"}; do
+               printf '%s\t%s\n' "$(serial_weight "$(basename "$f")")" "$f"
+             done | LC_ALL=C sort -t$'\t' -k1,1nr -k2,2)
+    SERIAL=(${kept[@]+"${kept[@]}"})
+  fi
+fi
+
 if [ "$MODE" = list ]; then
-  printf '%s\n' "${FILES[@]}"
+  [ "$(( ${#PARALLEL[@]} + ${#SERIAL[@]} ))" -eq 0 ] \
+    || printf '%s\n' ${PARALLEL[@]+"${PARALLEL[@]}"} ${SERIAL[@]+"${SERIAL[@]}"}
+  exit 0
+fi
+if [ "$(( ${#PARALLEL[@]} + ${#SERIAL[@]} ))" -eq 0 ]; then
+  echo "fm-test.sh: no tests in this selection"
   exit 0
 fi
 
@@ -244,16 +368,6 @@ trap 'rm -rf "$RUNDIR"' EXIT
 # failure. It fails closed, but it fails for a reason that has nothing to do with the tests.
 WORKER_CMD=("$ROOT/bin/fm-test.sh" --worker --rundir "$RUNDIR" --timeout "$TIMEOUT")
 
-# Split the file set into a parallel phase and a serial tail phase.
-PARALLEL=()
-SERIAL=()
-for f in "${FILES[@]}"; do
-  name=$(basename "$f")
-  case " $FM_TEST_SERIAL_ONLY " in
-    *" $name "*) SERIAL+=("$f") ;;
-    *) PARALLEL+=("$f") ;;
-  esac
-done
 if [ "$MODE" = serial ]; then
   SERIAL=(${PARALLEL[@]+"${PARALLEL[@]}"} ${SERIAL[@]+"${SERIAL[@]}"})
   PARALLEL=()

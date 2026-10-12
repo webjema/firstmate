@@ -63,7 +63,7 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 
 Discover tests with `bin/fm-test.sh --list`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly (`bin/fm-test.sh tests/<subject>.test.sh`) to focus on a subject.
 Tests that need an explicit opt-in skip themselves and print the gate needed to enable them, so the full run above is always safe.
-Run the affected tests as you work and the full `bin/fm-test.sh` once at the end - it is parallel, so the whole suite costs about as long as its slowest single test.
+Run the affected tests as you work (`bin/fm-test.sh --affected origin/main` selects them) and the full `bin/fm-test.sh` once at the end. A pull request's CI runs the affected tests; `main` runs the full suite.
 
 ## Questions
 

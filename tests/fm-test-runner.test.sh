@@ -281,6 +281,18 @@ test_worker_reports_under_the_slug_the_runner_dispatched() {
   pass "a worker reports under the slug of the exact path string it was given"
 }
 
+# CI runs one job per shard, so a test that lands in no shard never runs anywhere, and
+# a merge goes green without it.
+test_shards_partition_the_file_set() {
+  local all n i union
+  all=$("$FM_TEST" --list | LC_ALL=C sort)
+  for n in 1 2 3 5 8; do
+    union=$(for (( i = 1; i <= n; i++ )); do "$FM_TEST" --list --shard "$i/$n"; done | LC_ALL=C sort)
+    [ "$union" = "$all" ] || fail "shards 1..$n/$n must hold every test exactly once"
+  done
+  pass "the shards of every width partition the file set"
+}
+
 test_ci_invokes_this_script_and_respells_nothing() {
   local ci="$ROOT/.github/workflows/ci.yml"
   assert_grep 'bin/fm-test.sh' "$ci" \
@@ -303,4 +315,5 @@ test_path_with_a_space_is_not_split
 test_runs_from_a_non_root_cwd
 test_a_sigkill_is_not_mislabelled_a_timeout
 test_worker_reports_under_the_slug_the_runner_dispatched
+test_shards_partition_the_file_set
 test_ci_invokes_this_script_and_respells_nothing

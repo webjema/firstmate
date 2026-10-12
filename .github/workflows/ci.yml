@@ -30,12 +30,17 @@ jobs:
       # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
       - run: bin/fm-lint.sh
 
-  tests:
-    name: Behavior tests
+  test-shards:
+    name: Behavior tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
-    # The suite should finish in ~2-3 minutes; this generous cap fails loudly on a
+    # A shard should finish in ~2 minutes; this generous cap fails loudly on a
     # hung watcher or tmux test instead of riding GitHub's 360-minute default.
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # bin/fm-test.sh owns what each shard holds; this list owns how many there are.
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -59,11 +64,28 @@ jobs:
           npm install -g tasks-axi
           tasks-axi --version
       # Single owner of the test-run definition (file set + parallelism + serial-only
-      # exceptions + per-test timeout). Do not re-spell the loop here; a crewmate runs
-      # the identical `bin/fm-test.sh` locally, so a local pass IS a CI pass. It runs
-      # every test even after a failure, then prints each failing test's buffered
-      # output under a banner naming its file.
-      - run: bin/fm-test.sh
+      # exceptions + per-test timeout + shards + affected selection). Do not re-spell
+      # the loop here; a crewmate runs the identical `bin/fm-test.sh` locally, so a
+      # local pass IS a CI pass. A PR runs the tests its change affects; main runs all.
+      - name: Run shard
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            bin/fm-test.sh --shard ${{ matrix.shard }}/${{ strategy.job-total }} --affected "origin/$BASE_REF"
+          else
+            bin/fm-test.sh --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+          fi
+
+  # Branch protection requires this job name, so it stays one check over all shards.
+  tests:
+    name: Behavior tests
+    runs-on: ubuntu-latest
+    needs: test-shards
+    if: always()
+    steps:
+      - run: '[ "${{ needs.test-shards.result }}" = success ]'
 
   invariants:
     name: Repo invariants
