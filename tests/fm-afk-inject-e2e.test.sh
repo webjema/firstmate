@@ -316,10 +316,13 @@ test_scenario_a() {
 
   # Now submit the human's text (Enter). The pane goes idle.
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
-  sleep 0.5
 
   # Wait for the daemon to retry injection (housekeeping tick = 1s).
-  sleep 6
+  local i=0
+  while [ "$i" -lt 130 ] && ! grep -q 'Supervisor escalate' "$LOG_FILE"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
 
   # Assert: human text was submitted alone (as a user message).
   grep -q 'human draft text' "$LOG_FILE" \

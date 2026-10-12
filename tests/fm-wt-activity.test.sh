@@ -79,7 +79,8 @@ test_snapshot_and_progress_rule() {
   s2=$(wt_activity_snapshot "$wt")
   wt_activity_advanced "$s1" "$s2" || fail "a new commit was not read as progress"
 
-  sleep 1
+  # Back-date the index so the edit lands in a strictly later second than the commit.
+  touch -d '2 seconds ago' "$wt/.git/index"
   printf 'edit\n' >> "$wt/a.txt"
   s3=$(wt_activity_snapshot "$wt")
   wt_activity_advanced "$s2" "$s3" || fail "an uncommitted edit was not read as progress"
@@ -103,7 +104,7 @@ test_dirty_file_mtimes_are_batched_not_sampled() {
   while [ "$i" -le 25 ]; do printf 'x\n' > "$wt/f$i.txt"; i=$((i + 1)); done
   git -C "$wt" add -A
   git -C "$wt" commit -qm many
-  sleep 1
+  touch -d '2 seconds ago' "$wt/.git/index"
   i=1
   while [ "$i" -le 25 ]; do printf 'y\n' >> "$wt/f$i.txt"; i=$((i + 1)); done
 
@@ -201,6 +202,13 @@ test_signal_absorbed_when_worktree_advanced() {
 
 # --- a spinning crew on a live pane is surfaced ------------------------------
 
+# Seed the watcher's worktree record as last moved 10s ago, past FM_WT_STILL_SECS=2,
+# so the first poll already reads the worktree as still.
+seed_still_worktree() {  # <state> <task> <worktree>
+  printf '%s\n' "$(wt_activity_snapshot "$3")" > "$1/.wt-snap-$2"
+  printf '%s\n' "$(( $(date +%s) - 10 ))" > "$1/.wt-since-$2"
+}
+
 spin_watch() {  # <state> <fakebin> <out> <window> <capture> [extra env...]
   local state=$1 fakebin=$2 out=$3 window=$4 capture=$5
   shift 5
@@ -223,6 +231,7 @@ test_spinning_crew_surfaces() {
   printf 'working: looking into it\n' > "$state/ws1.status"
   printf '%s' "$(stat -c '%s:%Y' "$state/ws1.status" 2>/dev/null || stat -f '%z:%Fm' "$state/ws1.status")" \
     > "$state/.seen-ws1_status"
+  seed_still_worktree "$state" ws1 "$wt"
 
   spin_watch "$state" "$fakebin" "$out" "$window" "$capture"
   pid=$!
@@ -248,9 +257,10 @@ test_spinning_gates() {
   printf 'working: reading the code\n' > "$state/wg1.status"
   printf '%s' "$(stat -c '%s:%Y' "$state/wg1.status" 2>/dev/null || stat -f '%z:%Fm' "$state/wg1.status")" \
     > "$state/.seen-wg1_status"
+  seed_still_worktree "$state" wg1 "$wt"
   spin_watch "$state" "$fakebin" "$out" "$window" "$capture"
   pid=$!
-  sleep 6
+  sleep 4
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   grep -q 'class=spinning' "$out" && fail "a scout with a motionless worktree was called spinning"
@@ -260,9 +270,10 @@ test_spinning_gates() {
   rm -f "$state"/.wt-* "$state"/.hash-* "$out"
   fm_write_meta "$state/wg1.meta" "window=$window" "worktree=$wt" "kind=ship"
   printf 'esc to interrupt\n' > "$capture"
+  seed_still_worktree "$state" wg1 "$wt"
   spin_watch "$state" "$fakebin" "$out" "$window" "$capture"
   pid=$!
-  sleep 6
+  sleep 4
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   grep -q 'class=spinning' "$out" && fail "a busy pane (a running build) was called spinning"
