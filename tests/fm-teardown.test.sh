@@ -635,6 +635,33 @@ test_pr_mode_truly_unpushed_refuses() {
   pass "a PR-mode worktree with genuinely unlanded work is refused (safety preserved)"
 }
 
+# The post-commit backup hook that bin/fm-hooks-install.sh installs pushes every
+# commit to refs/heads/wip/<branch>-<host>. Once any fetch pulls that in, HEAD IS
+# reachable from a remote-tracking ref - so a plain `--not --remotes` would read
+# genuinely undelivered work as pushed and remove the worktree without a word,
+# leaving it alive only in a namespace nothing watches. A backup is not a delivery.
+test_wip_backup_ref_is_not_a_delivery() {
+  local case_dir rc
+  case_dir=$(make_case nm-wipbackup)
+  write_meta "$case_dir" PR ship
+  wt_commit_file "$case_dir" feature.txt hello "backed up, never delivered"
+
+  git -C "$case_dir/wt" push -q origin "HEAD:refs/heads/wip/fm/task-x1-testhost"
+  git -C "$case_dir/project" fetch -q origin
+  git -C "$case_dir/project" rev-parse --quiet --verify \
+    refs/remotes/origin/wip/fm/task-x1-testhost >/dev/null \
+    || fail "nm-wipbackup: fixture never created the backup remote-tracking ref, so this proves nothing"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-wipbackup: teardown must still refuse - a wip/ backup is not a delivery"
+  grep -q REFUSED "$case_dir/stderr" || fail "nm-wipbackup: no REFUSED line in stderr"
+  pass "a wip/ backup ref does not make undelivered work look landed to teardown"
+}
+
 # Report PR 7 as OPEN (never merged) - the state at the moment the crew opens its PR,
 # which is now when firstmate releases the workspace (AGENTS.md section 6, Teardown).
 # It must answer the PLAIN `--json state` query teardown actually makes; a mock that only
@@ -1748,6 +1775,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_pr_mode_origin_remote_allows
 test_pr_mode_truly_unpushed_refuses
+test_wip_backup_ref_is_not_a_delivery
 test_pr_open_releases_workspace_but_keeps_the_ci_watch_and_merge_state
 test_merge_still_works_after_the_workspace_is_released
 test_second_teardown_after_the_merge_purges_the_state

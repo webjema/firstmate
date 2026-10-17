@@ -45,7 +45,10 @@
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
+# upstream-contribution PRs pushed to a fork satisfy this in any mode) EXCEPT the
+# refs/remotes/*/wip/* backup namespace that the post-commit hook in
+# bin/fm-hooks-install.sh writes on every commit - a backup nothing watches is not
+# a delivery, and counting one would turn this refusal into a silent removal, OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
@@ -133,6 +136,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-peer-lib.sh
 . "$SCRIPT_DIR/fm-peer-lib.sh"
+# shellcheck source=bin/fm-unlanded-lib.sh
+. "$SCRIPT_DIR/fm-unlanded-lib.sh"
 FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
@@ -246,6 +251,20 @@ patch_id_for_commit() {
     | awk 'NR == 1 { print $1 }'
 }
 
+# The ref set that proves work exists somewhere other than this one disk, and the
+# one namespace deliberately excluded from it.
+#
+# refs/remotes/*/wip/* are the post-commit backup refs that the hook in
+# bin/fm-hooks-install.sh writes on every commit. They are a namespace nothing
+# watches, whose entire purpose is to survive a crew dying mid-task. Counting one
+# as "pushed" would silently disarm teardown's loudest refusal: work that should
+# have become a PR would be removed from disk without a word, alive only in a
+# namespace no one reads. A backup is not a delivery.
+#
+# fm-unlanded-lib.sh owns the exclusion and its exact spelling, because
+# bin/fm-pool-status.sh must answer this identically or a slot reports "nothing
+# to lose" beside the command that discards it.
+
 unpushed_patches_are_in_pr_head() {
   local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
@@ -259,7 +278,7 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  unpushed=$(git -C "$WT" log --format=%H HEAD "${NOT_ON_A_REMOTE[@]}" -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -642,7 +661,7 @@ validate_worktree_teardown_safety() {
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$)' | head -1 || true)
 
-  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD "${NOT_ON_A_REMOTE[@]}" -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
