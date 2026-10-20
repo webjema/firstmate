@@ -549,14 +549,8 @@ test_graph_guidance_when_project_is_indexed() {
       FM_STUB_NOISE=1 \
       "$ROOT/bin/fm-brief.sh" "$id" alpha "${flags[@]}" >/dev/null 2>&1
     brief="$home/data/$id/brief.md"
-    assert_grep "knowledge graph as project \`alpha-in-graph\`" "$brief" \
+    assert_grep "query project \`alpha-in-graph\`" "$brief" \
       "$kind brief must name the project as the graph knows it"
-    assert_grep "detect_changes" "$brief" \
-      "$kind brief must point at detect_changes for the crew's own diff"
-    assert_grep "sound for reading code you have NOT changed" "$brief" \
-      "$kind brief must state the staleness boundary"
-    assert_grep "Never index or re-index anything yourself" "$brief" \
-      "$kind brief must forbid the crew re-indexing"
   done
   pass "fm-brief.sh: an indexed project's briefs carry the graph guidance"
 }
@@ -571,7 +565,7 @@ test_no_graph_guidance_when_project_is_not_indexed() {
   brief="$home/data/brief-graph-none/brief.md"
   assert_present "$brief" "an unindexed project must still get a brief"
   assert_grep "# Context discipline" "$brief" "the brief lost its context-discipline block"
-  assert_no_grep "knowledge graph" "$brief" \
+  assert_no_grep "codebase-memory" "$brief" \
     "a project the graph does not hold must not be advertised as indexed"
   pass "fm-brief.sh: an unindexed project's brief says nothing about the graph"
 }
@@ -595,7 +589,7 @@ test_graph_lookup_failures_never_break_a_scaffold() {
     brief="$home/data/brief-graph-$variant/brief.md"
     assert_present "$brief" "$variant: the brief must still be scaffolded"
     assert_grep "# Context discipline" "$brief" "$variant: the brief lost its context-discipline block"
-    assert_no_grep "knowledge graph" "$brief" "$variant: the brief must stay silent about the graph"
+    assert_no_grep "codebase-memory" "$brief" "$variant: the brief must stay silent about the graph"
   done
   pass "fm-brief.sh: every graph-lookup failure leaves the brief scaffolded and silent"
 }

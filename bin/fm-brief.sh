@@ -65,8 +65,10 @@
 # blocked when firstmate must act.
 # Ship and scout briefs carry a context-discipline block. When the project is
 # actually indexed in the codebase-memory knowledge graph (checked at scaffold time
-# via bin/fm-graph-lib.sh), that block also names the graph project, states the
-# HEAD-pinned staleness boundary, and forbids the crew re-indexing; when it is not
+# via bin/fm-graph-lib.sh), that block also sends structural questions to the graph
+# first, with the exact ToolSearch string that loads its deferred MCP tools and the
+# graph's project name, states the default-branch snapshot boundary, and forbids
+# index_repository and delete_project; when it is not
 # indexed, or the graph is unavailable, the guidance is absent rather than untrue.
 # EVERY scaffold - ship, scout, and secondmate charter - carries the found-it-didn't-fix
 # block: a finding that does not stop the crew finishing is filed as a tracked task with
@@ -274,9 +276,9 @@ graph_guidance() {
   name=$(fm_graph_project_for_path "$dir" 2>/dev/null) || return 0
   cat <<EOF
 
-- This project is indexed in the \`codebase-memory\` knowledge graph as project \`$name\`: query it (\`search_code\`, \`search_graph\`, \`get_architecture\`, \`trace_path\`) to locate and understand code instead of grepping the tree into your context. The \`codebase-memory\` skill documents the query surface.
-- The index is pinned to the clone's HEAD, not your branch, so it is sound for reading code you have NOT changed and wrong for verifying your own diff: use \`detect_changes\` to map your local changes onto it, and your own reads and tests for anything about your diff.
-- Never index or re-index anything yourself: that would multiply cost and pollute the graph with per-branch projects. Keeping it fresh is firstmate's job.
+- Structural questions - who calls X, call paths, where a symbol is defined, what a change affects - go to the \`codebase-memory\` graph first. On Claude Code, load its tools with \`ToolSearch\` query \`select:mcp__codebase-memory__search_graph,mcp__codebase-memory__trace_path,mcp__codebase-memory__search_code,mcp__codebase-memory__get_code_snippet\`. Then query project \`$name\`.
+- The graph is a snapshot of the default branch. Use grep and reads for text search and for code changed on your own branch.
+- Never call \`index_repository\` or \`delete_project\`.
 EOF
 }
 
