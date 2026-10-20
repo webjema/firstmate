@@ -8,6 +8,17 @@
 # form resolved against this home's projects dir ($FM_HOME/projects, or
 # $FM_PROJECTS_OVERRIDE). fm-fleet-sync.sh passes an already-resolved path.
 #
+# INDEXES ONLY ORIGIN'S DEFAULT-BRANCH TIP. Before indexing a clone that has an
+# origin, it runs bin/fm-fleet-sync.sh on it - the one fast-forward path, with its
+# never-force rules - and then indexes only when HEAD equals origin/<default>.
+# Otherwise it prints "<project>: graph NOT refreshed: ..." on stdout with the
+# sync's own reason, and indexes nothing; a tracked change at the tip is refused
+# the same way. A clone with no origin, a local-only project, or a plain directory
+# is indexed as it stands. FM_GRAPH_SYNC_INNER set means the caller is fm-fleet-sync.sh, which just
+# synced, so the sync is skipped and only the HEAD check runs. Callers match the
+# exact text "graph refreshed" for success (optiroq-workstation's pipeline
+# closeout), so no other line may contain it.
+#
 # BEST-EFFORT BY CONTRACT, and it exits 0 on every graph outcome so no caller can
 # go red because a cache is unavailable. A refresh that succeeds prints one
 # "<project>: graph refreshed ..." line on stdout; every skip and every failure
@@ -37,6 +48,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-graph-lib.sh
 . "$SCRIPT_DIR/fm-graph-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 
 # --help prints this file's whole header, which is the contract's one home.
 usage() {
@@ -106,6 +119,37 @@ if [ "$LOOKUP" -eq 2 ]; then
 elif [ "$LOOKUP" -ne 0 ]; then
   echo "$LABEL: graph skipped: not found in the graph (index it once to opt in to refreshes)" >&2
   exit 0
+fi
+
+# Gated only for a clone of its own (not a plain dir that git resolves to an
+# enclosing repo) that tracks an origin and is not a local-only project.
+TOP=$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null) || TOP=
+GATED=no
+if [ -n "$TOP" ] && [ "$TOP" = "$(cd "$DIR" && pwd -P)" ] \
+    && git -C "$DIR" remote get-url origin >/dev/null 2>&1; then
+  PMODE=$("$FM_ROOT/bin/fm-project-mode.sh" "$LABEL" 2>/dev/null || echo "PR off")
+  [ "${PMODE%% *}" = local-only ] || GATED=yes
+fi
+if [ "$GATED" = yes ]; then
+  SYNC_OUT=
+  if [ -z "${FM_GRAPH_SYNC_INNER:-}" ]; then
+    SYNC_OUT=$(FM_GRAPH_SYNC_INNER=1 "$FM_ROOT/bin/fm-fleet-sync.sh" "$DIR" 2>/dev/null) || true
+    [ -z "$SYNC_OUT" ] || printf '%s\n' "$SYNC_OUT" >&2
+  fi
+  HEAD_REV=$(git -C "$DIR" rev-parse --verify --quiet HEAD 2>/dev/null) || HEAD_REV=
+  TIP_REV=
+  if DEFAULT=$(default_branch "$DIR"); then
+    TIP_REV=$(git -C "$DIR" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT^{commit}" 2>/dev/null) || TIP_REV=
+  fi
+  if [ -z "$TIP_REV" ] || [ "$HEAD_REV" != "$TIP_REV" ]; then
+    WHY=$(printf '%s\n' "$SYNC_OUT" | sed '/^[[:space:]]*$/d' | tail -n 1)
+    echo "$LABEL: graph NOT refreshed: HEAD ${HEAD_REV:0:9} is not origin/${DEFAULT:-<default>} ${TIP_REV:0:9}${WHY:+ ($WHY)}"
+    exit 0
+  fi
+  if [ -n "$(git -C "$DIR" status --porcelain --untracked-files=no 2>/dev/null | head -1)" ]; then
+    echo "$LABEL: graph NOT refreshed: tracked files have uncommitted changes at origin/$DEFAULT"
+    exit 0
+  fi
 fi
 
 if ! NODES=$(fm_graph_reindex "$DIR" "$NAME"); then

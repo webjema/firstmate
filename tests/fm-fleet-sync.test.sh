@@ -698,6 +698,61 @@ test_graph_unindexed_project_is_not_indexed() {
   pass "fleet-sync: a merge never indexes a project that was not already in the graph"
 }
 
+# run_reindex_graph <home> <clone>: the graph re-index entry point, which syncs the
+# clone through fleet-sync before it indexes. Stdout only.
+run_reindex_graph() {
+  local home=$1
+  shift
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_GRAPH_CLI="$GRAPH_STUB" \
+    "$ROOT/bin/fm-graph-reindex.sh" "$@" 2>/dev/null
+}
+
+# An untracked file once held the optiroq clone 398 commits behind for a week, and
+# every re-index in that week indexed the stale tree and still said "refreshed".
+test_reindex_untracked_file_fast_forwards_and_indexes_tip() {
+  local home clone out log name
+  home=$(graph_home)
+  clone=$(build_pair "$home" alpha)
+  advance_origin "$home" alpha C1
+  printf 'local notes\n' > "$clone/notes.html"
+  log="$home/graph-calls.log"
+  name=$(fm_graph_derived_name "$(cd "$clone" && pwd -P)")
+  fm_graph_stub_projects "$home/graph.json" "$name" "$clone"
+  out=$(FM_STUB_PROJECTS="$home/graph.json" FM_STUB_LOG="$log" run_reindex_graph "$home" "$clone")
+  [ "$(head_sha "$clone")" = "$(git -C "$home/work-alpha" rev-parse HEAD)" ] \
+    || fail "an untracked file must not block the fast-forward"
+  grep -q "local notes" "$clone/notes.html" || fail "the untracked file must stay in place"
+  assert_contains "$out" "graph refreshed (project=$name" "the clone at origin's tip must be indexed"
+  assert_grep "index_repository" "$log" "the clone at origin's tip must be indexed"
+  pass "graph-reindex: an untracked file no longer blocks the sync, and origin's tip is indexed"
+}
+
+test_reindex_tracked_change_is_untouched_and_not_indexed() {
+  local home clone out log before
+  home=$(graph_home)
+  clone=$(build_pair "$home" alpha)
+  advance_origin "$home" alpha C1
+  before=$(head_sha "$clone")
+  printf 'uncommitted edit\n' >> "$clone/file.txt"
+  log="$home/graph-calls.log"
+  fm_graph_stub_projects "$home/graph.json" "$(fm_graph_derived_name "$(cd "$clone" && pwd -P)")" "$clone"
+  out=$(FM_STUB_PROJECTS="$home/graph.json" FM_STUB_LOG="$log" run_reindex_graph "$home" "$clone")
+  [ "$(head_sha "$clone")" = "$before" ] || fail "a clone with a tracked change must not move"
+  grep -q "uncommitted edit" "$clone/file.txt" || fail "the tracked change must not be discarded"
+  assert_contains "$out" "alpha: graph NOT refreshed" "a stale clone must say the graph was not refreshed"
+  assert_contains "$out" "STUCK" "the not-refreshed line must carry the sync's reason"
+  assert_not_contains "$out" "graph refreshed" "a stale tree must never report graph refreshed"
+  assert_no_grep "index_repository" "$log" "a stale tree must never be indexed"
+  # The same edit on a clone already at the tip: HEAD matches, the tree does not.
+  git -C "$clone" checkout -q -- file.txt
+  git -C "$clone" merge -q --ff-only origin/main
+  printf 'uncommitted edit\n' >> "$clone/file.txt"
+  out=$(FM_STUB_PROJECTS="$home/graph.json" FM_STUB_LOG="$log" run_reindex_graph "$home" "$clone")
+  assert_contains "$out" "alpha: graph NOT refreshed" "a tracked change at the tip must not be indexed"
+  assert_no_grep "index_repository" "$log" "a tracked change at the tip must never be indexed"
+  pass "graph-reindex: a tracked change still blocks the sync, and the stale tree is not indexed"
+}
+
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
@@ -724,3 +779,5 @@ test_graph_refreshed_after_fast_forward
 test_graph_untouched_when_already_current
 test_graph_failure_keeps_sync_green
 test_graph_unindexed_project_is_not_indexed
+test_reindex_untracked_file_fast_forwards_and_indexes_tip
+test_reindex_tracked_change_is_untouched_and_not_indexed
