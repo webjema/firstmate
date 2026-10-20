@@ -72,6 +72,7 @@ See [`proposals/context-management.md`](proposals/context-management.md) for the
 The `codebase-memory` knowledge graph is a per-project code index the whole fleet can query instead of grepping a tree into context.
 Firstmate keeps it honest from two ends: `bin/fm-fleet-sync.sh` refreshes a project's index right after that clone's default branch actually moves, and `bin/fm-brief.sh` tells a crew the graph exists only when it actually holds that project.
 Both go through `bin/fm-graph-lib.sh`, the single owner of the CLI contract, and both are best-effort: an absent binary, a CLI error, a timeout, or an unindexed project is silent and never fails the caller.
+`bin/fm-graph-reindex.sh` indexes only origin's default-branch tip: it fast-forwards the clone through fleet sync first and, when the clone cannot advance, prints `graph NOT refreshed` with the reason instead of indexing a stale tree.
 Only projects the graph already holds are refreshed; a first index is a decision, not a side effect of a merge, so index a project once by hand to opt it into refreshes.
 
 `config/graph-reindex-mode` (local, gitignored) carries one index mode on its first non-empty, non-comment line: `full`, `moderate`, `fast`, `cross-repo-intelligence`, or `off`.

@@ -11,6 +11,9 @@
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
+# An untracked file is not dirt: it never blocks the fast-forward and stays in
+# place after it. Git's own --ff-only merge refuses when an incoming commit would
+# create a path an untracked file already holds, so that case still skips.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
@@ -18,6 +21,8 @@
 # A clone whose default branch actually moved also gets its codebase-memory
 # knowledge graph refreshed, best-effort, via bin/fm-graph-reindex.sh; see
 # refresh_graph and that script's header. It never affects the sync's outcome.
+# FM_GRAPH_SYNC_INNER set means the caller is bin/fm-graph-reindex.sh, which
+# indexes on its own after this sync, so no refresh is started from here.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
@@ -264,7 +269,7 @@ prune_gone_branches() {
 # after this supervision cycle ended. Measured refresh of a 14,735-node clone is
 # 0.1-4.4s, so the bound is headroom, not a working limit.
 refresh_graph() {
-  "$FM_ROOT/bin/fm-graph-reindex.sh" "$PROJ" || true
+  FM_GRAPH_SYNC_INNER=1 "$FM_ROOT/bin/fm-graph-reindex.sh" "$PROJ" || true
 }
 
 # True when some worktree of $PROJ has $DEFAULT checked out (so we cannot attach
@@ -339,7 +344,7 @@ sync_project() {
       return 0
     fi
   fi
-  [ "$rc" -ne 10 ] || refresh_graph
+  [ "$rc" -ne 10 ] || [ -n "${FM_GRAPH_SYNC_INNER:-}" ] || refresh_graph
   return 0
 }
 
@@ -385,7 +390,7 @@ sync_project_locked() {
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no
-  [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+  [ -z "$(git -C "$PROJ" status --porcelain --untracked-files=no 2>/dev/null | head -1)" ] || dirty=yes
   recovered=no
 
   if [ "$cur" != "$DEFAULT" ]; then
