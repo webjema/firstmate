@@ -1,6 +1,6 @@
 ---
 name: triage
-description: Drain the fleet finding queue - verify each finding held for automated triage against the current code, then dispatch the real ones, close the fixed or obsolete ones, and escalate only a genuine product or access question. Use when the session digest reports findings awaiting the triage drain, when the fleet is otherwise idle, or when the user invokes /triage. It is the judgment half of bin/fm-triage-findings.sh, which does the mechanics.
+description: Drain the fleet finding queue and the product board's Triage section - verify each finding held for automated triage against the current code, then dispatch the real ones, close the fixed or obsolete ones, and escalate only a genuine product or access question. Use when the session digest reports findings awaiting the triage drain, when the fleet is otherwise idle, or when the user invokes /triage. It is the judgment half of bin/fm-triage-findings.sh, which does the mechanics.
 user-invocable: true
 metadata:
   internal: true
@@ -55,6 +55,7 @@ The verdicts, and what each means:
 
 - **fixed** - the code already does the right thing. The defect the finding describes is not present at `where` (or wherever it moved). Evidence names the code that fixes it. Filings that were already resolved between filing and now land here, and they must close on the evidence, not be dispatched as if still open.
 - **obsolete** - the finding no longer applies at all: the code it pointed at is gone, the design changed out from under it, or a later correction in the finding's own body withdrew it. Evidence names what makes it moot.
+- **duplicate** - another open finding already describes the same defect. Pass its id with `--duplicate-of`. Evidence names what makes them the same defect.
 - **real** - the defect still reproduces in the current code. Evidence names the line and the failure. This one becomes work.
 - **decision** - verifying it surfaced a genuine product or architecture call that only the captain can settle - which way to build the fix, not whether the bug is real. This is the only verdict that reaches a human, and it must carry the exact question.
 
@@ -67,6 +68,7 @@ One call per finding, and the evidence is not optional - a closed finding must s
 ```sh
 bin/fm-triage-findings.sh apply <id> --verdict fixed    --evidence "<what makes it already-fixed, with file:line>"
 bin/fm-triage-findings.sh apply <id> --verdict obsolete --evidence "<what makes it moot>"
+bin/fm-triage-findings.sh apply <id> --verdict duplicate --duplicate-of <other-id> --evidence "<why they are the same defect>"
 bin/fm-triage-findings.sh apply <id> --verdict real     --evidence "<the line and the failure>"
 bin/fm-triage-findings.sh apply <id> --verdict decision --evidence "<what you verified>" --question "<the exact call the captain must make>"
 ```
@@ -85,6 +87,21 @@ When you see `escalated:` on a `real` verdict, that is the floor doing its job.
 Repeat from step 1 until `list` is empty.
 Then tell the captain the outcome in plain terms - how many findings became work, how many closed as already-fixed or obsolete, and every question that now needs their call, each with its finding.
 Report the questions as questions, not as "the drain is done": the dispatched and closed findings are bookkeeping, but an escalated decision is the one thing that was actually waiting for them.
+
+## Draining the product board
+
+A finding about a product repository is filed as a card in the board's Triage section, not in the fleet backlog.
+Drain it the same way, with `--asana` on every call, and `--repo <owner/repo>` for a repository that has its own board:
+
+```sh
+bin/fm-triage-findings.sh list --asana --repo <owner/repo>
+bin/fm-triage-findings.sh apply <card-gid> --asana --repo <owner/repo> --verdict real --evidence "<the line and the failure>"
+```
+
+The verdicts and the safety floor are the same.
+A `real` card moves to the board's agent queue, where the pipeline picks it up; a `decision` or a danger-marked `real` card moves to the captain's section.
+A `fixed`, `obsolete` or `duplicate` card is completed, and a duplicate's text is first copied onto the card it repeats.
+Each record also carries `severity`; verify the S0 and S1 cards first.
 
 ## The first drain of an old queue
 

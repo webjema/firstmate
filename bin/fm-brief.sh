@@ -168,10 +168,12 @@ findings_block() {  # <command-prefix> <where-to-list-them>
 You will notice defects and risks that are not part of this task. A report is not a queue: a finding you only write up is read once and never becomes work.
 **One question decides what happens, and it is the only one: does this stop you finishing THIS task?**
 - **No** - file it as a tracked task and keep going. Do not fix it, do not widen your diff, do not stop to ask whether it is worth filing:
-  \`$cmd --blocking no --title "<what is wrong>" --where "<file:line>" --why "<why you believe it is wrong>" --expected "<what you expected instead>"\`
-  File it the moment you find it rather than batching them to the end, because a compaction or a crash between finding and filing is exactly how findings are lost. The script picks the right tracker, refuses to file the same finding twice, and holds it locally when a tracker is unreachable - so it never fails your task and never drops the finding. Add \`--priority 0-4\` when the severity is worth recording.
+  \`$cmd --blocking no --severity <S0-S3> --title "<what is wrong>" --where "<file:line>" --why "<why you believe it is wrong>" --expected "<what you expected instead>"\`
+  \`--severity\` is required. S0: security or tenant isolation broken, data lost or corrupted, wrong numbers or a wrong email to a buyer or supplier, or prod down. S1: the same harm on alpha or beta only, or with a workaround. S2: internal correctness or tooling. S3: docs, tests, nice-to-have.
+  A defect is the default. A product idea is \`--kind roadmap\` and a docs gap is \`--kind docs\`; neither is a defect. A missing test is \`--kind test --breaks "<the shipped behaviour that breaks silently without it>"\`; if you cannot name one, do not file it.
+  File it the moment you find it rather than batching them to the end, because a compaction or a crash between finding and filing is exactly how findings are lost. The script picks the right tracker, refuses to file the same finding twice (it also matches a reworded repeat and comments on the open card), and holds it locally when a tracker is unreachable - so it never fails your task and never drops the finding.
 - **Yes** - it blocks you, and filing is not a way past it. Fix it only if the scope is small and clearly adjacent, and say that you did; otherwise append \`blocked:\` or \`needs-decision:\` under the Rules above and stop. The script refuses \`--blocking yes\` for exactly this reason.
-Severity, whose code it is, and whether it feels worth someone's time set the filed task's priority; they never decide whether to file.
+Severity, whose code it is, and whether it feels worth someone's time set the filed task's severity; they never decide whether to file.
 $list
 EOF
 }

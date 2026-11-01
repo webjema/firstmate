@@ -35,7 +35,7 @@ new_case() {
 seed() {  # <title> <where> <why> <expected> [--needs X --question Y]
   local title=$1 where=$2 why=$3 expected=$4; shift 4
   local out
-  out=$(FM_HOME="$HOME_DIR" "$FILE" --scope fleet --blocking no \
+  out=$(FM_HOME="$HOME_DIR" "$FILE" --scope fleet --blocking no --severity S2 \
     --title "$title" --where "$where" --why "$why" --expected "$expected" "$@") ||
     { echo "seed failed: $out" >&2; return 1; }
   printf '%s' "$out" | sed -n 's/^filed: backlog //p' | sed 's/ \[.*//'

@@ -17,6 +17,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/asana-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/asana-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-file-finding)
 # Made-up gids. The script ships no default board, so a real one must never appear here
@@ -27,76 +29,10 @@ SECTION_GID=9990002
 # product repo and its workstation repo on boards a pipeline reads differently.
 WS_PROJECT_GID=9990003
 WS_SECTION_GID=9990004
+ROADMAP_GID=9990005
+SEV_S2_TAG=9990012
 
 # --- fixtures ---------------------------------------------------------------
-
-# A fake Asana over the same wire shape bin/fm-file-finding.sh speaks: body, newline,
-# HTTP status (matching curl's -w '\n%{http_code}'). $FAKE_ASANA_STORE holds a JSON array
-# of {gid,notes,project}; the scan reads it and the create appends to it, so two runs against
-# one store exercise the real deduplication. The store spans every board and the scan serves
-# only the cards of the project gid in the URL, which is what makes a card filed onto one
-# board invisible to a scan of the other unless the script goes looking for it there.
-# $FAKE_ASANA_LOG records one line per request.
-# $FAKE_ASANA_FAIL makes every request fail like an outage; $FAKE_ASANA_ENDLESS makes the
-# scan always claim another page, so the page cap can be driven.
-install_fake_curl() {
-  local fakebin=$1
-  cat > "$fakebin/curl" <<'SH'
-#!/usr/bin/env bash
-set -u
-url=""; method=GET; body=""
-prev=""
-for a in "$@"; do
-  case "$prev" in
-    -X) method=$a ;;
-    --data-binary) body=$a ;;
-  esac
-  case "$a" in
-    http*) url=$a ;;
-  esac
-  prev=$a
-done
-printf '%s %s\n' "$method" "$url" >> "$FAKE_ASANA_LOG"
-if [ -n "${FAKE_ASANA_FAIL:-}" ]; then
-  echo "curl: (7) Failed to connect" >&2
-  exit 7
-fi
-[ -s "$FAKE_ASANA_STORE" ] || printf '[]\n' > "$FAKE_ASANA_STORE"
-case "$method $url" in
-  "GET "*"/projects/"*"/tasks"*)
-    if [ -n "${FAKE_ASANA_ENDLESS:-}" ]; then
-      jq -n '{data:[],next_page:{offset:"more"}}'
-    else
-      scanned=${url#*/projects/}
-      scanned=${scanned%%/*}
-      jq --arg p "$scanned" \
-        '{data: [.[] | select((.project // $p) == $p)], next_page: null}' "$FAKE_ASANA_STORE"
-    fi
-    printf '\n200\n'
-    ;;
-  "POST "*"/tasks/"*"/addProject")
-    printf '%s' "$body" >> "$FAKE_ASANA_ADDPROJECT"
-    printf '\n'  >> "$FAKE_ASANA_ADDPROJECT"
-    printf '{"data":{}}\n200\n'
-    ;;
-  "POST "*"/tasks"*)
-    gid=$(( $(jq 'length' "$FAKE_ASANA_STORE") + 700001 ))
-    printf '%s' "$body" |
-      jq --arg g "$gid" '{gid:$g, notes:.data.notes, project:.data.projects[0]}' \
-      > "$FAKE_ASANA_STORE.new"
-    jq -s '.[0] + [.[1]]' "$FAKE_ASANA_STORE" "$FAKE_ASANA_STORE.new" > "$FAKE_ASANA_STORE.tmp"
-    mv "$FAKE_ASANA_STORE.tmp" "$FAKE_ASANA_STORE"
-    jq -n --arg g "$gid" '{data:{gid:$g, permalink_url:("https://app.asana.com/0/1/" + $g)}}'
-    printf '\n201\n'
-    ;;
-  *)
-    printf '{"errors":[{"message":"unexpected"}]}\n404\n'
-    ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/curl"
-}
 
 # Reproduces the one tasks-axi property the backlog dedupe depends on: the body lands in
 # backlog.md verbatim. Records its argv so the test can assert how often `add` ran.
@@ -157,14 +93,17 @@ new_case() {
   install_fake_curl "$fakebin"
   install_fake_tasks_axi "$fakebin"
   export PATH="$fakebin:$PATH"
-  export FAKE_ASANA_STORE="$CASE_DIR/asana-store.json"
-  export FAKE_ASANA_LOG="$CASE_DIR/asana.log"
-  export FAKE_ASANA_ADDPROJECT="$CASE_DIR/addproject.log"
+  reset_fake_asana "$CASE_DIR"
+  jq -n --arg p "$PROJECT_GID" --arg t "$SECTION_GID" --arg r "$ROADMAP_GID" \
+    --arg wp "$WS_PROJECT_GID" --arg wt "$WS_SECTION_GID" \
+    '[{gid:$t,name:"Triage",project:$p}, {gid:$r,name:"Roadmap",project:$p},
+      {gid:$wt,name:"Triage",project:$wp}]' > "$FAKE_ASANA_SECTIONS"
+  jq -n --arg s2 "$SEV_S2_TAG" '[{gid:"9990010",name:"sev:S0"},{gid:$s2,name:"sev:S2"}]' \
+    > "$FAKE_ASANA_TAGS"
   export FAKE_TASKS_LOG="$CASE_DIR/tasks-axi.log"
   unset TRACKER_PROJECT TRACKER_SECTION  # set them in a test to unconfigure the board
+  unset COMPARE_CMD  # set it in a test to answer the semantic compare
   : > "$FAKE_TASKS_LOG"  # so a "tasks-axi was never called" assertion reads a real empty file
-  unset FAKE_ASANA_FAIL FAKE_ASANA_ENDLESS
-  printf '[]\n' > "$FAKE_ASANA_STORE"
 }
 
 # Run the script from <dir> with the scratch home and fake Asana target.
@@ -178,6 +117,7 @@ run_file() {  # <cwd> <args...>
     FM_ASANA_PROJECT="${TRACKER_PROJECT-$PROJECT_GID}" \
     FM_ASANA_SECTION="${TRACKER_SECTION-$SECTION_GID}" \
     ASANA_ACCESS_TOKEN=fake-token \
+    FM_FINDING_COMPARE_CMD="${COMPARE_CMD:-echo NONE}" \
     "$ROOT/bin/fm-file-finding.sh" "$@"
   )
 }
@@ -186,7 +126,7 @@ FINDING=(--title "pool key is never refreshed"
   --where "src/pool.ts:42"
   --why "the cached key outlives its lease, so a second caller gets a dead slot"
   --expected "the lease renewal should invalidate the cache")
-STD_ARGS=(--blocking no "${FINDING[@]}")
+STD_ARGS=(--blocking no --severity S2 "${FINDING[@]}")
 
 record_file() { printf '%s/state/findings/%s.json' "$HOME_DIR" "$1"; }
 only_record() { find "$HOME_DIR/state/findings" -name '*.json' 2>/dev/null | head -1; }
@@ -468,7 +408,7 @@ test_a_later_filing_drains_what_the_outage_held() {
   export FAKE_ASANA_FAIL=1
   run_file "$PROJ_DIR" "${STD_ARGS[@]}" >/dev/null || fail "the deferral must not fail the task"
   unset FAKE_ASANA_FAIL
-  out=$(run_file "$PROJ_DIR" --blocking no --title "second defect" --where "src/b.ts:9" \
+  out=$(run_file "$PROJ_DIR" --blocking no --severity S2 --title "second defect" --where "src/b.ts:9" \
     --why "it double-frees" --expected "one free") || fail "the second filing failed: $out"
   [ "$(jq 'length' "$FAKE_ASANA_STORE")" -eq 2 ] ||
     fail "expected the held finding to be filed alongside the new one, got $(jq 'length' "$FAKE_ASANA_STORE")"
@@ -522,7 +462,7 @@ test_key_ignores_reworded_why() {
   new_case rewording
   run_file "$PROJ_DIR" "${STD_ARGS[@]}" >/dev/null || fail "first filing failed"
   rm -rf "$HOME_DIR/state/findings"
-  out=$(run_file "$PROJ_DIR" --blocking no \
+  out=$(run_file "$PROJ_DIR" --blocking no --severity S2 \
     --title "pool key is never refreshed" --where "src/pool.ts:42" \
     --why "completely different wording for the same defect" \
     --expected "something else entirely") || fail "re-filing failed: $out"
@@ -577,25 +517,24 @@ test_unmapped_repo_falls_back_to_the_default_board_silently() {
 # the per-repository form exists: a bare project=/section= pair behaves for every repository
 # exactly as it did before there was a second board to get wrong.
 test_single_target_config_is_unchanged_for_every_repo() {
-  local err gets scans
+  local err others
   new_case compat
   TRACKER_PROJECT='' TRACKER_SECTION=''
   write_tracker "project=$PROJECT_GID" "section=$SECTION_GID"
   err="$CASE_DIR/compat.err"
-  run_file "$PROJ_DIR" --repo acme --blocking no --title "one" --where "a.ts:1" \
+  run_file "$PROJ_DIR" --repo acme --blocking no --severity S2 --title "one" --where "a.ts:1" \
     --why w --expected e >/dev/null 2>>"$err" || fail "filing for a named repo failed"
-  run_file "$PROJ_DIR" --repo acme-workstation --blocking no --title "two" --where "b.ts:2" \
+  run_file "$PROJ_DIR" --repo acme-workstation --blocking no --severity S2 --title "two" --where "b.ts:2" \
     --why w --expected e >/dev/null 2>>"$err" || fail "filing for another named repo failed"
-  run_file "$PROJ_DIR" --blocking no --title "three" --where "c.ts:3" \
+  run_file "$PROJ_DIR" --blocking no --severity S2 --title "three" --where "c.ts:3" \
     --why w --expected e >/dev/null 2>>"$err" || fail "filing with no --repo failed"
   expect_cards "$PROJECT_GID" 3 "every repo must file to the single configured board"
   [ "$(jq 'length' "$FAKE_ASANA_STORE")" -eq 3 ] || fail "cards landed somewhere else too"
   [ "$(grep -c "\"section\": \"$SECTION_GID\"" "$FAKE_ASANA_ADDPROJECT")" -eq 3 ] ||
     fail "every card must be moved into the single configured section"
-  gets=$(grep -c '^GET ' "$FAKE_ASANA_LOG")
-  scans=$(grep -c "/projects/$PROJECT_GID/tasks" "$FAKE_ASANA_LOG")
-  [ "$gets" -eq "$scans" ] ||
-    fail "a single-target config must scan only its own board ($scans of $gets reads)"
+  others=$(grep '^GET ' "$FAKE_ASANA_LOG" |
+    grep -vE "/projects/${PROJECT_GID}[/?]|/sections/$SECTION_GID/|/workspaces/" || true)
+  [ -z "$others" ] || fail "a single-target config must read only its own board, got: $others"
   [ ! -s "$err" ] || fail "a single-target config must file without warnings, got: $(cat "$err")"
   pass "fm-file-finding.sh: a single-target config behaves exactly as before, for every repo"
 }
@@ -679,9 +618,9 @@ test_flush_of_two_repos_routes_each_to_its_own_board() {
   write_tracker "project=$PROJECT_GID" "section=$SECTION_GID" \
     "project.acme-workstation=$WS_PROJECT_GID" "section.acme-workstation=$WS_SECTION_GID"
   export FAKE_ASANA_FAIL=1
-  run_file "$PROJ_DIR" --repo acme-workstation --blocking no --title "the box reboots nightly" \
+  run_file "$PROJ_DIR" --repo acme-workstation --blocking no --severity S2 --title "the box reboots nightly" \
     --where "boot.sh:9" --why w --expected e >/dev/null || fail "holding the first finding failed"
-  run_file "$PROJ_DIR" --repo acme --blocking no --title "the lease is never renewed" \
+  run_file "$PROJ_DIR" --repo acme --blocking no --severity S2 --title "the lease is never renewed" \
     --where "src/pool.ts:42" --why w --expected e >/dev/null ||
     fail "holding the second finding failed"
   unset FAKE_ASANA_FAIL
@@ -722,9 +661,9 @@ test_env_section_never_follows_a_repo_to_its_own_board() {
   TRACKER_PROJECT='' TRACKER_SECTION="$SECTION_GID"
   write_tracker "project=$PROJECT_GID" "section=9990009" \
     "project.acme-workstation=$WS_PROJECT_GID" "section.acme-workstation=$WS_SECTION_GID"
-  run_file "$PROJ_DIR" --repo acme-workstation --blocking no --title "the box reboots nightly" \
+  run_file "$PROJ_DIR" --repo acme-workstation --blocking no --severity S2 --title "the box reboots nightly" \
     --where "boot.sh:9" --why w --expected e >/dev/null || fail "the workstation filing failed"
-  run_file "$PROJ_DIR" --repo acme --blocking no --title "pool key is never refreshed" \
+  run_file "$PROJ_DIR" --repo acme --blocking no --severity S2 --title "pool key is never refreshed" \
     --where "src/pool.ts:42" --why w --expected e >/dev/null || fail "the product filing failed"
   assert_grep "\"section\": \"$WS_SECTION_GID\"" "$FAKE_ASANA_ADDPROJECT" \
     "the repo board's card must be moved into that board's own section"
@@ -733,6 +672,69 @@ test_env_section_never_follows_a_repo_to_its_own_board() {
   assert_no_grep '"section": "9990009"' "$FAKE_ASANA_ADDPROJECT" \
     "the environment override must still beat the file's own section="
   pass "fm-file-finding.sh: an environment section override stays on the board it names"
+}
+
+REWORDED=(--blocking no --severity S2 --title "stale pool key hands out dead slots"
+  --where "src/pool.ts:40" --why "the key is cached past the lease end"
+  --expected "renewing the lease drops the cached key")
+creates() { grep -c "^POST http://asana.invalid/api/1.0/tasks?opt_fields" "$FAKE_ASANA_LOG" || true; }
+
+# The semantic layer: a reworded repeat has a new key, so only the compare can catch it. It
+# must land on the open card as a comment and create nothing.
+test_reworded_finding_comments_on_the_open_card() {
+  local out
+  new_case semantic_dup
+  run_file "$PROJ_DIR" "${STD_ARGS[@]}" >/dev/null || fail "first filing failed"
+  out=$(COMPARE_CMD="echo MATCH 700001" run_file "$PROJ_DIR" "${REWORDED[@]}") ||
+    fail "a reworded repeat failed: $out"
+  assert_contains "$out" "duplicate: 700001" "a reworded repeat must report the open card"
+  [ "$(creates)" -eq 1 ] || fail "a reworded repeat must create no card, got $(creates) creates"
+  [ "$(jq -s '[.[] | select(.gid == "700001" and (.text | contains("cached past the lease")))] | length' \
+    "$FAKE_ASANA_STORIES")" -eq 1 ] || fail "the repeat's evidence must be commented on the open card"
+  pass "fm-file-finding.sh: a reworded finding comments on the open card and creates none"
+}
+
+# Fail open only on an unreachable compare: the finding is still filed, never lost.
+test_unreachable_compare_files_a_new_card() {
+  local out
+  new_case semantic_down
+  run_file "$PROJ_DIR" "${STD_ARGS[@]}" >/dev/null || fail "first filing failed"
+  out=$(COMPARE_CMD="exit 3" run_file "$PROJ_DIR" "${REWORDED[@]}" 2>/dev/null) ||
+    fail "an unreachable compare must not fail the task: $out"
+  assert_contains "$out" "filed: " "an unreachable compare must still file the finding"
+  [ "$(creates)" -eq 2 ] || fail "an unreachable compare must create the card, got $(creates) creates"
+  pass "fm-file-finding.sh: an unreachable compare files a new card"
+}
+
+test_severity_is_required_and_tags_the_card() {
+  local rc=0
+  new_case severity
+  run_file "$PROJ_DIR" --blocking no "${FINDING[@]}" >/dev/null 2>&1 || rc=$?
+  expect_code 2 "$rc" "a finding without --severity must be a usage error"
+  assert_absent "$FAKE_ASANA_LOG" "a finding without --severity must not reach the tracker"
+  run_file "$PROJ_DIR" "${STD_ARGS[@]}" >/dev/null || fail "filing with --severity failed"
+  assert_grep "\"tag\": \"$SEV_S2_TAG\"" "$FAKE_ASANA_ADDTAG" "the card must carry the sev:S2 tag"
+  pass "fm-file-finding.sh: --severity is required and becomes the card's sev tag"
+}
+
+test_roadmap_finding_never_lands_in_triage() {
+  local out
+  new_case roadmap
+  out=$(run_file "$PROJ_DIR" "${STD_ARGS[@]}" --kind roadmap) || fail "filing a roadmap item failed: $out"
+  assert_grep "\"section\": \"$ROADMAP_GID\"" "$FAKE_ASANA_ADDPROJECT" \
+    "a roadmap finding must be moved into the Roadmap section"
+  assert_no_grep "\"section\": \"$SECTION_GID\"" "$FAKE_ASANA_ADDPROJECT" \
+    "a roadmap finding must never land in Triage"
+  pass "fm-file-finding.sh: a roadmap finding goes to Roadmap, never Triage"
+}
+
+test_test_finding_must_name_what_breaks() {
+  local rc=0
+  new_case test_kind
+  run_file "$PROJ_DIR" "${STD_ARGS[@]}" --kind test >/dev/null 2>&1 || rc=$?
+  expect_code 2 "$rc" "a test finding without --breaks must be refused"
+  assert_absent "$HOME_DIR/state/findings" "a refused test finding must leave no record"
+  pass "fm-file-finding.sh: a test finding that names no breaking behaviour is refused"
 }
 
 test_script_parses
@@ -766,3 +768,8 @@ test_a_card_on_the_default_board_is_not_copied_onto_the_repo_board
 test_flush_of_two_repos_routes_each_to_its_own_board
 test_repo_board_with_no_section_files_and_warns
 test_env_section_never_follows_a_repo_to_its_own_board
+test_reworded_finding_comments_on_the_open_card
+test_unreachable_compare_files_a_new_card
+test_severity_is_required_and_tags_the_card
+test_roadmap_finding_never_lands_in_triage
+test_test_finding_must_name_what_breaks
