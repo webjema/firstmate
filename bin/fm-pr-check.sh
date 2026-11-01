@@ -14,7 +14,8 @@
 # finish well inside FM_CHECK_TIMEOUT (one bounded `gh pr view` call).
 #
 # Wake on:
-#   - the PR is MERGED         -> "merged"        (teardown time)
+#   - the PR is MERGED         -> "merged"        (teardown time); it also starts
+#                                 bin/fm-asana-close-fixed.sh in the background
 #   - a check has FAILED       -> "checks failed" (firstmate must act)
 # Stay silent while:
 #   - checks are still running/queued (the crew or CI is mid-flight)
@@ -89,6 +90,9 @@ read -r pr_state pr_head checks <<< "\$line"
 
 if [ "\$pr_state" = MERGED ]; then
   echo "merged"
+  # Detached and silent: the wake contract is one line, and the watcher's timeout must not
+  # cut the Asana calls short.
+  FM_HOME='$FM_HOME' FM_CONFIG_OVERRIDE='${FM_CONFIG_OVERRIDE:-}' '$FM_ROOT/bin/fm-asana-close-fixed.sh' "\$URL" >/dev/null 2>&1 &
   # Terminal: disarm so this one-time fact is never reported twice. The wake line is
   # printed FIRST on purpose - if the removal fails (a read-only state dir, say), the
   # next cycle reports the merge again, which is merely noisy. Removing first and

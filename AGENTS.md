@@ -199,7 +199,8 @@ A finding that lives only in a report or a chat message is lost, because a repor
 - **No** - file it as a tracked task, then keep going. Do not fix it, do not widen the diff, do not stop to ask whether it is worth filing.
 - **Yes** - raise it. Small and clearly adjacent: fix it and say that you did. Large, or it changes the shape of the work: escalate for a decision, and a separate crew is usually the right answer rather than growing the task in hand.
 
-Severity, whose code it is, and whether it feels worth someone's time set a filed task's priority; they never decide whether to file.
+Severity, whose code it is, and whether it feels worth someone's time set a filed task's `--severity`; they never decide whether to file.
+Only a defect goes to triage: a product idea, a docs gap or a missing test is filed with its `--kind`, and a missing test must name the shipped behaviour that breaks silently without it.
 
 Where it goes turns on one question too: does a human tracking the user's product need to see this?
 `bin/fm-file-finding.sh` is the only way to file, and it owns that routing, the deduplication, and what happens when a tracker is unreachable - name the task or the repo the finding is about (`--task`, `--repo`) and it lands in the right queue, held for triage, never dispatchable on its own.
@@ -209,6 +210,7 @@ Crewmates file directly through it and report what they filed.
 
 A filed fleet finding is not a human question by default.
 It lands under a machine-drainable hold, and the `triage` skill drains that queue: it verifies each finding against the code as it stands now, then dispatches the ones that still reproduce, closes the ones already fixed or obsolete, and escalates only a genuine product or access call - never dispatching anything destructive, irreversible, or security-sensitive.
+The same skill drains the product board's Triage section with `bin/fm-triage-findings.sh --asana`.
 A finding reaches a human hold only when its filer says it must, with `bin/fm-file-finding.sh --needs decision|resource` and the exact question it turns on, because a hold with no question is the silent row this default flip ends.
 The session-start digest surfaces the count still awaiting the drain, so the queue is drained rather than left to sit; load the `triage` skill when the fleet is idle, or on `/triage`.
 

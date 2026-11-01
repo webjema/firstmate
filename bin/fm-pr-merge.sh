@@ -32,6 +32,9 @@
 # --method[=x] (a wrapper-ism gh has no flag for) is rejected up front, as are
 # --repo and -R because the repo is parsed from the PR URL.
 #
+# After the merge, bin/fm-asana-close-fixed.sh completes the board cards the PR body says it
+# fixes. Its failure never fails the merge.
+#
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--no-ci-check] [-- <extra gh pr merge args>]
 set -eu
 
@@ -133,3 +136,6 @@ if ! caller_has_merge_method "$@"; then
 fi
 
 gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"
+
+# Best effort: the merge already landed. The armed poll runs the close once more on MERGED.
+"$SCRIPT_DIR/fm-asana-close-fixed.sh" "$URL" || true

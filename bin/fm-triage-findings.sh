@@ -9,10 +9,15 @@
 # human); this header owns the MECHANICS.
 #
 # Usage:
-#   fm-triage-findings.sh list [--limit N] [--file <backlog.md>]
-#   fm-triage-findings.sh apply <id> --verdict <real|fixed|obsolete|decision>
-#                                 --evidence <text> [--question <text>] [--file <backlog.md>]
+#   fm-triage-findings.sh list [--limit N] [--file <backlog.md> | --asana [--repo <owner/repo>]]
+#   fm-triage-findings.sh apply <id> --verdict <real|fixed|obsolete|duplicate|decision>
+#                                 --evidence <text> [--question <text>] [--duplicate-of <id>]
+#                                 [--file <backlog.md> | --asana [--repo <owner/repo>]]
 #   fm-triage-findings.sh migrate [--file <backlog.md>]
+#
+# --asana drains the product board's Triage section instead of the fleet backlog (see ASANA
+# below). --repo picks the board the way bin/fm-file-finding.sh does for a finding about that
+# repository; without it the default board is drained.
 #
 # --file points every verb at a specific backlog file instead of $FM_HOME/data/backlog.md, so
 # the drain can be exercised against a copy without touching the live queue. tasks-axi carries
@@ -35,6 +40,8 @@
 #             it escalates to the captain instead, whatever the verdict.
 #   fixed     the code already fixes it. The finding is closed with the evidence as its note.
 #   obsolete  the finding no longer applies (code deleted, design changed). Closed likewise.
+#   duplicate the finding repeats another one, named by --duplicate-of. Closed likewise, with
+#             "duplicate of <id>" leading the note.
 #   decision  verifying it surfaced a product/architecture call only the captain can make.
 #             Re-held under kind captain with --question as the reason; --question is REQUIRED,
 #             like it is at filing time, because a captain hold with no question is a silent
@@ -56,6 +63,24 @@
 # the hold. The verdict is still real; the floor only refuses to let the machine be the one to
 # start the work. The scan is deliberately broad: a false escalation costs one captain glance,
 # a false dispatch could run the dangerous change unattended, and those are not equal.
+#
+# ASANA. With --asana, the queue is the open cards in the board's Triage section (the section
+# gid bin/fm-file-finding.sh files into), and the id is a card gid. LIST emits the same
+# record shape, plus severity (from the sev:S# tag) and url; hold_reason is absent, because
+# every card in Triage is waiting for this drain. APPLY uses the same verdicts, gates and
+# safety floor, with board moves in place of holds. It comments the verdict on the card, then:
+#   fixed, obsolete   completes the card.
+#   duplicate         first comments the card's text on the --duplicate-of card, then
+#                     completes it, so the open card carries all the evidence.
+#   real              moves the card to the queue section (queue-section=, default "Agent
+#                     queue"), where the pipeline picks work up. A danger marker moves it to
+#                     the captain section (captain-section=, default "Needs captain") instead.
+#   decision          moves the card to the captain section, with --question in the comment.
+# The sections are found by name on the card's board (config/product-tracker owns the names).
+# A card not on the board is refused. A card not in Triage is refused, except when it is
+# already where this verdict puts it, which is reported as already-applied. A board with no
+# section of the needed name, or a failed Asana call, leaves the card in Triage and exits 1.
+# The comment goes first, so a retry after a failed move only adds a second comment.
 #
 # MIGRATE is the one-time flip for a queue filed before the default inverted: every task held
 # under kind captain with the exact generic reason "unreviewed finding - triage before
@@ -104,22 +129,39 @@ case "$VERB" in
 esac
 shift || true
 
-# Every verb shares --file; parse it out first, leaving the rest for the verb.
+# Every verb shares --file, --asana and --repo; parse them out first, leaving the rest.
 BACKLOG=""
+ASANA=0
+REPO=""
 ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --file) [ $# -ge 2 ] || die "--file needs a value"; BACKLOG=$2; shift 2 ;;
+    --asana) ASANA=1; shift ;;
+    --repo) [ $# -ge 2 ] || die "--repo needs a value"; REPO=$2; shift 2 ;;
     *) ARGS+=("$1"); shift ;;
   esac
 done
 [ -n "$BACKLOG" ] || BACKLOG="$DATA/backlog.md"
+[ "$ASANA" -eq 1 ] || [ -z "$REPO" ] || die "--repo only picks a board, so it needs --asana"
+[ "$ASANA" -eq 0 ] || [ "$VERB" != migrate ] || die "migrate is backlog-only"
 
-# tasks-axi, always pointed at the chosen backlog file. The drain is a backlog operation, so
-# it needs the backend; when the backend is opted out or too old there is nothing to drain
-# through and that is a hard error, not a silent skip.
-fm_tasks_axi_backend_available "$CONFIG" ||
-  die "tasks-axi backend unavailable (absent, too old, or config/backlog-backend=manual); the drain needs it"
+if [ "$ASANA" -eq 1 ]; then
+  WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-triage.XXXXXX")
+  trap 'rm -rf "$WORK"' EXIT
+  # shellcheck source=bin/fm-asana-lib.sh
+  . "$SCRIPT_DIR/fm-asana-lib.sh"
+  asana_target_for "$REPO" || die "$API_ERR"
+  [ -n "$ASANA_PROJECT" ] || die "no product tracker configured (config/product-tracker project=)"
+  [ -n "$ASANA_SECTION" ] || die "no triage section configured for board $ASANA_PROJECT; there is nothing to drain"
+  asana_ready || die "$API_ERR"
+else
+  # tasks-axi, always pointed at the chosen backlog file. The backlog drain needs the
+  # backend; when it is opted out or too old there is nothing to drain through and that is a
+  # hard error, not a silent skip.
+  fm_tasks_axi_backend_available "$CONFIG" ||
+    die "tasks-axi backend unavailable (absent, too old, or config/backlog-backend=manual); the drain needs it"
+fi
 axi() { tasks-axi "$@" --file "$BACKLOG"; }
 
 # --- shared reads ------------------------------------------------------------
@@ -199,6 +241,10 @@ do_list() {
 
   local today emitted=0 id kind reason created
   today=$(date -u +%s)
+  if [ "$ASANA" -eq 1 ]; then
+    asana_list "$limit" "$today"
+    return
+  fi
   while IFS=$'\t' read -r id kind reason created; do
     [ -n "$id" ] || continue
     fm_is_verify_hold "$kind" "$reason" || continue
@@ -250,7 +296,7 @@ danger_marker() {  # <text>  -> prints the matched marker, or nothing
 }
 
 do_apply() {
-  local id="" verdict="" evidence="" question="" i
+  local id="" verdict="" evidence="" question="" dup="" i
   [ ${#ARGS[@]} -gt 0 ] || die "apply needs a finding id (see --help)"
   id=${ARGS[0]}
   case "$id" in --*) die "apply needs a finding id as its first argument (see --help)" ;; esac
@@ -259,19 +305,31 @@ do_apply() {
       --verdict)  verdict=${ARGS[i+1]:-}; i=$((i+1)) ;;
       --evidence) evidence=${ARGS[i+1]:-}; i=$((i+1)) ;;
       --question) question=${ARGS[i+1]:-}; i=$((i+1)) ;;
+      --duplicate-of) dup=${ARGS[i+1]:-}; i=$((i+1)) ;;
       *) die "apply: unknown argument '${ARGS[i]}'" ;;
     esac
   done
   case "$verdict" in
-    real|fixed|obsolete|decision) ;;
-    '') die "apply needs --verdict real|fixed|obsolete|decision" ;;
-    *) die "apply: --verdict must be real|fixed|obsolete|decision, got '$verdict'" ;;
+    real|fixed|obsolete|duplicate|decision) ;;
+    '') die "apply needs --verdict real|fixed|obsolete|duplicate|decision" ;;
+    *) die "apply: --verdict must be real|fixed|obsolete|duplicate|decision, got '$verdict'" ;;
   esac
   [ -n "$evidence" ] || die "apply needs --evidence naming what the verifier found"
   [ "$verdict" != decision ] || [ -n "$question" ] ||
     die "apply --verdict decision requires --question naming what the captain must decide"
   [ "$verdict" = decision ] || [ -z "$question" ] ||
     die "apply: --question is only valid with --verdict decision"
+  [ "$verdict" != duplicate ] || [ -n "$dup" ] ||
+    die "apply --verdict duplicate requires --duplicate-of naming the finding it repeats"
+  [ "$verdict" = duplicate ] || [ -z "$dup" ] ||
+    die "apply: --duplicate-of is only valid with --verdict duplicate"
+  [ "$dup" != "$id" ] || die "apply: a finding cannot duplicate itself"
+  [ "$verdict" != duplicate ] || evidence="duplicate of $dup - $evidence"
+
+  if [ "$ASANA" -eq 1 ]; then
+    asana_apply "$id" "$verdict" "$evidence" "$question" "$dup"
+    return
+  fi
 
   # Read current state once, up front, for the idempotence and gate checks below.
   local held kind reason
@@ -281,7 +339,7 @@ do_apply() {
   reason=$(show_scalar "$id" hold_reason)
 
   case "$verdict" in
-    fixed|obsolete)
+    fixed|obsolete|duplicate)
       # Closing is idempotent regardless of hold: an already-closed finding stays closed.
       if [ "$(show_scalar "$id" state)" = "done" ]; then
         echo "already-applied: $id already closed [$verdict]"
@@ -373,6 +431,123 @@ apply_decision() {  # <id> <question>
     echo "fm-triage-findings.sh: could not re-hold $id for the captain; it stays held" >&2
     return 1
   fi
+}
+
+# --- Asana Triage ------------------------------------------------------------
+asana_list() {  # <limit> <today-epoch>
+  local limit=$1 today=$2
+  [ "$limit" -gt 0 ] || return 0
+  asana_open_cards "$ASANA_SECTION" "$WORK/cards.jsonl" "$limit" ||
+    { echo "fm-triage-findings.sh: could not list Triage on board $ASANA_PROJECT: $API_ERR" >&2; return 1; }
+  head -n "$limit" "$WORK/cards.jsonl" | jq -c --arg repo "$REPO" --arg p "$ASANA_PROJECT" --argjson now "$today" '
+    (.notes // "") as $n | ($n | split("\n")) as $l |
+    {id: .gid, title: (.name // ""),
+     repo: ([$l[] | select(startswith("Repository: ")) | ltrimstr("Repository: ")] | first // $repo),
+     where: ([$l[] | select(startswith("Where: ")) | ltrimstr("Where: ")] | first // ""),
+     why: ($n | split("\nWhere: ")[0] | sub("^Issue\n"; "") | gsub("\\s+"; " ") | sub("^ "; "") | .[0:280]),
+     expected: ([$l[] | select(test("^Expected( instead)?: ")) | sub("^Expected( instead)?: "; "")] | first // ""),
+     severity: ([.tags[]?.name // "" | select(startswith("sev:")) | ltrimstr("sev:")] | first // ""),
+     created: ((.created_at // "")[0:10]),
+     age_days: (if (.created_at // "") == "" then null
+                else (($now - ((.created_at[0:19] + "Z") | fromdate)) / 86400 | floor) end),
+     url: ("https://app.asana.com/0/" + $p + "/" + .gid)}'
+  [ -s "$WORK/cards.jsonl" ] || echo "list: no cards are waiting in Triage" >&2
+}
+
+# The gid of a named section on the target board, or "" when it has none. Dies when the board
+# cannot be read, which leaves the card exactly where it was.
+section_or_die() {  # <name>
+  asana_section_named "$ASANA_PROJECT" "$1" ||
+    { echo "fm-triage-findings.sh: could not read the sections of board $ASANA_PROJECT ($API_ERR); the card stays in Triage" >&2; exit 1; }
+  printf '%s' "$SECTION_GID"
+}
+
+# Comment, then act: when the act fails the card is still in Triage, and a retry only adds a
+# second comment.
+asana_act() {  # <gid> <comment> <complete|section-gid> <done-line>
+  local gid=$1 note=$2 act=$3 line=$4
+  if asana_comment "$gid" "$note" && if [ "$act" = complete ]; then asana_complete "$gid"; else asana_move "$gid" "$ASANA_PROJECT" "$act"; fi; then
+    echo "$line"
+    return 0
+  fi
+  echo "fm-triage-findings.sh: could not update card $gid ($API_ERR); it stays in Triage" >&2
+  return 1
+}
+
+asana_apply() {  # <gid> <verdict> <evidence> <question> <duplicate-of>
+  local id=$1 verdict=$2 evidence=$3 question=$4 dup=$5 card completed onboard current marker queue="" captain=""
+  case "$id" in *[!0-9]*|'') die "apply --asana needs a card gid, got '$id'" ;; esac
+  asana_api GET "/tasks/$id?opt_fields=name,notes,completed,memberships.project.gid,memberships.section.gid" ||
+    { echo "fm-triage-findings.sh: could not read card $id ($API_ERR); nothing changed" >&2; exit 1; }
+  card=$API_BODY
+  completed=$(printf '%s' "$card" | jq -r '.data.completed // false')
+  onboard=$(printf '%s' "$card" | jq -r --arg p "$ASANA_PROJECT" '[.data.memberships[]? | select(.project.gid == $p)] | length')
+  [ "$onboard" -gt 0 ] || die "apply: card $id is not on board $ASANA_PROJECT; refusing to touch it"
+  current=$(printf '%s' "$card" | jq -r --arg p "$ASANA_PROJECT" '[.data.memberships[]? | select(.project.gid == $p) | .section.gid // ""] | first')
+
+  case "$verdict" in
+    fixed|obsolete|duplicate)
+      if [ "$completed" = true ]; then
+        echo "already-applied: $id already closed [$verdict]"
+        return 0
+      fi
+      [ "$current" = "$ASANA_SECTION" ] ||
+        die "apply: card $id is not in Triage - it was already triaged; refusing to close it"
+      if [ "$verdict" = duplicate ]; then
+        case "$dup" in *[!0-9]*) die "apply --asana: --duplicate-of needs a card gid, got '$dup'" ;; esac
+        asana_api GET "/tasks/$dup?opt_fields=completed,memberships.project.gid" ||
+          { echo "fm-triage-findings.sh: could not read card $dup ($API_ERR); card $id stays in Triage" >&2; return 1; }
+        printf '%s' "$API_BODY" | jq -e --arg p "$ASANA_PROJECT" \
+          '.data.completed != true and ([.data.memberships[]? | select(.project.gid == $p)] | length > 0)' >/dev/null ||
+          die "apply: --duplicate-of $dup is not an open card on board $ASANA_PROJECT; refusing to close $id into it"
+        # The repeat's evidence moves onto the card that stays open before this one closes, so
+        # closing it loses nothing.
+        asana_comment "$dup" "$(printf 'Duplicate closed into this card: %s\n%s\n\n%s' \
+          "$(printf '%s' "$card" | jq -r '.data.name // ""')" "$(asana_url_for "$ASANA_PROJECT" "$id")" \
+          "$(printf '%s' "$card" | jq -r '.data.notes // ""')")" ||
+          { echo "fm-triage-findings.sh: could not comment on card $dup ($API_ERR); card $id stays in Triage" >&2; return 1; }
+      fi
+      asana_act "$id" "triage: $verdict - $evidence" complete "closed: $id [$verdict] - $evidence"
+      return
+      ;;
+  esac
+
+  [ "$completed" != true ] || die "apply: card $id is already closed; refusing to re-open it"
+  captain=$(section_or_die "$CAPTAIN_SECTION_NAME") || exit 1
+  if [ -n "$captain" ] && [ "$current" = "$captain" ]; then
+    echo "already-applied: $id already with the captain [$verdict]"
+    return 0
+  fi
+  if [ "$verdict" = real ]; then
+    queue=$(section_or_die "$QUEUE_SECTION_NAME") || exit 1
+    if [ -n "$queue" ] && [ "$current" = "$queue" ]; then
+      echo "already-applied: $id already dispatchable [real]"
+      return 0
+    fi
+  fi
+  [ "$current" = "$ASANA_SECTION" ] ||
+    die "apply: card $id is not in Triage - it was already triaged; refusing to re-open it"
+
+  if [ "$verdict" = decision ]; then
+    [ -n "$captain" ] || { echo "fm-triage-findings.sh: board $ASANA_PROJECT has no '$CAPTAIN_SECTION_NAME' section (captain-section=); card $id stays in Triage" >&2; return 1; }
+    asana_act "$id" "$(printf 'triage: decision - %s\n\nEvidence: %s' "$question" "$evidence")" "$captain" \
+      "escalated: $id [decision] - moved to '$CAPTAIN_SECTION_NAME': $question"
+    return
+  fi
+
+  # Dedup merges repeats in as comments, so the floor reads them too.
+  asana_api GET "/tasks/$id/stories?opt_fields=text,resource_subtype&limit=100" ||
+    { echo "fm-triage-findings.sh: could not read comments on card $id ($API_ERR); it stays in Triage" >&2; return 1; }
+  marker=$(danger_marker "$(printf '%s\n%s\n%s' "$(printf '%s' "$card" | jq -r '.data.name // ""')" "$(printf '%s' "$card" | jq -r '.data.notes // ""')" \
+    "$(printf '%s' "$API_BODY" | jq -r '.data[]? | select(.resource_subtype == "comment_added") | .text // ""')")")
+  if [ -n "$marker" ]; then
+    [ -n "$captain" ] || { echo "fm-triage-findings.sh: card $id matched danger marker '$marker' but board $ASANA_PROJECT has no '$CAPTAIN_SECTION_NAME' section (captain-section=); it stays in Triage" >&2; return 1; }
+    asana_act "$id" "triage: verified real but flagged '$marker' - dispatch by hand, not by drain. Evidence: $evidence" "$captain" \
+      "escalated: $id verified real but matched danger marker '$marker'; moved to '$CAPTAIN_SECTION_NAME'"
+    return
+  fi
+  [ -n "$queue" ] || { echo "fm-triage-findings.sh: board $ASANA_PROJECT has no '$QUEUE_SECTION_NAME' section (queue-section=); card $id stays in Triage" >&2; return 1; }
+  asana_act "$id" "triage: real - $evidence" "$queue" "dispatched: $id [real] - $evidence"
 }
 
 # --- migrate -----------------------------------------------------------------

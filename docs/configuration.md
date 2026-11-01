@@ -123,6 +123,8 @@ Seeding at spawn makes every slot correct the next time it is used, instead of a
 
 `config/product-tracker` (local, gitignored) names the board `bin/fm-file-finding.sh` files product-scoped findings into, one `key=value` per line: `project=<gid>` and `section=<gid>`.
 A repository that needs a board of its own adds `project.<repo>=<gid>` and `section.<repo>=<gid>` beside them; everything else keeps using the bare pair, so a home with one board writes only those two lines.
+Three optional name keys name sections by name, on every board: `roadmap-section=` (default `Roadmap`) takes non-defect findings, `queue-section=` (default `Agent queue`) takes a triaged real card, and `captain-section=` (default `Needs captain`) takes a card the captain must decide.
+A board with no section of that name holds the finding or leaves the card in Triage.
 `bin/fm-file-finding.sh --help` owns the format, including what a mapping that is present but unusable does.
 `FM_ASANA_PROJECT` and `FM_ASANA_SECTION` override the file from the environment, and `FM_ASANA_API` overrides the API base for tests.
 
@@ -350,6 +352,8 @@ FM_ASANA_SECTION=       # triage section gid override for the DEFAULT board only
 FM_ASANA_API=https://app.asana.com/api/1.0   # API base; overridden only by tests, which must never reach the real API
 FM_FINDING_SCAN_PAGES=20    # pages of 100 open tasks scanned for the dedupe trailer before the scan reports "cannot verify" and defers rather than risk a duplicate
 FM_FINDING_HTTP_TIMEOUT=20  # seconds per tracker HTTP call; a slow tracker defers the finding, it never fails the crew's task
+FM_FINDING_COMPARE_CMD=     # the model command that compares a finding with the open Triage cards (prompt on stdin, answer on stdout); unset means 'claude -p --model haiku', and a failed compare files a new card
+FM_FINDING_COMPARE_TIMEOUT=60  # seconds before the compare counts as unreachable
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
