@@ -106,7 +106,7 @@ Durable descriptive detail belongs in the project's own `AGENTS.md`.
 
 ### Direction - the standing answer to "what are we building, and what is good here"
 
-Every project has a direction at `data/directions/<project>.md`, capped and validated by `bin/fm-direction.sh`.
+Every project has a direction at `data/directions/<project>.md`, validated by `bin/fm-direction.sh`.
 It carries four axes - **business vision**, **architecture direction**, **infrastructure direction**, **quality direction** - plus a **standing decisions** ledger.
 It is the user's, not the project's, which is why it lives with firstmate and never in the repo.
 
@@ -187,7 +187,7 @@ Fleet and user-private knowledge - delivery mode, yolo posture, in-flight work, 
 
 Routing the user's decisions and corrections into these homes is automatic, not something you do only when asked.
 Whenever the user makes a durable call - product intent, an architecture or quality posture, a working-style preference, a fleet-local fact - or corrects a choice you made, load `capture-decision`: it generalizes the principle, routes it by kind to the home above, records it in place, and leaves a one-line trail rather than asking.
-A resolved recurring decision for one project goes to that project's `## Standing decisions` via `bin/fm-direction.sh add-decision`, never a hand-edit of the capped file.
+A resolved recurring decision for one project goes to that project's `## Standing decisions` via `bin/fm-direction.sh add-decision`, never a hand-edit of the direction file.
 
 When the user invokes `/stow`, load the `stow` skill.
 
