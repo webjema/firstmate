@@ -16,7 +16,7 @@ That is the point: a bug fix that patches a symptom the architecture direction i
 
 ## The four axes, plus the ledger
 
-`bin/fm-direction.sh` owns the file format, the required headings, and the word cap.
+`bin/fm-direction.sh` owns the file format and the required headings.
 Run `bin/fm-direction.sh init <project>` to scaffold, and `bin/fm-direction.sh check` to validate.
 
 - **Business vision** - what the product is for, who it serves, what winning looks like.
@@ -34,9 +34,7 @@ A wrong first draft they can red-pen is worth more than a blank template they wi
 The business vision is the one axis you cannot infer.
 Guess it explicitly, mark the guess, and make it the first thing you ask about.
 
-Keep it under the word cap.
-It is injected into every brief for that project, so a direction that grows into a design doc stops being read, which is the only failure mode that matters.
-Prefer a sharp sentence over a complete one: "every write goes through a command handler; no lambda touches Dynamo directly" beats a paragraph about CQRS.
+It is injected into every brief for that project, so prefer a sharp sentence over a complete one: "every write goes through a command handler; no lambda touches Dynamo directly" beats a paragraph about CQRS.
 
 ## The four gates
 

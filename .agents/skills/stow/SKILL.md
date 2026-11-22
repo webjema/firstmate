@@ -37,7 +37,7 @@ The goal is a session that is safe to reset or destroy because everything durabl
    - Project direction: hand-write directly to `data/directions/<project>.md`, using inspect-then-update.
      A recurring decision the user settled belongs in that file's `## Standing decisions` ledger, dated.
      When a standing decision is overruled, rewrite it; never append a contradiction.
-     Load the `direction` skill if the change is more than a one-line ledger entry, and validate with `bin/fm-direction.sh check` afterward - the file is injected into every brief, so it has a hard word cap.
+     Load the `direction` skill if the change is more than a one-line ledger entry, and validate with `bin/fm-direction.sh check` afterward.
    - Project-intrinsic knowledge: never hand-write a project's `AGENTS.md`.
      Route it through a normal ship task so a crewmate records it via `bin/fm-ensure-agents-md.sh` and commits it through that project's delivery pipeline, exactly as section 5 describes.
      If the fleet is live, delegate this to a crewmate rather than doing it inline.

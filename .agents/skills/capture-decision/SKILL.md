@@ -30,7 +30,7 @@ A one-off instruction for the task in front of you is not a durable decision - i
 
 Record the reusable **principle**, not just the instance.
 When the user corrects one case, ask what rule the correction implies and write that rule; keep the concrete case only as a sharpening example when the rule alone would be ambiguous.
-"Don't hand-edit the capped direction file" generalizes a correction about one file into a rule that prevents the whole class.
+"Don't hand-edit the direction file" generalizes a correction about one file into a rule that prevents the whole class.
 Convert every relative date to an absolute one, and strip volatile specifics (temp paths, in-flight versions, ephemeral ids) that would rot - reference the authoritative source instead of copying it.
 
 ### 2. Route by kind
@@ -49,9 +49,8 @@ When a decision is genuinely project-scoped, prefer the project's direction over
 ### 3. Curate, do not append
 
 Every one of these homes is inspected, then rewritten - never appended to forever.
-`add-decision` already handles the ledger mechanics (dated, newest-first, placeholder-aware, word-cap-validated); before you call it, check whether an existing standing decision is superseded and rewrite that one instead of stacking a contradiction.
+`add-decision` already handles the ledger mechanics (dated, newest-first, placeholder-aware, validated); before you call it, check whether an existing standing decision is superseded and rewrite that one instead of stacking a contradiction.
 For `user.md` and `learnings.md`, read the current file, decide whether the input is new, a duplicate, a superseding update, or now-obsolete, and write a considered replacement.
-If `add-decision` returns non-zero because the direction is now over its word cap, that is the signal to curate the ledger down, not to stop recording.
 
 ### 4. Confirm terse, never ask
 

@@ -115,8 +115,7 @@ print_file_or_absent() {
 # print_directions: every project's direction file (data/directions/<project>.md,
 # owned by bin/fm-direction.sh), in full, one labeled subsection per project.
 # Direction is applied at intake on EVERY task, so it belongs in session-start
-# context rather than behind a separate read; the word cap enforced by
-# fm-direction.sh is what keeps that affordable. A project with no direction file
+# context rather than behind a separate read. A project with no direction file
 # prints ABSENT under the same convention as the other context files: absence is
 # meaningful - it means firstmate should draft one with the user.
 print_directions() {
@@ -195,8 +194,7 @@ else
   BOOT_OUT=$("$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 fi
 # Direction diagnostics ride along with the bootstrap section: DIRECTION_MISSING,
-# DIRECTION_STUB, DIRECTION_INVALID, DIRECTION_TOO_LONG (and the DIRECTION_LONG
-# soft warning). A non-zero exit from `check` is a DIAGNOSTIC, never fatal - the
+# DIRECTION_STUB, DIRECTION_INVALID. A non-zero exit from `check` is a DIAGNOSTIC, never fatal - the
 # digest must print it and keep going, exactly like a MISSING: tool line.
 DIRECTION_OUT=$("$SCRIPT_DIR/fm-direction.sh" check 2>&1 || true)
 if [ -n "$BOOT_OUT" ] || [ -n "$DIRECTION_OUT" ]; then

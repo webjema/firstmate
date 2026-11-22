@@ -9,7 +9,7 @@
 #        fm-direction.sh show  <project>   print the file, or nothing when absent
 #        fm-direction.sh brief <project>   print the brief-ready "# Direction" block
 #        fm-direction.sh init  <project>   scaffold a template (refuses to overwrite)
-#        fm-direction.sh check [<project>] validate; exits non-zero on a hard problem
+#        fm-direction.sh check [<project>] validate; exits non-zero on a missing heading
 #        fm-direction.sh list             list every project and whether it has one
 #        fm-direction.sh alpha-deploy <project>
 #              print the project's Alpha deploy command, taken from an
@@ -20,16 +20,10 @@
 #        fm-direction.sh add-decision <project> <text>
 #              append a dated one-liner under "## Standing decisions", drop the
 #              scaffold placeholder if still present, then validate. This is the
-#              reliable, word-cap-checked write path for a resolved decision so the
-#              automatic capture flow never hand-edits the capped file. It exits
-#              non-zero (after writing) if the file is now over the hard word cap,
-#              so the caller knows to curate; an axis-level shift (a change to the
+#              reliable write path for a resolved decision so the automatic capture
+#              flow never hand-edits the file; an axis-level shift (a change to the
 #              business/architecture/infrastructure/quality direction itself) is a
 #              judgment rewrite of that axis, not an add-decision append.
-# Why a word cap: the brief block is injected verbatim into EVERY brief for that
-# project, ship and scout alike, so it is paid for on every dispatch. A direction
-# that grows into a design doc stops being read. check warns past
-# FM_DIRECTION_SOFT_WORDS and fails past FM_DIRECTION_HARD_WORDS.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,9 +41,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 DIRDIR="$DATA/directions"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
-
-SOFT_WORDS=${FM_DIRECTION_SOFT_WORDS:-450}
-HARD_WORDS=${FM_DIRECTION_HARD_WORDS:-900}
 
 # The five headings a direction must carry. The first four are the user's axes;
 # Standing decisions accumulates the resolved answers so a decision made once is
@@ -167,14 +158,6 @@ check_one() {
     echo "DIRECTION_STUB: $project still has unfilled {...} placeholders"
   fi
 
-  words=$(wc -w < "$f" | tr -d ' ')
-  if [ "$words" -gt "$HARD_WORDS" ]; then
-    echo "DIRECTION_TOO_LONG: $project is $words words (hard cap $HARD_WORDS); it is injected into every brief - cut it down"
-    rc=1
-  elif [ "$words" -gt "$SOFT_WORDS" ]; then
-    echo "DIRECTION_LONG: $project is $words words (soft cap $SOFT_WORDS); it is injected into every brief - consider trimming"
-  fi
-
   return "$rc"
 }
 
@@ -238,8 +221,6 @@ cmd_add_decision() {
   ' "$f" > "$tmp" || { rm -f "$tmp"; die "failed to rewrite $f"; }
   mv -f "$tmp" "$f"
   echo "recorded: $line"
-  # Validate after writing. A soft-cap warning is informational; a hard-cap
-  # failure returns non-zero so the caller curates, but the decision is kept.
   check_one "$project" || return 1
   return 0
 }

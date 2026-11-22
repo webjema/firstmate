@@ -9,9 +9,7 @@
 #   (b) brief on a PRESENT direction injects the body, drops the file's H1, and
 #       carries the conflict-escalation contract
 #   (c) init scaffolds the five required headings and refuses to overwrite
-#   (d) check enforces the headings, flags unfilled placeholders, and FAILS on a
-#       direction past the hard word cap - the cap is the whole reason the file
-#       stays readable, since it is paid on every dispatch
+#   (d) check enforces the headings and flags unfilled placeholders
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -137,24 +135,6 @@ Root-cause only.
   pass "check flags stubs and hard-fails a missing axis"
 }
 
-test_check_hard_fails_past_word_cap() {
-  local home out rc filler
-  home=$(make_home check_cap)
-
-  # The cap exists because the direction is injected into EVERY brief. A direction
-  # that grows into a design doc stops being read, which is the only failure that
-  # matters, so past the hard cap this must fail rather than warn.
-  filler=$(yes 'words words words words words words words words words words' | head -120)
-  write_direction "$home" acme "$VALID_BODY
-$filler"
-
-  rc=0
-  out=$(run_direction "$home" check acme) || rc=$?
-  [ "$rc" -ne 0 ] || fail "check: past the hard word cap must fail, not warn"
-  assert_contains "$out" 'DIRECTION_TOO_LONG' "check: names the over-length direction"
-  pass "check hard-fails a direction past the word cap"
-}
-
 test_check_reports_missing_direction_without_failing() {
   local home out rc
   home=$(make_home check_absent)
@@ -182,7 +162,7 @@ test_list_reports_projects() {
 }
 
 # (e) add-decision: the reliable, validated write path for a resolved decision
-# that the automatic capture flow uses instead of hand-editing the capped file.
+# that the automatic capture flow uses instead of hand-editing the file.
 
 test_add_decision_prepends_dated_line_newest_first() {
   local home out
@@ -284,7 +264,6 @@ test_brief_on_missing_direction_is_explicit
 test_brief_injects_body_and_contract
 test_init_scaffolds_and_refuses_overwrite
 test_check_flags_stub_and_missing_heading
-test_check_hard_fails_past_word_cap
 test_check_reports_missing_direction_without_failing
 test_list_reports_projects
 test_add_decision_prepends_dated_line_newest_first
