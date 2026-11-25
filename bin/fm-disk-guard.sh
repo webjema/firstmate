@@ -38,6 +38,9 @@
 #   warn      cheap, idempotent sweeps of things that are certainly garbage.
 #   critical  the warn set with tighter age windows, plus caches whose only cost of
 #             loss is rebuild time, plus the unleased-and-landed worktree sweep.
+#   The npm cache loses only files nobody wrote or read for N days, at both tiers -
+#   never the whole cache. Clearing all of it every critical run made the next
+#   installs refill it (~820M per run) and freed nothing for long.
 #
 # SAFETY MODEL, inherited from fm-scratch-reap.sh and extended.
 #   1. ALLOWLIST, NEVER PATTERN. Every path this script deletes is either built from
@@ -68,7 +71,10 @@
 #   FM_DISK_WARN_USED_PCT      default 85    used percentage at or above which warn fires
 #   FM_DISK_CRITICAL_USED_PCT  default 92    ... and critical
 #   FM_DISK_CACHES             default "npm tmpbuild playwright"
-#                              which cache families critical may clear; empty disables all
+#                              which cache families may be cleared; empty disables all
+#   FM_DISK_NPM_WARN_AGE_DAYS      default 7  npm cache files unused for more than this
+#                                  many days go at the warn tier
+#   FM_DISK_NPM_CRITICAL_AGE_DAYS  default 1  ... and at the critical tier
 #   FM_DISK_CDK_AGE_DAYS       default 3     age past which a cdk synth staging dir under
 #                              the tmp root is dead; raise it to keep them longer
 #   FM_DISK_TMP_ROOT           default /tmp  where the cdk sweep looks
@@ -91,6 +97,8 @@ WARN_USED_PCT="${FM_DISK_WARN_USED_PCT:-85}"
 CRIT_USED_PCT="${FM_DISK_CRITICAL_USED_PCT:-92}"
 CACHES="${FM_DISK_CACHES-npm tmpbuild playwright}"
 CDK_AGE_DAYS="${FM_DISK_CDK_AGE_DAYS:-3}"
+NPM_WARN_AGE_DAYS="${FM_DISK_NPM_WARN_AGE_DAYS:-7}"
+NPM_CRIT_AGE_DAYS="${FM_DISK_NPM_CRITICAL_AGE_DAYS:-1}"
 DISK_TMP="${FM_DISK_TMP_ROOT:-/tmp}"
 TREEHOUSE_ROOT="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
 DRY_RUN="${FM_DISK_DRY_RUN:-0}"
@@ -116,7 +124,7 @@ case "$FORCED_TIER" in
   ''|ok|warn|critical) ;;
   *) die "--tier must be ok, warn, or critical, got '$FORCED_TIER'" ;;
 esac
-for v in WARN_FREE_GB CRIT_FREE_GB WARN_USED_PCT CRIT_USED_PCT; do
+for v in WARN_FREE_GB CRIT_FREE_GB WARN_USED_PCT CRIT_USED_PCT NPM_WARN_AGE_DAYS NPM_CRIT_AGE_DAYS; do
   case "${!v}" in
     ''|*[!0-9]*) die "$v must be a non-negative integer, got '${!v}'" ;;
   esac
@@ -312,17 +320,51 @@ sweep_cdk_out() {
 }
 
 # ---------------------------------------------------------------------------
-# Sweep 3: package-manager and browser caches. Critical tier only: these cost real
-# time to rebuild (an npm cache refills over many installs, a Playwright bundle is a
-# multi-hundred-MB download), so they are the last thing traded away, not the first.
-# Only the _cacache payload is removed, never the cache directory's config.
+# Sweep 3: package-manager and browser caches.
+#
+# npm runs at both tiers but removes only the cache files that live installs no
+# longer use. Deleting the whole _cacache was tried and failed: every watcher ran it
+# every 15 minutes at critical, npm refilled the hot part before the next run, and
+# 257 of 304 runs on one box freed "~0M". Cold files are what a cache can give up
+# without a refill.
+#
+# A file goes only when BOTH its mtime and atime are older than <days>. Mounts are
+# usually relatime, where a read updates atime at most once a day; find's -atime +N
+# means "N+1 whole days or more", so a file read inside the window always survives.
+# A missing cacache entry is an ordinary npm cache miss, not corruption.
+#
+# Playwright stays whole-directory and critical-only: a browser bundle is useless in
+# part, and re-downloading it is the costliest rebuild here.
 # ---------------------------------------------------------------------------
-sweep_npm_caches() {
-  local d
+# The selection predicate has one definition, so the size count and the delete
+# cannot disagree about which files go.
+old_files_find() {  # <dir> <days> <find-action...>
+  local d=$1 days=$2
+  shift 2
+  find "$d" -xdev -type f -atime "+$days" -mtime "+$days" "$@" 2>/dev/null
+}
+
+reclaim_old_files() {  # <dir> <days> <reason>
+  local d=$1 days=$2 reason=$3 kb
+  [ -d "$d" ] || return 0
+  kb=$(old_files_find "$d" "$days" -exec du -k {} + | awk '{ s += $1 } END { printf "%d", s }')
+  [ "${kb:-0}" -gt 0 ] || return 0
+  if [ "$DRY_RUN" = 1 ] || [ "$REPORT_ONLY" = 1 ]; then
+    say "would remove files in $d unused for >${days}d (~$(( kb / 1024 ))M, $reason)"
+  else
+    old_files_find "$d" "$days" -delete || true
+    find "$d" -xdev -mindepth 1 -type d -empty -delete 2>/dev/null || true
+    say "removed files in $d unused for >${days}d (~$(( kb / 1024 ))M, $reason)"
+  fi
+  RECLAIMED_KB=$(( RECLAIMED_KB + kb ))
+  ACTIONS=$(( ACTIONS + 1 ))
+}
+
+sweep_npm_caches() {  # <days>
+  local days=$1 d
   cache_allowed npm || return 0
   for d in "$HOME"/.npm/_cacache "$HOME"/.npm-cache-*/_cacache; do
-    [ -d "$d" ] || continue
-    reclaim "$d" "npm cache, refills on next install"
+    reclaim_old_files "$d" "$days" "npm cache"
   done
 }
 
@@ -493,13 +535,14 @@ case "$TIER" in
     sweep_scratch 12
     sweep_tmp_build 1440
     sweep_cdk_out
+    sweep_npm_caches "$NPM_WARN_AGE_DAYS"
     sweep_treehouse 0
     ;;
   critical)
     sweep_scratch 6
     sweep_tmp_build 60
     sweep_cdk_out
-    sweep_npm_caches
+    sweep_npm_caches "$NPM_CRIT_AGE_DAYS"
     sweep_playwright
     sweep_treehouse 1
     ;;

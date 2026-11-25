@@ -19,6 +19,9 @@
 #   (k) cdk synth staging dirs past the age window are swept, and the window's near
 #       side is spared exactly - a 3-day-old dir survives a 3-day window, so the
 #       recently-finished work a user might still want to inspect is never taken
+#   (l) the npm sweep removes only files neither written nor read inside the window;
+#       the cache dir, recent files and recently-read files stay, because a wrong age
+#       rule empties a live cache on every run
 #
 # (c), (g) and (h) are the fail-closed rails. Each drives the guard through a stub
 # that makes one signal unavailable and asserts the guard DECLINES to act, because
@@ -309,6 +312,42 @@ test_cdk_sweep_is_silent_when_there_is_nothing_to_do() {
   pass "the cdk sweep says nothing when there is nothing to sweep"
 }
 
+# A HOME whose npm cache holds a cold file, a freshly written one, and an old one
+# that was read today - the last is what a write-only age rule would wrongly take.
+make_npm_home() {  # <name> -> echoes the HOME
+  local home="$TMP_ROOT/$1" c
+  c="$home/.npm/_cacache"
+  mkdir -p "$c/content-v2/aa" "$c/content-v2/bb" "$c/index-v5/cc"
+  head -c 200000 /dev/zero > "$c/content-v2/aa/cold"
+  echo x > "$c/content-v2/bb/fresh"
+  echo x > "$c/index-v5/cc/read-today"
+  touch -d "10 days ago" "$c/content-v2/aa/cold" "$c/index-v5/cc/read-today"
+  touch -a "$c/index-v5/cc/read-today"
+  printf '%s\n' "$home"
+}
+
+test_npm_sweep_takes_only_cold_files() {
+  local stubs home c out
+  stubs=$(make_tool_stubs npm)
+  home=$(make_npm_home npm-dry)
+  c="$home/.npm/_cacache"
+  out=$(PATH="$stubs:$PATH" HOME="$home" FM_DISK_CACHES=npm FM_TREEHOUSE_ROOT="$TMP_ROOT/absent" \
+        "$GUARD" --tier warn --dry-run 2>&1)
+  assert_contains "$out" "would remove files in $c unused for >7d (~0M, npm cache)" "--dry-run lists the cold file"
+  [ -f "$c/content-v2/aa/cold" ] || fail "--dry-run deleted an npm cache file"
+
+  home=$(make_npm_home npm-real)
+  c="$home/.npm/_cacache"
+  out=$(PATH="$stubs:$PATH" HOME="$home" FM_DISK_CACHES=npm FM_TREEHOUSE_ROOT="$TMP_ROOT/absent" \
+        "$GUARD" --tier critical 2>&1)
+  assert_contains "$out" "removed files in $c unused for >1d" "the critical tier reports what it removed"
+  [ -e "$c/content-v2/aa/cold" ] && fail "a file unused for 10 days survived"
+  [ -d "$c" ] || fail "the npm cache dir itself was deleted"
+  [ -f "$c/content-v2/bb/fresh" ] || fail "a freshly written cache file was deleted"
+  [ -f "$c/index-v5/cc/read-today" ] || fail "a cache file read today was deleted"
+  pass "the npm sweep removes only files unwritten and unread for the window"
+}
+
 test_bad_arguments_are_refused() {
   local rc=0
   "$GUARD" --tier nonsense >/dev/null 2>&1 || rc=$?
@@ -334,4 +373,5 @@ test_cache_families_are_gated
 test_cdk_staging_dirs_older_than_the_window_are_swept
 test_cdk_sweep_respects_dry_run_and_the_age_knob
 test_cdk_sweep_is_silent_when_there_is_nothing_to_do
+test_npm_sweep_takes_only_cold_files
 test_bad_arguments_are_refused
