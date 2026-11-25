@@ -331,6 +331,7 @@ sweep_cdk_out() {
 # A file goes only when BOTH its mtime and atime are older than <days>. Mounts are
 # usually relatime, where a read updates atime at most once a day; find's -atime +N
 # means "N+1 whole days or more", so a file read inside the window always survives.
+# A noatime mount breaks that assumption and turns this back into churn.
 # A missing cacache entry is an ordinary npm cache miss, not corruption.
 #
 # Playwright stays whole-directory and critical-only: a browser bundle is useless in
