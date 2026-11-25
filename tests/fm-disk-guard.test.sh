@@ -19,6 +19,9 @@
 #   (k) cdk synth staging dirs past the age window are swept, and the window's near
 #       side is spared exactly - a 3-day-old dir survives a 3-day window, so the
 #       recently-finished work a user might still want to inspect is never taken
+#   (l) the npm sweep removes only files neither written nor read inside the window;
+#       the cache dir, recent files and recently-read files stay, because a wrong age
+#       rule empties a live cache on every run
 #
 # (c), (g) and (h) are the fail-closed rails. Each drives the guard through a stub
 # that makes one signal unavailable and asserts the guard DECLINES to act, because
@@ -239,8 +242,11 @@ test_scratch_window_not_tightened_without_a_liveness_probe() {
 
 test_cache_families_are_gated() {
   local out
-  out=$(FM_DISK_CACHES='' FM_TREEHOUSE_ROOT="$TMP_ROOT/absent" \
-        "$GUARD" --tier critical --report-only 2>&1)
+  local home
+  home=$(make_npm_home npm-gated)
+  out=$(HOME="$home" FM_DISK_CACHES='' FM_TREEHOUSE_ROOT="$TMP_ROOT/absent" \
+        "$GUARD" --tier critical 2>&1)
+  [ -f "$home/.npm/_cacache/content-v2/aa/cold" ] || fail "an empty FM_DISK_CACHES still swept the npm cache"
   assert_not_contains "$out" "npm cache" "an empty FM_DISK_CACHES disables the npm family"
   assert_not_contains "$out" "playwright browsers" "an empty FM_DISK_CACHES disables playwright"
   pass "FM_DISK_CACHES gates each cache family"
@@ -309,6 +315,48 @@ test_cdk_sweep_is_silent_when_there_is_nothing_to_do() {
   pass "the cdk sweep says nothing when there is nothing to sweep"
 }
 
+# A HOME whose npm cache holds a 2M cold file, a 3M fresh one, a 3-day-old one inside
+# the warn window, and an old one read today - the last is what a write-only age rule
+# would wrongly take.
+make_npm_home() {  # <name> -> echoes the HOME
+  local home="$TMP_ROOT/$1" c
+  c="$home/.npm/_cacache"
+  mkdir -p "$c/content-v2/aa" "$c/content-v2/bb" "$c/index-v5/cc"
+  head -c 2097152 /dev/urandom > "$c/content-v2/aa/cold"
+  head -c 3145728 /dev/urandom > "$c/content-v2/bb/fresh"
+  echo x > "$c/content-v2/bb/three-days"
+  echo x > "$c/index-v5/cc/read-today"
+  touch -d "10 days ago" "$c/content-v2/aa/cold" "$c/index-v5/cc/read-today"
+  touch -d "3 days ago" "$c/content-v2/bb/three-days"
+  touch -a "$c/index-v5/cc/read-today"
+  printf '%s\n' "$home"
+}
+
+test_npm_sweep_takes_only_cold_files() {
+  local stubs home c out
+  stubs=$(make_tool_stubs npm)
+  home=$(make_npm_home npm-dry)
+  c="$home/.npm/_cacache"
+  out=$(PATH="$stubs:$PATH" HOME="$home" FM_DISK_CACHES=npm FM_TREEHOUSE_ROOT="$TMP_ROOT/absent" \
+        "$GUARD" --tier warn --dry-run 2>&1)
+  assert_contains "$out" "would remove files in $c unused for >7d (~2M," "--dry-run counts only the cold file"
+  [ -f "$c/content-v2/aa/cold" ] || fail "--dry-run deleted an npm cache file"
+
+  home=$(make_npm_home npm-real)
+  c="$home/.npm/_cacache"
+  PATH="$stubs:$PATH" HOME="$home" FM_DISK_CACHES=npm FM_TREEHOUSE_ROOT="$TMP_ROOT/absent" \
+    "$GUARD" --tier warn >/dev/null 2>&1
+  [ -e "$c/content-v2/aa/cold" ] && fail "a file unused for 10 days survived the warn tier"
+  [ -f "$c/content-v2/bb/three-days" ] || fail "a 3-day-old file was deleted inside the 7-day warn window"
+  PATH="$stubs:$PATH" HOME="$home" FM_DISK_CACHES=npm FM_TREEHOUSE_ROOT="$TMP_ROOT/absent" \
+    "$GUARD" --tier critical >/dev/null 2>&1
+  [ -e "$c/content-v2/bb/three-days" ] && fail "a 3-day-old file survived the 1-day critical window"
+  [ -d "$c" ] || fail "the npm cache dir itself was deleted"
+  [ -f "$c/content-v2/bb/fresh" ] || fail "a freshly written cache file was deleted"
+  [ -f "$c/index-v5/cc/read-today" ] || fail "a cache file read today was deleted"
+  pass "the npm sweep removes only files unwritten and unread for the window"
+}
+
 test_bad_arguments_are_refused() {
   local rc=0
   "$GUARD" --tier nonsense >/dev/null 2>&1 || rc=$?
@@ -334,4 +382,5 @@ test_cache_families_are_gated
 test_cdk_staging_dirs_older_than_the_window_are_swept
 test_cdk_sweep_respects_dry_run_and_the_age_knob
 test_cdk_sweep_is_silent_when_there_is_nothing_to_do
+test_npm_sweep_takes_only_cold_files
 test_bad_arguments_are_refused
